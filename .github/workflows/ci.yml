@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: "Python ${{ matrix.python-version }} / macOS ${{ matrix.macos-version }}"
+    runs-on: ${{ matrix.macos-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+        macos-version: ["macos-13", "macos-14", "macos-15"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package (editable)
+        run: pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check src/ tests/
+
+      - name: Tests
+        run: pytest tests/ -v --tb=short
+
+  contract-test:
+    name: "Plugin contract test (entry-point + RegistrationContext)"
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install both packages
+        run: |
+          pip install -e ".[dev]"
+          # Verify entry-point is discoverable by importlib.metadata
+          python -c "
+          from importlib.metadata import entry_points
+          eps = list(entry_points(group='asiai.subcommands'))
+          assert eps, 'No asiai.subcommands entry points found'
+          ep = eps[0]
+          register = ep.load()
+          import argparse
+          p = argparse.ArgumentParser()
+          sub = p.add_subparsers()
+          cmds = {}
+          register(sub, cmds)
+          assert 'engine' in cmds, f'engine not in commands: {list(cmds)}'
+          print(f'Contract test passed — entry point: {ep.name}, commands: {list(cmds)}')
+          "
