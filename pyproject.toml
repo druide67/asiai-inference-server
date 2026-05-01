@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asiai-inference-server"
+version = "0.0.1"
+description = "Fleet manager for local LLM inference engines on Apple Silicon"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "Jean-Marc Nahlovsky", email = "druide67@free.fr" }]
+keywords = [
+    "llm",
+    "apple-silicon",
+    "inference",
+    "fleet",
+    "ollama",
+    "lmstudio",
+    "mlx",
+    "macos",
+    "mcp",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "asiai>=1.5.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.12"]
+dev = ["pytest>=8.0", "ruff>=0.6", "pytest-cov>=5.0"]
+
+[project.scripts]
+aisctl = "ais_cli.__main__:main"
+
+[project.entry-points."asiai.subcommands"]
+engine = "ais_cli.as_subcmd:register"
+
+[project.entry-points."asiai.mcp.tools"]
+inference_server = "ais_mcp.tools:register"
+
+[project.urls]
+Homepage = "https://asiai.dev"
+Documentation = "https://asiai.dev/inference-server/"
+Repository = "https://github.com/druide67/asiai-inference-server"
+Issues = "https://github.com/druide67/asiai-inference-server/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ais_core", "src/ais_engines", "src/ais_cli"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"data/engine_manifests" = "ais_core/data/engine_manifests"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"

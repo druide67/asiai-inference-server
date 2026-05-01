@@ -1,0 +1,48 @@
+# Engine manifest — Ollama
+# Ported from openclaw-macos-hardened/inference-servers/ollama/engine.conf
+
+name = "ollama"
+display = "Ollama"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/ollama",
+    "/usr/local/bin/ollama",
+]
+process_pattern = "ollama"
+program_args = ["serve"]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.ollama"
+throttle_interval = 10
+timeout = 30
+
+[network]
+port = 11434
+# bind is intentionally empty: Ollama listens on whatever OLLAMA_HOST resolves to.
+bind = ""
+health_endpoint = "/api/version"
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.ollama"
+
+[logs]
+dir = "/var/log/ollama"
+stdout = "ollama.log"
+stderr = "ollama.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = [
+    "OLLAMA_HOST=0.0.0.0:11434",
+    "OLLAMA_ORIGINS=http://192.168.0.0/16",
+    "OLLAMA_KEEP_ALIVE=-1",
+    "OLLAMA_FLASH_ATTENTION=1",
+    "OLLAMA_NUM_PARALLEL=1",
+    "OLLAMA_MAX_LOADED_MODELS=3",
+]

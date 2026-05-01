@@ -1,0 +1,44 @@
+# Engine manifest — oMLX
+# Ported from openclaw-macos-hardened/inference-servers/omlx/engine.conf
+
+name = "omlx"
+display = "oMLX"
+
+[binary]
+candidates = [
+    "/opt/homebrew/opt/omlx/bin/omlx",
+    "/opt/homebrew/bin/omlx",
+    "/usr/local/bin/omlx",
+]
+process_pattern = "omlx serve"
+program_args = ["serve"]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.omlx"
+throttle_interval = 15
+timeout = 30
+
+[network]
+port = 8800
+bind = "0.0.0.0"
+health_endpoint = "/v1/models"
+health_timeout = 20
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.omlx"
+
+[logs]
+dir = "/var/log/omlx"
+stdout = "omlx-stdout.log"
+stderr = "omlx-stderr.log"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []
+
+[options]
+log_level = "info"

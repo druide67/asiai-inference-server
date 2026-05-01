@@ -1,0 +1,48 @@
+# Engine manifest — LM Studio
+# Ported from openclaw-macos-hardened/inference-servers/lmstudio/engine.conf
+
+name = "lmstudio"
+display = "LM Studio"
+
+[binary]
+# Path with ~ is expanded via os.path.expanduser at load time.
+candidates = [
+    "~/.lmstudio/bin/lms",
+    "/usr/local/bin/lms",
+    "/opt/homebrew/bin/lms",
+]
+process_pattern = "lmstudio-server-start"
+program_args = []
+builds_from_source = false
+
+[plist]
+name = "com.asiai.lmstudio"
+throttle_interval = 15
+timeout = 60
+
+[network]
+port = 1234
+bind = "0.0.0.0"
+health_endpoint = "/v1/models"
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.lmstudio"
+
+[logs]
+dir = "/var/log/lmstudio"
+stdout = "launchd-stdout.log"
+stderr = "launchd-stderr.log"
+
+[wrapper]
+# LM Studio needs a multi-step shell wrapper (lms server start --headless).
+needed = true
+install_path = "/usr/local/bin/lmstudio-server-start"
+
+[environment]
+vars = []
+
+[options]
+# Optional model name to autoload at server start (passed as `lms server start --model <name>`).
+auto_load_model = ""

@@ -1,0 +1,49 @@
+# Engine manifest — TurboQuant
+# Ported from openclaw-macos-hardened/inference-servers/turboquant/engine.conf
+#
+# Fork: https://github.com/TheTom/llama-cpp-turboquant
+# Branch: feature/turboquant-kv-cache
+# KV cache asymétrique: keys q8_0 + values turbo3 (5x compression).
+# Permet Llama 70B à ~6.3 tok/s sur M4 Pro 64 Go.
+
+name = "turboquant"
+display = "TurboQuant (llama.cpp KV turbo)"
+
+[binary]
+candidates = [
+    "/usr/local/bin/llama-server-turboquant",
+]
+process_pattern = "llama-server-turboquant"
+program_args = []
+# Built locally by engine_pre_setup hook, not pre-installed via brew/pip.
+builds_from_source = true
+
+[plist]
+name = "com.asiai.turboquant"
+throttle_interval = 15
+timeout = 60
+
+[network]
+port = 8081
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 120s because TurboQuant cold-starts a 70B model from disk, which is slow.
+health_timeout = 120
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.turboquant"
+
+[logs]
+dir = "/var/log/turboquant"
+stdout = "turboquant.log"
+stderr = "turboquant.err"
+
+[wrapper]
+# Multi-step shell wrapper: sysctl iogpu.wired_limit_mb + llama-server with turbo args.
+needed = true
+template = "wrapper-start.sh.tpl"
+install_path = "/usr/local/bin/turboquant-start"
+
+[environment]
+vars = []
