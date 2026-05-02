@@ -14,21 +14,22 @@ to breakage on values containing quotes or angle brackets.
 
 Atomic write
 ------------
-We always render to a tempfile under ``/tmp`` and ``mv`` it under sudo to the
-final ``/Library/LaunchDaemons/`` path. This avoids leaving a half-written
-plist if the process is killed mid-write — a partial plist makes ``launchctl``
-choke and refuse to load the service.
+We render to a per-invocation 0700 staging directory under ``/tmp`` (see
+:mod:`ais_core.io`) and ``mv`` the file under sudo to the final
+``/Library/LaunchDaemons/`` path. The 0700 staging dir prevents a local
+attacker from swapping the source for a symlink between the write and the
+privileged move (TOCTOU). Atomic ``mv`` also avoids leaving a half-written
+plist if the process is killed mid-write.
 """
 
 from __future__ import annotations
 
-import contextlib
 import os
 import plistlib
 import subprocess
-import tempfile
 from pathlib import Path
 
+from ais_core.io import secure_staging_dir
 from ais_core.manifest import EngineManifest, is_valid_plist_label
 
 LAUNCH_DAEMONS_DIR = "/Library/LaunchDaemons"
@@ -160,28 +161,18 @@ def write_plist(
         print("--- end plist ---")
         return dst
 
-    with tempfile.NamedTemporaryFile(
-        prefix=f"{manifest.plist.name}.",
-        suffix=".plist",
-        dir="/tmp",
-        delete=False,
-    ) as tmp:
-        tmp.write(xml_bytes)
-        tmp_path = tmp.name
-
-    try:
-        os.chmod(tmp_path, 0o644)
-        subprocess.run(["sudo", "/bin/mv", tmp_path, dst], check=True)
-        subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", dst], check=True)
-        subprocess.run(["sudo", "/bin/chmod", "644", dst], check=True)
-    except subprocess.CalledProcessError as e:
-        # Clean up temp file if the move never happened.
-        if Path(tmp_path).exists():
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_path)
-        raise PlistError(
-            f"Failed to install plist at {dst}: {e.cmd} returned {e.returncode}"
-        ) from e
+    with secure_staging_dir() as staging:
+        tmp_path = staging / f"{manifest.plist.name}.plist"
+        tmp_path.write_bytes(xml_bytes)
+        tmp_path.chmod(0o644)
+        try:
+            subprocess.run(["sudo", "/bin/mv", str(tmp_path), dst], check=True)
+            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", dst], check=True)
+            subprocess.run(["sudo", "/bin/chmod", "644", dst], check=True)
+        except subprocess.CalledProcessError as e:
+            raise PlistError(
+                f"Failed to install plist at {dst}: {e.cmd} returned {e.returncode}"
+            ) from e
     return dst
 
 

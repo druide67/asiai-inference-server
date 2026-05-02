@@ -165,7 +165,6 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
         ], "cmd_install"),
         ("uninstall", "Remove an engine.", [
             (("engine",), {}),
-            (("--keep-logs",), {"action": "store_true"}),
             (("--dry-run",), {"action": "store_true"}),
             (("--force",), {"action": "store_true"}),
             (("--json",), {"action": "store_true"}),

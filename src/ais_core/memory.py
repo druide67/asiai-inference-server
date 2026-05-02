@@ -282,7 +282,9 @@ class OperationsLock:
 
     def acquire(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o644)
+        # 0o600 — the file holds only a PID for repair() to consult, but the
+        # principle of least privilege says no other local user needs to read it.
+        self._fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as e:

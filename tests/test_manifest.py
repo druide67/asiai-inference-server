@@ -133,6 +133,54 @@ def test_env_var_must_be_key_value() -> None:
         _from_dict(raw, source="<test>")
 
 
+# ---------------------------------------------------------------------------
+# process_pattern validation (H2 — DoS via pgrep -f regex)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_pattern",
+    [
+        ".",                  # matches every cmdline
+        ".*",                 # explicit greedy
+        ".*sshd",             # would target sshd
+        "(ollama|sshd)",      # alternation
+        "ollama|sshd",        # alternation no parens
+        "[a-z]+",             # char class
+        "ollama\\s",          # backslash escape
+        "ollama$",            # anchor
+        "^ollama",            # anchor start
+        "ollama?",            # quantifier
+        "0lookups",           # leading digit (we require leading letter)
+        "",                   # empty
+        " ollama",            # leading space
+        "ollama ",            # trailing space
+    ],
+)
+def test_dangerous_process_pattern_rejected(bad_pattern: str) -> None:
+    raw = _read_minimal_dict()
+    raw["binary"]["process_pattern"] = bad_pattern
+    with pytest.raises(ManifestError, match="process_pattern"):
+        _from_dict(raw, source="<test>")
+
+
+@pytest.mark.parametrize(
+    "good_pattern",
+    [
+        "ollama",
+        "lmstudio-server-start",
+        "llama-server-turboquant",
+        "omlx serve",
+        "a/b/c",
+        "engine.bin",
+    ],
+)
+def test_safe_process_pattern_accepted(good_pattern: str) -> None:
+    raw = _read_minimal_dict()
+    raw["binary"]["process_pattern"] = good_pattern
+    _from_dict(raw, source="<test>")  # must not raise
+
+
 def test_missing_required_section_rejected() -> None:
     raw = _read_minimal_dict()
     del raw["network"]

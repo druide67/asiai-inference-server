@@ -145,13 +145,21 @@ def test_install_unhealthy_returns_nonzero() -> None:
     assert rc == 2
 
 
-def test_uninstall_passes_keep_logs() -> None:
+def test_uninstall_passes_dry_run() -> None:
     with patch("ais_cli.commands.lifecycle.uninstall", return_value={}) as m, \
          patch("ais_cli.commands.memory.OperationsLock") as mock_lock:
         mock_lock.return_value.__enter__.return_value = mock_lock.return_value
-        rc = main(["uninstall", "ollama", "--keep-logs"])
+        rc = main(["uninstall", "ollama", "--dry-run"])
     assert rc == 0
-    assert m.call_args.kwargs["keep_logs"] is True
+    assert m.call_args.kwargs["dry_run"] is True
+    assert "keep_logs" not in m.call_args.kwargs
+
+
+def test_uninstall_no_keep_logs_flag() -> None:
+    """--keep-logs was removed in v0.1; ensure argparse rejects it."""
+    with patch("ais_cli.commands.memory.OperationsLock"), \
+         pytest.raises(SystemExit):
+        main(["uninstall", "ollama", "--keep-logs"])
 
 
 # ---------------------------------------------------------------------------

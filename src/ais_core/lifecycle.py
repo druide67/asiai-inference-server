@@ -108,13 +108,14 @@ def install(
     }
 
 
-def uninstall(
-    manifest: EngineManifest,
-    *,
-    keep_logs: bool = True,
-    dry_run: bool = False,
-) -> dict:
-    """Tear down an engine: stop daemon, remove plist, remove pf anchor."""
+def uninstall(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
+    """Tear down an engine: stop daemon, remove plist, remove pf anchor.
+
+    Log files in ``manifest.logs.dir`` are left untouched. If a future user
+    needs log purging on uninstall, surface it as a separate command rather
+    than a flag on ``uninstall`` (irreversible side effects don't belong on
+    a removal verb the operator may run by reflex).
+    """
     stop(manifest, dry_run=dry_run)
     plist_removed = plist.remove_plist(manifest, dry_run=dry_run)
     fw_changed = (
@@ -127,7 +128,6 @@ def uninstall(
         "engine": manifest.name,
         "plist_removed": plist_removed,
         "firewall_removed": fw_changed,
-        "logs_kept": keep_logs,
         "dry_run": dry_run,
     }
 

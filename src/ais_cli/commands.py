@@ -139,9 +139,7 @@ def cmd_install(args: argparse.Namespace) -> int:
 def cmd_uninstall(args: argparse.Namespace) -> int:
     m = _resolve_manifest(args.engine)
     with memory.OperationsLock(force=args.force):
-        result = lifecycle.uninstall(
-            m, keep_logs=args.keep_logs, dry_run=args.dry_run
-        )
+        result = lifecycle.uninstall(m, dry_run=args.dry_run)
     _emit(result, as_json=args.json)
     return 0
 

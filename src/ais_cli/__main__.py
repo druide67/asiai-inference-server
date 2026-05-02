@@ -59,7 +59,6 @@ def build_parser() -> argparse.ArgumentParser:
     # uninstall
     p_uninstall = sub.add_parser("uninstall", help="Remove the LaunchDaemon + pf anchor.")
     p_uninstall.add_argument("engine")
-    p_uninstall.add_argument("--keep-logs", action="store_true")
     p_uninstall.add_argument("--dry-run", action="store_true")
     p_uninstall.add_argument("--force", action="store_true")
     p_uninstall.add_argument("--json", action="store_true")

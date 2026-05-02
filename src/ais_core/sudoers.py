@@ -19,11 +19,10 @@ explicitly recommend ``visudo`` for this reason. The Bash version
 
 from __future__ import annotations
 
-import contextlib
 import subprocess
-import tempfile
 from pathlib import Path
 
+from ais_core.io import secure_staging_dir
 from ais_core.manifest import EngineManifest
 
 SUDOERS_PATH = "/etc/sudoers.d/asiai-inference"
@@ -69,11 +68,17 @@ def generate_sudoers_content(manifests: list[EngineManifest] | None = None) -> s
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /sbin/pfctl -e",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /sbin/pfctl -nf -",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mkdir -p /etc/pf.anchors",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/com.asiai.* "
+        # Source paths are scoped to /tmp/asiai-*/ — a per-invocation 0700
+        # staging directory created by ais_core.io.secure_staging_dir().
+        # The directory's mode 0700 collapses the symlink-swap TOCTOU window
+        # that would otherwise exist between file creation and `sudo /bin/mv`.
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/asiai-*/com.asiai.*.plist "
         "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/com.asiai.* "
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/asiai-*/com.asiai.*.anchor "
         "/etc/pf.anchors/com.asiai.*",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/pf.conf.* /etc/pf.conf",
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/asiai-*/pf.conf /etc/pf.conf",
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv "
+        "/tmp/asiai-*/asiai-inference.sudoers /etc/sudoers.d/asiai-inference",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/chown root\\:wheel "
         "/Library/LaunchDaemons/com.asiai.*.plist",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/chown root\\:wheel "
@@ -98,20 +103,12 @@ def validate_content(content: str) -> None:
     Writes to a private tempfile (``visudo -cf`` only accepts paths, not stdin)
     and removes it whether validation succeeds or not.
     """
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        prefix="asiai-inference.",
-        suffix=".sudoers",
-        dir="/tmp",
-        delete=False,
-    ) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    try:
-        Path(tmp_path).chmod(0o440)
+    with secure_staging_dir() as staging:
+        tmp_path = staging / "asiai-inference.sudoers"
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.chmod(0o440)
         proc = subprocess.run(
-            ["/usr/sbin/visudo", "-cf", tmp_path],
+            ["/usr/sbin/visudo", "-cf", str(tmp_path)],
             check=False,
             capture_output=True,
             text=True,
@@ -121,9 +118,6 @@ def validate_content(content: str) -> None:
                 f"visudo rejected sudoers content:\n"
                 f"{(proc.stderr or proc.stdout).strip()}"
             )
-    finally:
-        with contextlib.suppress(OSError):
-            Path(tmp_path).unlink()
 
 
 def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str:
@@ -143,26 +137,24 @@ def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str
 
     validate_content(content)
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        prefix="asiai-inference.",
-        suffix=".sudoers",
-        dir="/tmp",
-        delete=False,
-    ) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    try:
-        Path(tmp_path).chmod(0o440)
-        subprocess.run(["sudo", "/bin/mv", tmp_path, SUDOERS_PATH], check=True)
-        subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_PATH], check=True)
-        subprocess.run(["sudo", "/bin/chmod", "440", SUDOERS_PATH], check=True)
-    except subprocess.CalledProcessError as e:
-        if Path(tmp_path).exists():
-            with contextlib.suppress(OSError):
-                Path(tmp_path).unlink()
-        raise SudoersError(f"Failed to install {SUDOERS_PATH}: {e}") from e
+    with secure_staging_dir() as staging:
+        tmp_path = staging / "asiai-inference.sudoers"
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.chmod(0o440)
+        try:
+            subprocess.run(
+                ["sudo", "/bin/mv", str(tmp_path), SUDOERS_PATH], check=True
+            )
+            subprocess.run(
+                ["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_PATH], check=True
+            )
+            subprocess.run(
+                ["sudo", "/bin/chmod", "440", SUDOERS_PATH], check=True
+            )
+        except subprocess.CalledProcessError as e:
+            raise SudoersError(
+                f"Failed to install {SUDOERS_PATH}: {e}"
+            ) from e
 
     return SUDOERS_PATH
 

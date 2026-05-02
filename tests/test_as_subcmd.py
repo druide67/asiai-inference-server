@@ -116,7 +116,7 @@ def test_register_with_unknown_signature_raises_typeerror() -> None:
         ["engine", "status", "ollama", "--json"],
         ["engine", "install", "ollama", "--firewall", "lan-only", "--user", "jmn"],
         ["engine", "install", "ollama", "--dry-run", "--force"],
-        ["engine", "uninstall", "ollama", "--keep-logs"],
+        ["engine", "uninstall", "ollama", "--dry-run"],
         ["engine", "start", "ollama"],
         ["engine", "stop", "ollama", "--dry-run"],
         ["engine", "restart", "ollama"],

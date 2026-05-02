@@ -39,6 +39,15 @@ from pathlib import Path
 PLIST_LABEL_RE = re.compile(r"^com\.asiai\.[a-z0-9-]+$")
 ANCHOR_NAME_RE = re.compile(r"^com\.asiai\.[a-z0-9-]+$")
 
+# process_pattern is passed verbatim to ``pgrep -f`` / ``pkill -f``, which
+# interpret it as an extended regex over the full cmdline of every running
+# process. A lax pattern (e.g. ``"."``) would match everything on the system
+# and turn ``aisctl engine stop`` into a fleet-wide kill. We therefore require
+# a literal-looking string: alphanumerics plus a small set of safe punctuation
+# (slash, underscore, dash, dot, space) — none of which carry regex meaning
+# *as a whole class*, and a leading letter so a manifest can't ship ``"."``.
+PROCESS_PATTERN_RE = re.compile(r"^[A-Za-z](?:[A-Za-z0-9/_. -]*[A-Za-z0-9])?$")
+
 
 class ManifestError(ValueError):
     """Raised when a manifest is malformed or violates a hard constraint."""
@@ -251,6 +260,14 @@ def _validate(m: EngineManifest, *, source: str) -> None:
 
     if not m.binary.candidates:
         raise ManifestError(f"{source}: binary.candidates is empty")
+
+    if not PROCESS_PATTERN_RE.match(m.binary.process_pattern):
+        raise ManifestError(
+            f"{source}: binary.process_pattern {m.binary.process_pattern!r} contains "
+            "characters that pgrep/pkill -f would interpret as regex metacharacters; "
+            "only alphanumerics, '/', '_', '-', '.', and spaces are allowed, with "
+            "a leading letter."
+        )
 
     for var in m.env_vars:
         if "=" not in var:

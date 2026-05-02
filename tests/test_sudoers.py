@@ -39,8 +39,9 @@ def test_content_scope_is_strict_com_asiai_only() -> None:
         # iogpu.wired_limit_mb=* is a sysctl key=*VALUE wildcard, not a path one.
         if "iogpu.wired_limit_mb" in line:
             continue
-        # /tmp/com.asiai.* and /tmp/pf.conf.* are tempfile sources, scoped to our prefix.
-        if "/tmp/com.asiai." in line or "/tmp/pf.conf." in line:
+        # /tmp/asiai-*/ tempfile sources are scoped to our per-invocation
+        # 0700 staging directories (see ais_core.io.secure_staging_dir).
+        if "/tmp/asiai-" in line:
             continue
         assert "com.asiai." in line, f"unscoped rule with wildcard: {line!r}"
 

@@ -20,12 +20,11 @@ anchor into pf.conf.
 
 from __future__ import annotations
 
-import contextlib
 import re
 import subprocess
-import tempfile
 from pathlib import Path
 
+from ais_core.io import secure_staging_dir
 from ais_core.manifest import ANCHOR_NAME_RE, EngineManifest
 
 PF_CONF_PATH = "/etc/pf.conf"
@@ -124,28 +123,18 @@ def install_anchor(
 
     validate_anchor(content)
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        prefix=f"{manifest.firewall.anchor_name}.",
-        suffix=".anchor",
-        dir="/tmp",
-        delete=False,
-    ) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    try:
-        subprocess.run(
-            ["sudo", "/bin/mkdir", "-p", PF_ANCHORS_DIR], check=True
-        )
-        subprocess.run(["sudo", "/bin/mv", tmp_path, dst], check=True)
-        subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", dst], check=True)
-        subprocess.run(["sudo", "/bin/chmod", "644", dst], check=True)
-    except subprocess.CalledProcessError as e:
-        if Path(tmp_path).exists():
-            with contextlib.suppress(OSError):
-                Path(tmp_path).unlink()
-        raise FirewallError(f"Failed to install anchor {dst}: {e}") from e
+    with secure_staging_dir() as staging:
+        tmp_path = staging / f"{manifest.firewall.anchor_name}.anchor"
+        tmp_path.write_text(content, encoding="utf-8")
+        try:
+            subprocess.run(
+                ["sudo", "/bin/mkdir", "-p", PF_ANCHORS_DIR], check=True
+            )
+            subprocess.run(["sudo", "/bin/mv", str(tmp_path), dst], check=True)
+            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", dst], check=True)
+            subprocess.run(["sudo", "/bin/chmod", "644", dst], check=True)
+        except subprocess.CalledProcessError as e:
+            raise FirewallError(f"Failed to install anchor {dst}: {e}") from e
 
     _ensure_anchor_in_pf_conf(manifest.firewall.anchor_name)
     _reload_pf()
@@ -202,27 +191,23 @@ def _ensure_anchor_in_pf_conf(name: str) -> None:
 
 
 def _atomic_write_pf_conf(new_text: str) -> None:
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        prefix="pf.conf.",
-        suffix=".tmp",
-        dir="/tmp",
-        delete=False,
-    ) as tmp:
-        tmp.write(new_text)
-        tmp_path = tmp.name
-
-    try:
-        subprocess.run(["sudo", "/bin/mv", tmp_path, PF_CONF_PATH], check=True)
-        subprocess.run(
-            ["sudo", "/usr/sbin/chown", "root:wheel", PF_CONF_PATH], check=True
-        )
-        subprocess.run(["sudo", "/bin/chmod", "644", PF_CONF_PATH], check=True)
-    except subprocess.CalledProcessError as e:
-        if Path(tmp_path).exists():
-            with contextlib.suppress(OSError):
-                Path(tmp_path).unlink()
-        raise FirewallError(f"Failed to update {PF_CONF_PATH}: {e}") from e
+    with secure_staging_dir() as staging:
+        tmp_path = staging / "pf.conf"
+        tmp_path.write_text(new_text, encoding="utf-8")
+        try:
+            subprocess.run(
+                ["sudo", "/bin/mv", str(tmp_path), PF_CONF_PATH], check=True
+            )
+            subprocess.run(
+                ["sudo", "/usr/sbin/chown", "root:wheel", PF_CONF_PATH], check=True
+            )
+            subprocess.run(
+                ["sudo", "/bin/chmod", "644", PF_CONF_PATH], check=True
+            )
+        except subprocess.CalledProcessError as e:
+            raise FirewallError(
+                f"Failed to update {PF_CONF_PATH}: {e}"
+            ) from e
 
 
 def _reload_pf() -> None:
