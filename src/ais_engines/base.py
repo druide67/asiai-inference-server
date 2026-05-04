@@ -23,9 +23,67 @@ exactly what happened: ``"api"`` (clean), ``"restart"`` (full bounce),
 from __future__ import annotations
 
 import dataclasses
+import importlib
+import logging
 
 from ais_core import lifecycle
 from ais_core.manifest import EngineManifest
+
+logger = logging.getLogger(__name__)
+
+
+def make_asiai_engine_proxy(
+    manifest: EngineManifest,
+    *,
+    module: str,
+    class_name: str,
+) -> object | None:
+    """Build the asiai engine wrapper for a driver, or None if unavailable.
+
+    Replaces the four near-identical ``_build_asiai_engine`` helpers that used
+    to live in each driver module. None is returned (rather than raising) so
+    that a missing or broken asiai install drops the driver to restart-only
+    mode instead of breaking the whole CLI.
+
+    Failure paths are *logged*, not silenced (Q4 audit fix): if asiai is
+    present but the engine class can't be instantiated, the operator sees
+    why their driver fell back to restart-only.
+    """
+    try:
+        engine_module = importlib.import_module(module)
+        cls = getattr(engine_module, class_name)
+    except (ImportError, AttributeError):
+        # asiai not installed at all — silent is fine, this is the documented
+        # "dev environment without asiai" path.
+        return None
+
+    base_url = f"http://127.0.0.1:{manifest.network.port}"
+    try:
+        return cls(base_url=base_url)
+    except TypeError:
+        # asiai's constructor signature may have evolved — try the no-arg form.
+        try:
+            return cls()
+        except Exception as exc:
+            logger.warning(
+                "asiai %s.%s instantiation failed: %s — driver will use "
+                "restart-only fallback for unload", module, class_name, exc,
+            )
+            return None
+    except Exception as exc:
+        logger.warning(
+            "asiai %s.%s base_url constructor failed: %s — falling back to no-arg",
+            module, class_name, exc,
+        )
+        try:
+            return cls()
+        except Exception as exc2:
+            logger.warning(
+                "asiai %s.%s no-arg constructor also failed: %s — driver "
+                "will use restart-only fallback for unload",
+                module, class_name, exc2,
+            )
+            return None
 
 
 @dataclasses.dataclass(frozen=True)

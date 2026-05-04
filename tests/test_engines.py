@@ -205,7 +205,7 @@ def test_ollama_driver_is_not_restart_only() -> None:
 
 def test_factories_dont_explode_when_asiai_engine_missing() -> None:
     """If asiai is not installed, factories must still return a working driver."""
-    with patch("ais_engines.ollama._build_asiai_engine", return_value=None):
+    with patch("ais_engines.ollama.make_asiai_engine_proxy", return_value=None):
         driver = OllamaDriver.from_manifest()
     assert driver.asiai_engine is None
     # restart fallback still works:
@@ -217,15 +217,54 @@ def test_factories_dont_explode_when_asiai_engine_missing() -> None:
 
 def test_factories_handle_engine_constructor_typeerror() -> None:
     """If asiai's engine constructor signature changes, fall back to no-arg."""
+    from ais_engines.base import make_asiai_engine_proxy
+
     fake_engine_cls = MagicMock(side_effect=[TypeError("base_url unsupported"),
                                               _FakeEngineWithUnload()])
     with patch.dict(
         "sys.modules",
         {"asiai.engines.ollama": MagicMock(OllamaEngine=fake_engine_cls)},
     ):
-        # Re-run the helper to exercise the fallback branch.
-        from ais_engines.ollama import _build_asiai_engine
-        engine = _build_asiai_engine(load_manifest("ollama"))
+        engine = make_asiai_engine_proxy(
+            load_manifest("ollama"),
+            module="asiai.engines.ollama",
+            class_name="OllamaEngine",
+        )
 
     assert fake_engine_cls.call_count == 2
     assert engine is not None
+
+
+def test_make_asiai_engine_proxy_returns_none_when_module_missing() -> None:
+    """ImportError path is silent (documented dev environment without asiai)."""
+    from ais_engines.base import make_asiai_engine_proxy
+
+    engine = make_asiai_engine_proxy(
+        load_manifest("ollama"),
+        module="nonexistent_package_xyz",
+        class_name="Whatever",
+    )
+    assert engine is None
+
+
+def test_make_asiai_engine_proxy_logs_warning_on_construction_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Q4 audit fix — silent constructor failures must surface in logs."""
+    import logging
+
+    from ais_engines.base import make_asiai_engine_proxy
+
+    fake_cls = MagicMock(side_effect=[TypeError("base_url"), RuntimeError("noargs too")])
+    with caplog.at_level(logging.WARNING, logger="ais_engines.base"), patch.dict(
+        "sys.modules",
+        {"asiai.engines.ollama": MagicMock(OllamaEngine=fake_cls)},
+    ):
+        engine = make_asiai_engine_proxy(
+            load_manifest("ollama"),
+            module="asiai.engines.ollama",
+            class_name="OllamaEngine",
+        )
+
+    assert engine is None
+    assert any("restart-only fallback" in rec.message for rec in caplog.records)

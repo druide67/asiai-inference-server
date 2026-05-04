@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ais_core.manifest import EngineManifest, load_manifest
-from ais_engines.base import EngineDriver
+from ais_engines.base import EngineDriver, make_asiai_engine_proxy
 
 
 class LMStudioDriver(EngineDriver):
@@ -16,20 +16,7 @@ class LMStudioDriver(EngineDriver):
     @classmethod
     def from_manifest(cls, manifest: EngineManifest | None = None) -> LMStudioDriver:
         m = manifest if manifest is not None else load_manifest("lmstudio")
-        engine = _build_asiai_engine(m)
+        engine = make_asiai_engine_proxy(
+            m, module="asiai.engines.lmstudio", class_name="LMStudioEngine"
+        )
         return cls(m, engine)
-
-
-def _build_asiai_engine(manifest: EngineManifest) -> object | None:
-    try:
-        from asiai.engines.lmstudio import LMStudioEngine  # type: ignore[import-not-found]
-    except ImportError:
-        return None
-    base_url = f"http://127.0.0.1:{manifest.network.port}"
-    try:
-        return LMStudioEngine(base_url=base_url)
-    except TypeError:
-        try:
-            return LMStudioEngine()
-        except Exception:
-            return None

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ais_core.manifest import EngineManifest, load_manifest
-from ais_engines.base import EngineDriver
+from ais_engines.base import EngineDriver, make_asiai_engine_proxy
 
 
 class OllamaDriver(EngineDriver):
@@ -17,27 +17,7 @@ class OllamaDriver(EngineDriver):
     @classmethod
     def from_manifest(cls, manifest: EngineManifest | None = None) -> OllamaDriver:
         m = manifest if manifest is not None else load_manifest("ollama")
-        engine = _build_asiai_engine(m)
+        engine = make_asiai_engine_proxy(
+            m, module="asiai.engines.ollama", class_name="OllamaEngine"
+        )
         return cls(m, engine)
-
-
-def _build_asiai_engine(manifest: EngineManifest) -> object | None:
-    """Construct the asiai engine wrapper if asiai is importable.
-
-    We import lazily so a user who installs asiai-inference-server in an
-    environment without asiai (rare but possible during dev) still gets
-    restart-fallback unload, just no API path.
-    """
-    try:
-        from asiai.engines.ollama import OllamaEngine  # type: ignore[import-not-found]
-    except ImportError:
-        return None
-    base_url = f"http://127.0.0.1:{manifest.network.port}"
-    try:
-        return OllamaEngine(base_url=base_url)
-    except TypeError:
-        # asiai's constructor may evolve; fall back to the no-arg form.
-        try:
-            return OllamaEngine()
-        except Exception:
-            return None
