@@ -10,17 +10,21 @@ jobs:
   test:
     name: "Python ${{ matrix.python-version }} / macOS ${{ matrix.macos-version }}"
     runs-on: ${{ matrix.macos-version }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        # macOS 13 (Ventura) runners no longer available on GH Actions hosted pool
+        # as of May 2026 — jobs queue indefinitely and get cancelled at 24h. Only
+        # support macOS 14 (Sonoma) and 15 (Sequoia) — covers Apple Silicon current.
         python-version: ["3.11", "3.12", "3.13"]
-        macos-version: ["macos-13", "macos-14", "macos-15"]
+        macos-version: ["macos-14", "macos-15"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -36,10 +40,11 @@ jobs:
   contract-test:
     name: "Plugin contract test (entry-point + RegistrationContext)"
     runs-on: macos-14
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
