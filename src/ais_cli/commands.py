@@ -226,6 +226,12 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         print(f"sudoers validation FAILED: {e}", file=sys.stderr)
         return 2
 
-    path = sudoers.install_sudoers(content)
+    try:
+        path = sudoers.install_sudoers(content)
+    except sudoers.SudoersError as e:
+        # US-004: non-TTY guard surfaces clear instructions; print them
+        # cleanly rather than as an uncaught traceback.
+        print(f"\n{e}", file=sys.stderr)
+        return 2
     print(f"installed {path}")
     return 0

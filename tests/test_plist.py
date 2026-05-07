@@ -47,7 +47,9 @@ def test_ollama_plist_no_wrapper_no_bind_args() -> None:
     assert d["RunAtLoad"] is True
     assert d["ThrottleInterval"] == 10
     assert d["TimeOut"] == 30
-    assert d["StandardOutPath"] == "/var/log/ollama/ollama.log"
+    import os
+    expected_log = os.path.expanduser("~/Library/Logs/asiai/ollama/ollama.log")
+    assert d["StandardOutPath"] == expected_log
 
 
 def test_lmstudio_plist_uses_wrapper_path_not_binary() -> None:

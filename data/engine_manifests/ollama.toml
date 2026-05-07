@@ -30,7 +30,7 @@ supported = true
 anchor_name = "com.asiai.ollama"
 
 [logs]
-dir = "/var/log/ollama"
+dir = "~/Library/Logs/asiai/ollama"
 stdout = "ollama.log"
 stderr = "ollama.err"
 

@@ -20,6 +20,7 @@ explicitly recommend ``visudo`` for this reason. The Bash version
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from ais_core.io import secure_staging_dir
@@ -134,6 +135,21 @@ def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str
         print(content, end="")
         print("--- end sudoers ---")
         return SUDOERS_PATH
+
+    # Detect non-TTY environments (Claude Code shells, CI pipes, agent runners)
+    # before sudo silently fails on password prompt. Surface clear instructions
+    # so the operator can run the install manually in a real terminal.
+    if not sys.stdin.isatty():
+        raise SudoersError(
+            "aisctl bootstrap --install-sudoers requires an interactive terminal "
+            "the first time (sudo password is needed for /bin/mv into "
+            f"{SUDOERS_PATH}). Run this command directly in Terminal.app:\n\n"
+            "  cd ~/projets/asiai-inference-server && "
+            ".venv/bin/aisctl bootstrap --install-sudoers\n\n"
+            "After the sudoers fragment is installed, subsequent privileged "
+            "operations (engine install/start/stop/unload/purge) are NOPASSWD "
+            "and can run from non-TTY contexts."
+        )
 
     validate_content(content)
 

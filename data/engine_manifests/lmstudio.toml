@@ -31,7 +31,7 @@ supported = true
 anchor_name = "com.asiai.lmstudio"
 
 [logs]
-dir = "/var/log/lmstudio"
+dir = "~/Library/Logs/asiai/lmstudio"
 stdout = "launchd-stdout.log"
 stderr = "launchd-stderr.log"
 

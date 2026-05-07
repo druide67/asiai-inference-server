@@ -26,6 +26,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from ais_core import firewall, plist
 from ais_core.manifest import EngineManifest
@@ -62,23 +63,45 @@ def install(
     Steps:
       1. Stop any pre-existing daemon/process for this engine (idempotent).
       2. Resolve the binary if not supplied (manifest's first existing candidate).
-      3. Write the plist atomically.
-      4. Optionally write the pf anchor and reload pf.
-      5. Load and start the daemon, wait for the health endpoint.
+      3. Ensure the user-space log directory exists.
+      4. Write the plist atomically.
+      5. Optionally write the pf anchor and reload pf.
+      6. Load and start the daemon, wait for the health endpoint.
 
     Returns a dict with the resolved binary, plist path, anchor path (or None),
     and whether the health endpoint answered within the manifest's timeout.
+
+    Note on dry-run vs binary resolution: in dry-run we skip the binary
+    existence check (the user may want to preview the install on a host
+    where the engine isn't installed yet). A placeholder path is recorded
+    in the dict so the caller still sees the resolved candidate slot.
     """
     if binary_path is None:
         resolved = manifest.binary.resolve()
         if resolved is None:
-            raise LifecycleError(
-                f"{manifest.name}: no binary found in candidates "
-                f"{list(manifest.binary.candidates)}; install it or pass --binary"
-            )
-        binary_path = resolved
+            if dry_run:
+                # Dry-run shouldn't block on missing binary — show the first
+                # candidate as a placeholder so the user sees what *would* be used.
+                binary_path = (
+                    manifest.binary.candidates[0]
+                    if manifest.binary.candidates
+                    else "(no candidates)"
+                )
+            else:
+                raise LifecycleError(
+                    f"{manifest.name}: no binary found in candidates "
+                    f"{list(manifest.binary.candidates)}; install it or pass --binary"
+                )
+        else:
+            binary_path = resolved
 
     stop_existing(manifest, dry_run=dry_run)
+
+    # Ensure user-space log directory exists before launchctl tries to open
+    # StandardOut/ErrorPath. Using ~/Library/Logs/asiai/<engine>/ avoids the
+    # need for sudo (vs the BSD legacy /var/log/<engine>/).
+    if not dry_run:
+        Path(manifest.logs.expanded_dir).mkdir(parents=True, exist_ok=True)
 
     plist_path_str = plist.write_plist(
         manifest, user=user, binary_path=binary_path, dry_run=dry_run
@@ -275,17 +298,25 @@ def is_loaded(manifest: EngineManifest) -> bool:
 def current_state(manifest: EngineManifest) -> EngineState:
     """Best-effort state machine answer.
 
-    The order matters: we ask the cheap questions first and only fall through
-    to the network probe if the daemon claims to be running.
+    Order rationale: ``launchctl list`` for system daemons (in
+    ``/Library/LaunchDaemons/``) requires sudo from a non-root caller — without
+    it, ``is_loaded`` returns False even when the daemon is up and serving.
+    To avoid that false negative, we trust the network probe first: if the
+    health endpoint answers 2xx, the daemon is RUNNING regardless of what
+    ``launchctl list`` says. Only when the daemon is silent do we drill down
+    via ``process_alive`` and ``is_loaded`` to distinguish UNHEALTHY /
+    LOADED_NOT_RUNNING / STOPPED.
     """
-    from pathlib import Path
-
     if not Path(plist.plist_path(manifest)).exists():
         return EngineState.NOT_INSTALLED
-    if not is_loaded(manifest):
-        return EngineState.STOPPED
-    if not process_alive(manifest):
-        return EngineState.LOADED_NOT_RUNNING
-    if not probe_health(manifest):
+
+    if probe_health(manifest):
+        return EngineState.RUNNING
+
+    if process_alive(manifest):
         return EngineState.UNHEALTHY
-    return EngineState.RUNNING
+
+    if is_loaded(manifest):
+        return EngineState.LOADED_NOT_RUNNING
+
+    return EngineState.STOPPED

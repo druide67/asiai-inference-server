@@ -30,7 +30,7 @@ supported = true
 anchor_name = "com.asiai.omlx"
 
 [logs]
-dir = "/var/log/omlx"
+dir = "~/Library/Logs/asiai/omlx"
 stdout = "omlx-stdout.log"
 stderr = "omlx-stderr.log"
 

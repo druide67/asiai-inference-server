@@ -102,7 +102,10 @@ def test_install_sudoers_invokes_validate_then_mv() -> None:
             call_order.append("mv")
         return MagicMock(returncode=0, stdout="", stderr="")
 
-    with patch("ais_core.sudoers.subprocess.run", side_effect=fake_run):
+    # The non-TTY guard (US-004 fix) blocks pytest runs by default. We patch
+    # sys.stdin.isatty to True so the install path runs end-to-end here.
+    with patch("ais_core.sudoers.subprocess.run", side_effect=fake_run), \
+         patch("ais_core.sudoers.sys.stdin.isatty", return_value=True):
         install_sudoers("# minimal\n")
 
     assert call_order[:2] == ["visudo", "mv"]
@@ -135,3 +138,22 @@ def test_no_temp_files_left_after_validate(tmp_path: Path, monkeypatch) -> None:
     # so this assertion is best-effort. Skip if no files appeared in tmp_path.
     if leftover:
         pytest.fail(f"tempfile left behind: {leftover}")
+
+
+# ---------------------------------------------------------------------------
+# Dogfood-discovered bug fix (US-004 — non-TTY graceful)
+# ---------------------------------------------------------------------------
+
+
+def test_install_sudoers_non_tty_raises_with_clear_instructions() -> None:
+    """US-004: when run without a controlling terminal, surface clear hint."""
+    with patch("ais_core.sudoers.sys.stdin.isatty", return_value=False), \
+         pytest.raises(SudoersError, match="interactive terminal"):
+        install_sudoers("# minimal\n")
+
+
+def test_install_sudoers_dry_run_skips_tty_check() -> None:
+    """Dry-run prints content regardless of TTY status."""
+    with patch("ais_core.sudoers.sys.stdin.isatty", return_value=False):
+        result = install_sudoers("# dry\n", dry_run=True)
+    assert result == "/etc/sudoers.d/asiai-inference"

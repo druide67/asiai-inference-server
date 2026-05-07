@@ -106,12 +106,17 @@ class LogSpec:
     stderr: str
 
     @property
+    def expanded_dir(self) -> str:
+        """Expand ``~`` to the current user's home (manifest stores tilde paths)."""
+        return os.path.expanduser(self.dir.rstrip("/"))
+
+    @property
     def stdout_path(self) -> str:
-        return f"{self.dir.rstrip('/')}/{self.stdout}"
+        return f"{self.expanded_dir}/{self.stdout}"
 
     @property
     def stderr_path(self) -> str:
-        return f"{self.dir.rstrip('/')}/{self.stderr}"
+        return f"{self.expanded_dir}/{self.stderr}"
 
 
 @dataclass(frozen=True)

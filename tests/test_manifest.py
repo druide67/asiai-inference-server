@@ -85,9 +85,19 @@ def test_health_url_property() -> None:
 
 
 def test_log_path_properties() -> None:
+    """Manifests now store ~/Library/Logs/asiai/<engine>/ (US-015 fix).
+
+    The properties expand ~ at access time so the absolute path works for
+    both the daemon (UserName=jmn) and the install-time mkdir.
+    """
+    import os
+
     m = load_manifest("ollama")
-    assert m.logs.stdout_path == "/var/log/ollama/ollama.log"
-    assert m.logs.stderr_path == "/var/log/ollama/ollama.err"
+    expected_dir = os.path.expanduser("~/Library/Logs/asiai/ollama")
+    assert m.logs.stdout_path == f"{expected_dir}/ollama.log"
+    assert m.logs.stderr_path == f"{expected_dir}/ollama.err"
+    # The raw manifest still keeps the tilde (lisible côté human)
+    assert m.logs.dir == "~/Library/Logs/asiai/ollama"
 
 
 def test_invalid_plist_label_rejected(tmp_path: Path) -> None:
