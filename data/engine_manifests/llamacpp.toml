@@ -25,11 +25,33 @@ process_pattern = "llama-server"
 # Tilde-expanded at plist generation, becomes an absolute path in
 # ProgramArguments. Switching models = re-link + `aisctl restart llamacpp`.
 model_path = "~/llms/gguf/active.gguf"
+# User-managed chat template symlink. Convention: point to the active Jinja
+# template. The Qwen3.6 official template uses ``|items`` (a Python-only
+# Jinja filter) which crashes minijinja (the C++ engine used by llama.cpp);
+# the froggeric fork rewrites it to a C++-safe form and adds two-tier
+# escalation on consecutive tool-call errors. Inject via:
+#   ln -sf ~/llms/templates/qwen3.6-a3b-froggeric-v18.jinja ~/llms/templates/active.jinja
+# Setting this implicitly replaces the model's embedded template, so we
+# remove ``--jinja`` (which would re-enable the embedded one).
+template_path = "~/llms/templates/active.jinja"
 # Runtime flags. --host/--port are emitted automatically from [network]
-# below (avoid duplicating). --model is injected from model_path above.
+# below (avoid duplicating). --model and --chat-template-file are injected
+# from model_path / template_path above.
+#
+# --parallel 2 (not 3) because 131072 / 3 = 43K tok/slot, which is below
+# Hermes Agent's 64K minimum and trips HTTP 400 on real requests. With 2
+# we get 65K natively, one less concurrent session (acceptable trade-off).
+#
+# --chat-template-kwargs '{"preserve_thinking": true}' keeps reasoning blocks
+# in multi-turn history (llama.cpp issue 22615), so subsequent turns can
+# reference prior reasoning. Counted in throughput by asiai parser as of
+# 2026-05-16 (delta.reasoning_content is now consumed).
+#
+# --temp/--top-p/--top-k are the official Qwen3.6 recommendations for
+# thinking mode -- llama-server's default 0.8 is a notch above the reco.
 program_args = [
     "--ctx-size", "131072",
-    "--parallel", "3",
+    "--parallel", "2",
     "--cont-batching",
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",
@@ -40,7 +62,10 @@ program_args = [
     "--ubatch-size", "1024",
     "--batch-size", "4096",
     "--n-gpu-layers", "999",
-    "--jinja",
+    "--chat-template-kwargs", "{\"preserve_thinking\": true}",
+    "--temp", "0.6",
+    "--top-p", "0.95",
+    "--top-k", "20",
 ]
 builds_from_source = false
 

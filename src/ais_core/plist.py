@@ -87,6 +87,10 @@ def build_plist_dict(
         program_args.extend(manifest.binary.program_args)
         if manifest.binary.model_path:
             program_args.extend(["--model", os.path.expanduser(manifest.binary.model_path)])
+        if manifest.binary.template_path:
+            program_args.extend(
+                ["--chat-template-file", os.path.expanduser(manifest.binary.template_path)]
+            )
         if manifest.network.bind:
             program_args.extend(
                 [

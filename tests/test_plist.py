@@ -116,6 +116,37 @@ def test_plist_no_model_arg_when_model_path_unset() -> None:
     assert "--model" not in d["ProgramArguments"]
 
 
+def test_llamacpp_plist_injects_template_path_expanded() -> None:
+    """Same contract as model_path: tilde path in manifest, absolute in plist.
+
+    The Qwen3.6 official template uses Jinja ``|items`` which crashes the
+    C++ minijinja engine; we ship a froggeric-fixed template via a user
+    symlink at ``~/llms/templates/active.jinja`` and pass it to llama-server
+    with ``--chat-template-file``.
+    """
+    import os
+
+    m = load_manifest("llamacpp")
+    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
+    args = d["ProgramArguments"]
+
+    assert "--chat-template-file" in args
+    tpl_idx = args.index("--chat-template-file")
+    expanded = args[tpl_idx + 1]
+    assert expanded.startswith("/")
+    assert expanded == os.path.expanduser("~/llms/templates/active.jinja")
+    # --jinja (which would re-enable the model's embedded template and
+    # defeat the override) must be gone
+    assert "--jinja" not in args
+
+
+def test_plist_no_template_arg_when_template_path_unset() -> None:
+    """Engines without template_path must not get --chat-template-file injected."""
+    m = load_manifest("ollama")
+    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+    assert "--chat-template-file" not in d["ProgramArguments"]
+
+
 def test_render_plist_xml_is_valid_plist() -> None:
     m = load_manifest("ollama")
     xml_bytes = render_plist_xml(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")

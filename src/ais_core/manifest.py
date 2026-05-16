@@ -65,6 +65,12 @@ class BinarySpec:
     # generation time. Convention: user-managed symlink at the target so
     # the manifest stays Mac-portable (e.g. ``~/llms/gguf/active.gguf``).
     model_path: str | None = None
+    # Optional chat template file path injected as ``--chat-template-file <path>``.
+    # Used to override a model's embedded Jinja template (e.g. froggeric fixed
+    # templates for Qwen3.6 that replace ``|items`` -- a Python-only filter --
+    # with C++-safe equivalents that minijinja can parse). Same tilde-expansion
+    # contract as ``model_path``.
+    template_path: str | None = None
 
     def resolve(self) -> str | None:
         """Return the first existing binary candidate, expanding ``~``.
@@ -206,6 +212,7 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
                 program_args=tuple(binary_raw.get("program_args", [])),
                 builds_from_source=bool(binary_raw.get("builds_from_source", False)),
                 model_path=binary_raw.get("model_path"),
+                template_path=binary_raw.get("template_path"),
             ),
             plist=PlistSpec(
                 name=plist_raw["name"],

@@ -80,12 +80,28 @@ def test_llamacpp_specifics() -> None:
     assert m.binary.model_path is not None
     assert m.binary.model_path.startswith("~/")
     assert m.binary.model_path.endswith(".gguf")
+    # User-managed chat template override (froggeric-fixed Qwen3.6)
+    assert m.binary.template_path is not None
+    assert m.binary.template_path.startswith("~/")
+    assert m.binary.template_path.endswith(".jinja")
     assert not m.wrapper.needed
     assert not m.binary.builds_from_source
     # Optimized flags must be present in program_args
     assert "--cache-reuse" in m.binary.program_args
     assert "--slot-prompt-similarity" in m.binary.program_args
     assert "--mlock" in m.binary.program_args
+    # --parallel 2 (not 3) so 131072/2 = 65K/slot stays above Hermes 64K min
+    pa = list(m.binary.program_args)
+    assert "--parallel" in pa
+    assert pa[pa.index("--parallel") + 1] == "2"
+    # --jinja removed (overridden by --chat-template-file via template_path)
+    assert "--jinja" not in pa
+    # Qwen3.6 thinking-mode recommended sampling
+    assert "--temp" in pa and pa[pa.index("--temp") + 1] == "0.6"
+    assert "--top-p" in pa and pa[pa.index("--top-p") + 1] == "0.95"
+    assert "--top-k" in pa and pa[pa.index("--top-k") + 1] == "20"
+    # preserve_thinking keeps reasoning blocks in multi-turn history
+    assert "--chat-template-kwargs" in pa
     # Load takes 30-45s for a 25GB GGUF + mlock — timeout must accommodate.
     assert m.network.health_timeout >= 60
 
