@@ -1,0 +1,86 @@
+# Preset — Qwen3-4B-Instruct as auxiliary for Hermes Agent compression
+#
+# Target hardware: Apple Silicon M-series 64+ GB (co-tenant with a main
+#   35B+ model; the 4B has a bigger footprint than 1.7B and matters when
+#   the host also runs OrbStack / Docker containers).
+# Target use case: Hermes Agent auxiliary endpoint with stronger
+#   compression quality than 1.7B. Use this preset when 1.7B drops
+#   relevant details on long agentic sessions (50-77K input tokens).
+# Target model: Qwen3-4B-Instruct (-2507 revision recommended).
+#   GGUF: unsloth/Qwen3-4B-Instruct-2507-GGUF UD-Q5_K_M or Q5_K_M.
+#   Symlink ~/llms/gguf/aux/active.gguf → your chosen GGUF.
+# Family rationale: same as 1.7B — Qwen3 tokenizer shared with Qwen3.6 35B
+#   main, prompt cache compatibility preserved.
+#
+# Memory footprint (M4 64 GB co-tenant with main Qwen3.6-35B-A3B at
+# 37 GB RSS, macOS ~5 GB, OrbStack ~4-8 GB, Hermes ~1 GB): aux model 3 GB
+# + KV cache q8 at ctx 98K parallel 2 (Qwen3-4B: 36 layers × 8 KV heads,
+# heavier than 1.7B) ≈ 2.5 GB = ~5.5 GB total. Leaves 6-10 GB headroom.
+# Tighter than the 1.7B preset — if OrbStack is heavy on your host,
+# prefer the 1.7B preset instead.
+#
+# Slot size trade-off: ctx 98K / parallel 2 = ~49K per slot, so Hermes
+# Agent segments compression inputs above 49K. The 1.7B preset offers
+# wider slots (65K) without Hermes-side segmentation; the 4B preset
+# offers higher per-token compression quality but accepts segmentation.
+#
+# Install: aisctl install llamacpp-aux --preset qwen3-4b-instruct-hermes-compression
+
+name = "llamacpp-aux"
+display = "llama.cpp aux (Qwen3-4B-Instruct Hermes compression preset)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux/active.gguf"
+model_path = "~/llms/gguf/aux/active.gguf"
+# Tuning rationale:
+# - --ctx-size 98304 / --parallel 2 = ~49K per slot, sized for OrbStack
+#   co-tenancy. Hermes segments inputs above 49K — accepted trade-off
+#   for the per-token quality gain over 1.7B.
+# - KV cache q8 keeps the footprint under 3 GB despite the 98K context.
+program_args = [
+    "--ctx-size", "98304",
+    "--parallel", "2",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux"
+throttle_interval = 10
+timeout = 30
+
+[network]
+port = 8082
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 30s: 4B GGUF + 3 GB KV mlock loads in 8-15s on M-series.
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux"
+stdout = "llamacpp-aux.log"
+stderr = "llamacpp-aux.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

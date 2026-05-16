@@ -176,20 +176,76 @@ def _bundled_manifest_dir() -> Path:
 
 
 def list_manifests() -> list[str]:
-    """Return the names of every bundled manifest, sorted for reproducibility."""
+    """Return the names of every bundled baseline manifest, sorted."""
     return sorted(p.stem for p in _bundled_manifest_dir().glob("*.toml"))
 
 
-def load_manifest(name: str) -> EngineManifest:
-    """Load and validate a single manifest by name (e.g. ``"ollama"``)."""
-    path = _bundled_manifest_dir() / f"{name}.toml"
+def list_presets() -> list[str]:
+    """Return the names of every bundled preset, sorted.
+
+    Presets live under ``data/engine_manifests/presets/`` and are full,
+    self-contained manifests tuned for a specific model + use case (e.g.
+    ``qwen3.6-35b-a3b-hermes-agent-64gb``). At ``aisctl install`` time the
+    user picks the preset that matches their hardware and use case, or
+    sticks with the engine baseline for a generic out-of-the-box config.
+    """
+    presets_dir = _bundled_manifest_dir() / "presets"
+    if not presets_dir.is_dir():
+        return []
+    return sorted(p.stem for p in presets_dir.glob("*.toml"))
+
+
+def preset_summary(preset: str) -> dict[str, str]:
+    """Cheap introspection of a preset file: returns its target engine + display.
+
+    Avoids the full ``EngineManifest`` validation cost when callers only
+    need to surface the engine + display for listings.
+    """
+    path = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
     if not path.is_file():
-        raise FileNotFoundError(f"No manifest for engine {name!r} at {path}")
+        raise FileNotFoundError(f"No preset {preset!r} at {path}")
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    return {
+        "preset": preset,
+        "engine": str(raw.get("name", "?")),
+        "display": str(raw.get("display", "")),
+    }
+
+
+def load_manifest(name: str, preset: str | None = None) -> EngineManifest:
+    """Load and validate a manifest.
+
+    Without ``preset``, loads the engine baseline ``<name>.toml`` (generic
+    OSS-safe defaults). With ``preset``, loads ``presets/<preset>.toml``
+    instead — a self-contained manifest tuned for a specific use case.
+
+    The preset is responsible for declaring every field it needs (no merge
+    with the baseline). Presets named after a specific model and workload
+    ship pre-baked tuning that real users can adopt without editing TOML.
+    """
+    if preset is not None:
+        path = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"No preset {preset!r} for engine {name!r} at {path}; "
+                f"available presets: {list_presets()}"
+            )
+    else:
+        path = _bundled_manifest_dir() / f"{name}.toml"
+        if not path.is_file():
+            raise FileNotFoundError(f"No manifest for engine {name!r} at {path}")
 
     with path.open("rb") as f:
         raw = tomllib.load(f)
 
-    return _from_dict(raw, source=str(path))
+    manifest = _from_dict(raw, source=str(path))
+    if preset is not None and manifest.name != name:
+        raise ManifestError(
+            f"{path}: preset declares engine {manifest.name!r} but was requested for {name!r}; "
+            "preset .name field must match the engine baseline name."
+        )
+    return manifest
 
 
 def _from_dict(raw: dict, *, source: str) -> EngineManifest:

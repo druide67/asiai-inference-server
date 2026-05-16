@@ -23,8 +23,15 @@ import sys
 from typing import Any
 
 from ais_core import lifecycle, memory, sudoers
-from ais_core.manifest import EngineManifest, list_manifests, load_manifest
+from ais_core.manifest import (
+    EngineManifest,
+    list_manifests,
+    list_presets,
+    load_manifest,
+    preset_summary,
+)
 from ais_engines.llamacpp import LlamaCppDriver
+from ais_engines.llamacpp_aux import LlamaCppAuxDriver
 from ais_engines.lmstudio import LMStudioDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
@@ -36,6 +43,7 @@ DRIVER_FACTORIES = {
     "omlx": OmlxDriver.from_manifest,
     "turboquant": TurboquantDriver.from_manifest,
     "llamacpp": LlamaCppDriver.from_manifest,
+    "llamacpp-aux": LlamaCppAuxDriver.from_manifest,
 }
 
 
@@ -57,10 +65,14 @@ def _jsonify(obj: Any) -> Any:
     return obj
 
 
-def _resolve_manifest(name: str) -> EngineManifest:
+def _resolve_manifest(name: str, preset: str | None = None) -> EngineManifest:
     if name not in list_manifests():
         raise SystemExit(f"unknown engine {name!r}; known: {', '.join(list_manifests())}")
-    return load_manifest(name)
+    if preset is not None and preset not in list_presets():
+        raise SystemExit(
+            f"unknown preset {preset!r}; available: {', '.join(list_presets()) or '(none)'}"
+        )
+    return load_manifest(name, preset=preset)
 
 
 def _driver_for(manifest: EngineManifest):
@@ -84,6 +96,23 @@ def cmd_list(args: argparse.Namespace) -> int:
     for n in names:
         m = load_manifest(n)
         print(f"  {n:<12} port={m.network.port} plist={m.plist.name}")
+    return 0
+
+
+def cmd_list_presets(args: argparse.Namespace) -> int:
+    """List bundled tuned-manifest presets (full TOMLs under presets/)."""
+    summaries = [preset_summary(n) for n in list_presets()]
+    if args.json:
+        _emit({"presets": summaries}, as_json=True)
+        return 0
+    if not summaries:
+        print("No presets bundled.")
+        return 0
+    print("Bundled presets (use with: aisctl install <engine> --preset <name>):")
+    for s in summaries:
+        print(f"  {s['preset']}")
+        print(f"    engine: {s['engine']}")
+        print(f"    display: {s['display']}")
     return 0
 
 
@@ -122,7 +151,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    m = _resolve_manifest(args.engine)
+    m = _resolve_manifest(args.engine, preset=getattr(args, "preset", None))
     user = args.user or os.environ.get("USER") or "root"
     enable_fw = args.firewall == "lan-only"
 

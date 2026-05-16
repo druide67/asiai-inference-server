@@ -66,6 +66,7 @@ def test_list_human_output(capsys: pytest.CaptureFixture[str]) -> None:
     assert "omlx" in out
     assert "turboquant" in out
     assert "llamacpp" in out
+    assert "llamacpp-aux" in out
 
 
 def test_list_json_output(capsys: pytest.CaptureFixture[str]) -> None:
@@ -73,7 +74,14 @@ def test_list_json_output(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert rc == 0
     payload = json.loads(out)
-    assert set(payload["engines"]) == {"ollama", "lmstudio", "omlx", "turboquant", "llamacpp"}
+    assert set(payload["engines"]) == {
+        "ollama",
+        "lmstudio",
+        "omlx",
+        "turboquant",
+        "llamacpp",
+        "llamacpp-aux",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +118,7 @@ def test_status_all_engines_when_no_arg(capsys: pytest.CaptureFixture[str]) -> N
     out = capsys.readouterr().out
     payload = json.loads(out)
     assert rc == 0
-    assert len(payload["engines"]) == 5
+    assert len(payload["engines"]) == 6
 
 
 # ---------------------------------------------------------------------------

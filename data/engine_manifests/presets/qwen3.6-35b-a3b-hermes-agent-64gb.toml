@@ -1,0 +1,85 @@
+# Preset — Qwen3.6-35B-A3B with Hermes Agent multi-turn workloads (64 GB host)
+#
+# Target hardware: Apple Silicon M-series with 64+ GB unified memory
+#   (validated on M4 Pro 64 GB and M5 Max 128 GB).
+# Target use case: Hermes Agent class — multi-turn agentic sessions with
+#   prefix cache reuse across requests, slot management, full Metal offload.
+# Target model: Qwen3.6-35B-A3B (sparse MoE, ~3B active, ~35B parameters).
+#   GGUF: unsloth/Qwen3.6-35B-A3B-GGUF UD-Q5_K_XL or equivalent.
+#   Symlink ~/llms/gguf/active.gguf → your chosen GGUF.
+# Chat template: froggeric v18 (Qwen3.6 official ``|items`` minijinja fix
+#   + two-tier escalation on consecutive tool-call errors).
+#   Symlink ~/llms/templates/active.jinja → froggeric template.
+#
+# Install: aisctl install llamacpp --preset qwen3.6-35b-a3b-hermes-agent-64gb
+
+name = "llamacpp"
+display = "llama.cpp (Qwen3.6-35B-A3B Hermes Agent 64 GB preset)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/active.gguf"
+model_path = "~/llms/gguf/active.gguf"
+template_path = "~/llms/templates/active.jinja"
+# Tuning rationale:
+# - --parallel 2 (not 3): 131072 / 3 = 43K tok/slot is below Hermes Agent
+#   64K minimum and trips HTTP 400 on real requests. With 2 we get 65K
+#   per slot natively.
+# - --chat-template-kwargs preserve_thinking keeps reasoning blocks in
+#   multi-turn history (llama.cpp issue 22615) — counted in throughput
+#   by asiai parser as of 2026-05-16.
+# - --temp/--top-p/--top-k are the official Qwen3.6 thinking-mode
+#   recommendations (llama-server default 0.8 is a notch above the reco).
+# - --cache-reuse 256 and --slot-prompt-similarity 0.5 enable prefix
+#   cache reuse across requests (the key win on multi-turn workloads).
+# - KV cache q8 q8 trades minor precision for ~50% memory savings.
+program_args = [
+    "--ctx-size", "131072",
+    "--parallel", "2",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--chat-template-kwargs", "{\"preserve_thinking\": true}",
+    "--temp", "0.6",
+    "--top-p", "0.95",
+    "--top-k", "20",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp"
+throttle_interval = 10
+timeout = 60
+
+[network]
+port = 8080
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 60s because loading 25GB+ GGUF + mlock-ing 35GB+ memory takes 30-45s
+# on M-series unified memory.
+health_timeout = 60
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp"
+stdout = "llamacpp.log"
+stderr = "llamacpp.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

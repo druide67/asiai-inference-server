@@ -1,15 +1,16 @@
-# Engine manifest — llama.cpp (llama-server)
+# Engine manifest — llama.cpp (llama-server) — generic baseline
 #
 # Upstream: https://github.com/ggml-org/llama.cpp
-# Binary:   llama-server (installed via `brew install llama.cpp`)
+# Binary:   llama-server (installed via ``brew install llama.cpp``)
 #
-# Single-model-per-instance: --model <path> is bound at launch via the
-# `model_path` field below. To switch models, update the symlink target
-# at the path below and `aisctl restart llamacpp`.
+# This baseline targets a generic out-of-the-box install. The user supplies
+# their own GGUF via the symlink at ``model_path``, and llama-server's
+# embedded chat template handles prompting.
 #
-# Optimized defaults for Apple Silicon multi-turn agent workloads
-# (Hermes Agent class): KV cache q8_0, --cache-reuse for prefix reuse
-# across requests, slot management, full Metal offload.
+# For pre-tuned configurations targeting specific models and use cases
+# (e.g. Qwen3.6-35B-A3B agentic workloads on M-series Macs), see the
+# preset files under ``data/engine_manifests/presets/``. Install with:
+#   aisctl install llamacpp --preset <preset-name>
 
 name = "llamacpp"
 display = "llama.cpp (llama-server)"
@@ -19,73 +20,38 @@ candidates = [
     "/opt/homebrew/bin/llama-server",
     "/usr/local/bin/llama-server",
 ]
-process_pattern = "llama-server"
-# User-managed symlink. Convention: point to the active GGUF model.
+# Discriminates the main instance (8080) from llamacpp-aux (8082) by the
+# model path in cmdline. The /aux/ segment breaks the substring match in
+# both directions — see test_llamacpp_and_aux_process_patterns_are_disjoint.
+process_pattern = "llms/gguf/active.gguf"
+# User-managed symlink to the active GGUF. Convention:
 #   ln -sf ~/llms/gguf/<MyModel>.gguf ~/llms/gguf/active.gguf
-# Tilde-expanded at plist generation, becomes an absolute path in
-# ProgramArguments. Switching models = re-link + `aisctl restart llamacpp`.
+# Re-link + ``aisctl restart llamacpp`` to switch models.
 model_path = "~/llms/gguf/active.gguf"
-# User-managed chat template symlink. Convention: point to the active Jinja
-# template. The Qwen3.6 official template uses ``|items`` (a Python-only
-# Jinja filter) which crashes minijinja (the C++ engine used by llama.cpp);
-# the froggeric fork rewrites it to a C++-safe form and adds two-tier
-# escalation on consecutive tool-call errors. Inject via:
-#   ln -sf ~/llms/templates/qwen3.6-a3b-froggeric-v18.jinja ~/llms/templates/active.jinja
-# Setting this implicitly replaces the model's embedded template, so we
-# remove ``--jinja`` (which would re-enable the embedded one).
-template_path = "~/llms/templates/active.jinja"
-# Runtime flags. --host/--port are emitted automatically from [network]
-# below (avoid duplicating). --model and --chat-template-file are injected
-# from model_path / template_path above.
-#
-# --parallel 2 (not 3) because 131072 / 3 = 43K tok/slot, which is below
-# Hermes Agent's 64K minimum and trips HTTP 400 on real requests. With 2
-# we get 65K natively, one less concurrent session (acceptable trade-off).
-#
-# --chat-template-kwargs '{"preserve_thinking": true}' keeps reasoning blocks
-# in multi-turn history (llama.cpp issue 22615), so subsequent turns can
-# reference prior reasoning. Counted in throughput by asiai parser as of
-# 2026-05-16 (delta.reasoning_content is now consumed).
-#
-# --temp/--top-p/--top-k are the official Qwen3.6 recommendations for
-# thinking mode -- llama-server's default 0.8 is a notch above the reco.
+# Generic baseline flags. Use a preset for tuned configurations.
+# --host/--port are emitted automatically from [network] (do not duplicate).
+# --model is injected from model_path above.
 program_args = [
-    "--ctx-size", "131072",
-    "--parallel", "2",
     "--cont-batching",
     "--flash-attn", "on",
-    "--cache-type-k", "q8_0",
-    "--cache-type-v", "q8_0",
-    "--cache-reuse", "256",
-    "--slot-prompt-similarity", "0.5",
     "--mlock",
-    "--ubatch-size", "1024",
-    "--batch-size", "4096",
     "--n-gpu-layers", "999",
-    "--chat-template-kwargs", "{\"preserve_thinking\": true}",
-    "--temp", "0.6",
-    "--top-p", "0.95",
-    "--top-k", "20",
+    "--jinja",
 ]
 builds_from_source = false
 
 [plist]
 name = "com.asiai.llamacpp"
 throttle_interval = 10
-timeout = 60
+timeout = 30
 
 [network]
-# 8080 is llama-server's upstream default. It's also a common dev-server
-# port (nginx test, Apache, Docker containers). If 8080 is occupied on the
-# host, the KeepAlive throttle bounces the daemon in a 10s loop — surface
-# it via `aisctl status` (state = "unhealthy") and override by editing
-# this port if needed. Ports used by other engines: ollama=11434,
-# lmstudio=1234, omlx=8800, turboquant=8081, asiai-monitor=8642.
 port = 8080
 bind = "0.0.0.0"
 health_endpoint = "/health"
-# 60s because loading a 25GB+ GGUF and mlock-ing 35GB+ of memory can
-# take 30-45s on M-series unified memory.
+# 60s because loading a large GGUF and mlock-ing memory can take 30-45s
+# on M-series unified memory. Smaller models load faster but the ceiling
+# is what matters for the baseline.
 health_timeout = 60
 
 [firewall]

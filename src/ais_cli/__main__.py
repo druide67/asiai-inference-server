@@ -22,9 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Install/start/stop/unload engines, purge memory, manage profiles."
         ),
     )
-    parser.add_argument(
-        "--version", action="version", version=f"aisctl {__version__}"
-    )
+    parser.add_argument("--version", action="version", version=f"aisctl {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="<command>")
 
     # list
@@ -39,9 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.set_defaults(func=commands.cmd_status)
 
     # install
-    p_install = sub.add_parser(
-        "install", help="Install + start an engine via LaunchDaemon."
-    )
+    p_install = sub.add_parser("install", help="Install + start an engine via LaunchDaemon.")
     p_install.add_argument("engine")
     p_install.add_argument("--binary", help="Override binary path resolution.")
     p_install.add_argument("--user", help="macOS user the daemon runs as.")
@@ -51,10 +47,24 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="Apply pf anchor restricting to RFC1918 subnets.",
     )
+    p_install.add_argument(
+        "--preset",
+        help="Use a tuned preset manifest from data/engine_manifests/presets/ "
+        "(e.g. qwen3.6-35b-a3b-hermes-agent-64gb). Run "
+        "'aisctl list-presets' to see what's available.",
+    )
     p_install.add_argument("--dry-run", action="store_true")
     p_install.add_argument("--force", action="store_true", help="Bypass operations lock.")
     p_install.add_argument("--json", action="store_true")
     p_install.set_defaults(func=commands.cmd_install)
+
+    # list-presets
+    p_presets = sub.add_parser(
+        "list-presets",
+        help="List bundled tuned-manifest presets for use with install --preset.",
+    )
+    p_presets.add_argument("--json", action="store_true")
+    p_presets.set_defaults(func=commands.cmd_list_presets)
 
     # uninstall
     p_uninstall = sub.add_parser("uninstall", help="Remove the LaunchDaemon + pf anchor.")
@@ -84,7 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_unload.add_argument("engine")
     p_unload.add_argument(
-        "model", nargs="?",
+        "model",
+        nargs="?",
         help="Model to unload. Omit to force a full daemon restart.",
     )
     p_unload.add_argument("--force", action="store_true")
@@ -98,7 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_purge.add_argument("--dry-run", action="store_true")
     p_purge.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Bypass operations lock (e.g. while asiai bench is running).",
     )
     p_purge.add_argument("--json", action="store_true")
@@ -119,7 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="One-shot setup. Currently: install /etc/sudoers.d/asiai-inference.",
     )
     p_boot.add_argument(
-        "--install-sudoers", action="store_true",
+        "--install-sudoers",
+        action="store_true",
         help="Write the sudoers fragment after visudo validation.",
     )
     p_boot.add_argument("--dry-run", action="store_true")

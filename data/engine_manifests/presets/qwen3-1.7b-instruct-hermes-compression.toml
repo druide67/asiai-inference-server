@@ -1,0 +1,87 @@
+# Preset — Qwen3-1.7B-Instruct as auxiliary for Hermes Agent compression
+#
+# Target hardware: Apple Silicon M-series 32-64 GB (a co-tenant of a main
+#   35B+ model, so the aux must keep a tiny footprint).
+# Target use case: Hermes Agent auxiliary endpoint — automatic session
+#   compression (model.compression.provider) and title generation, where
+#   a small fast model offloads work from the main agent so its slots
+#   stay free for the user-facing flow.
+# Target model: Qwen3-1.7B-Instruct (-2507 revision recommended).
+#   GGUF: unsloth/Qwen3-1.7B-GGUF UD-Q5_K_M or Q5_K_M.
+#   Symlink ~/llms/gguf/aux/active.gguf → your chosen GGUF.
+# Family rationale: Qwen3 1.7B/4B share the tokenizer with Qwen3.6 35B
+#   used as the main, preserving prompt cache compatibility and avoiding
+#   double tokenizer cost on the host.
+#
+# Memory footprint (M4 64 GB co-tenant with main Qwen3.6-35B-A3B at
+# 37 GB RSS, macOS ~5 GB, OrbStack ~4 GB, Hermes ~1 GB): aux model 1.5 GB
+# + KV cache q8 at ctx 131K parallel 2 (small KV thanks to 28 layers ×
+# 4 KV heads architecture) ≈ 2 GB = ~3.5 GB total. Leaves 14+ GB headroom.
+#
+# Install: aisctl install llamacpp-aux --preset qwen3-1.7b-instruct-hermes-compression
+
+name = "llamacpp-aux"
+display = "llama.cpp aux (Qwen3-1.7B Hermes compression preset)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux/active.gguf"
+model_path = "~/llms/gguf/aux/active.gguf"
+# Tuning rationale:
+# - --parallel 2 lets Hermes pipeline a second compression while the first
+#   is still in flight (avoids serializing the aux flow when the main is
+#   already saturating its own slots).
+# - --ctx-size 131072 gives 65K per slot natively, which covers the
+#   compression-side input we observed in production (50-77K tokens) with
+#   no Hermes-side segmentation needed.
+# - KV cache q8 keeps the aux footprint under 4 GB total despite the 131K
+#   context (Qwen3-1.7B's narrow architecture — 28 layers, 4 KV heads —
+#   means the KV cache is ~10× smaller than a 35B at the same context).
+# - --cache-reuse 256 + --slot-prompt-similarity 0.5: Hermes often sends
+#   similar compression system prompts, so prefix cache reuse pays off.
+program_args = [
+    "--ctx-size", "131072",
+    "--parallel", "2",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux"
+throttle_interval = 10
+timeout = 30
+
+[network]
+port = 8082
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 30s: 1.7B GGUF + 2 GB KV mlock loads in 5-10s on M-series.
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux"
+stdout = "llamacpp-aux.log"
+stderr = "llamacpp-aux.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

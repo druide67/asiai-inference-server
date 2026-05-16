@@ -116,17 +116,18 @@ def test_plist_no_model_arg_when_model_path_unset() -> None:
     assert "--model" not in d["ProgramArguments"]
 
 
-def test_llamacpp_plist_injects_template_path_expanded() -> None:
-    """Same contract as model_path: tilde path in manifest, absolute in plist.
+def test_llamacpp_hermes_preset_plist_injects_template_path_expanded() -> None:
+    """The Hermes preset overrides the embedded template via --chat-template-file.
 
     The Qwen3.6 official template uses Jinja ``|items`` which crashes the
-    C++ minijinja engine; we ship a froggeric-fixed template via a user
-    symlink at ``~/llms/templates/active.jinja`` and pass it to llama-server
-    with ``--chat-template-file``.
+    C++ minijinja engine; the preset ships a froggeric-fixed template via
+    a user symlink at ``~/llms/templates/active.jinja`` and passes it to
+    llama-server with ``--chat-template-file``. The baseline manifest does
+    NOT include this override (it stays on the embedded template).
     """
     import os
 
-    m = load_manifest("llamacpp")
+    m = load_manifest("llamacpp", preset="qwen3.6-35b-a3b-hermes-agent-64gb")
     d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
     args = d["ProgramArguments"]
 
@@ -136,7 +137,7 @@ def test_llamacpp_plist_injects_template_path_expanded() -> None:
     assert expanded.startswith("/")
     assert expanded == os.path.expanduser("~/llms/templates/active.jinja")
     # --jinja (which would re-enable the model's embedded template and
-    # defeat the override) must be gone
+    # defeat the override) must be gone in the preset
     assert "--jinja" not in args
 
 
@@ -145,6 +146,23 @@ def test_plist_no_template_arg_when_template_path_unset() -> None:
     m = load_manifest("ollama")
     d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
     assert "--chat-template-file" not in d["ProgramArguments"]
+
+
+def test_llamacpp_aux_plist_uses_aux_model_path_and_no_template() -> None:
+    """llamacpp-aux binds the aux model path and ships no chat template override."""
+    import os
+
+    m = load_manifest("llamacpp-aux")
+    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
+    args = d["ProgramArguments"]
+
+    assert "--model" in args
+    expanded = args[args.index("--model") + 1]
+    assert expanded == os.path.expanduser("~/llms/gguf/aux/active.gguf")
+    # aux doesn't override the template
+    assert "--chat-template-file" not in args
+    # Port discriminates from main instance (8082, not 8081 to avoid turboquant)
+    assert args[args.index("--port") + 1] == "8082"
 
 
 def test_render_plist_xml_is_valid_plist() -> None:

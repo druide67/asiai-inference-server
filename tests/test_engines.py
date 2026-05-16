@@ -9,6 +9,7 @@ import pytest
 from ais_core.manifest import load_manifest
 from ais_engines.base import EngineDriver, RestartOnlyDriver, UnloadOutcome
 from ais_engines.llamacpp import LlamaCppDriver
+from ais_engines.llamacpp_aux import LlamaCppAuxDriver
 from ais_engines.lmstudio import LMStudioDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
@@ -184,6 +185,7 @@ def test_list_loaded_models_empty_when_engine_lacks_method() -> None:
         (OmlxDriver.from_manifest, "omlx"),
         (TurboquantDriver.from_manifest, "turboquant"),
         (LlamaCppDriver.from_manifest, "llamacpp"),
+        (LlamaCppAuxDriver.from_manifest, "llamacpp-aux"),
     ],
 )
 def test_factories_load_correct_manifest(factory, expected_name: str) -> None:
@@ -207,6 +209,13 @@ def test_llamacpp_driver_is_restart_only_subclass() -> None:
     assert isinstance(driver, RestartOnlyDriver)
     assert driver.name == "llamacpp"
     # _try_native_unload always returns False on RestartOnlyDriver
+    assert driver._try_native_unload("any-model") is False
+
+
+def test_llamacpp_aux_driver_is_restart_only_subclass() -> None:
+    driver = LlamaCppAuxDriver.from_manifest()
+    assert isinstance(driver, RestartOnlyDriver)
+    assert driver.name == "llamacpp-aux"
     assert driver._try_native_unload("any-model") is False
 
 

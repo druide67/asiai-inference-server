@@ -16,7 +16,7 @@ from ais_core.manifest import (
     load_manifest,
 )
 
-EXPECTED_ENGINES = {"ollama", "lmstudio", "omlx", "turboquant", "llamacpp"}
+EXPECTED_ENGINES = {"ollama", "lmstudio", "omlx", "turboquant", "llamacpp", "llamacpp-aux"}
 
 
 def test_list_manifests_returns_all_engines() -> None:
@@ -70,40 +70,125 @@ def test_turboquant_specifics() -> None:
     assert m.network.health_timeout >= 60
 
 
-def test_llamacpp_specifics() -> None:
+def test_llamacpp_baseline_specifics() -> None:
+    """Baseline llamacpp.toml is the generic OSS-safe defaults.
+
+    Tuned configurations (specific samplers, cache flags, parallel/ctx
+    sizing) live in presets under data/engine_manifests/presets/, not in
+    the baseline. See test_llamacpp_hermes_preset for the Qwen3.6 preset.
+    """
     m = load_manifest("llamacpp")
     assert m.network.port == 8080
     assert m.network.health_endpoint == "/health"
     assert m.plist.name == "com.asiai.llamacpp"
     assert m.firewall.anchor_name == "com.asiai.llamacpp"
-    # Single-model-per-instance: bound at launch via --model
+    assert m.binary.process_pattern == "llms/gguf/active.gguf"
     assert m.binary.model_path is not None
     assert m.binary.model_path.startswith("~/")
     assert m.binary.model_path.endswith(".gguf")
-    # User-managed chat template override (froggeric-fixed Qwen3.6)
-    assert m.binary.template_path is not None
-    assert m.binary.template_path.startswith("~/")
-    assert m.binary.template_path.endswith(".jinja")
     assert not m.wrapper.needed
     assert not m.binary.builds_from_source
-    # Optimized flags must be present in program_args
-    assert "--cache-reuse" in m.binary.program_args
-    assert "--slot-prompt-similarity" in m.binary.program_args
-    assert "--mlock" in m.binary.program_args
-    # --parallel 2 (not 3) so 131072/2 = 65K/slot stays above Hermes 64K min
+    # Generic baseline keeps only widely-applicable flags
     pa = list(m.binary.program_args)
-    assert "--parallel" in pa
-    assert pa[pa.index("--parallel") + 1] == "2"
-    # --jinja removed (overridden by --chat-template-file via template_path)
-    assert "--jinja" not in pa
-    # Qwen3.6 thinking-mode recommended sampling
-    assert "--temp" in pa and pa[pa.index("--temp") + 1] == "0.6"
-    assert "--top-p" in pa and pa[pa.index("--top-p") + 1] == "0.95"
-    assert "--top-k" in pa and pa[pa.index("--top-k") + 1] == "20"
-    # preserve_thinking keeps reasoning blocks in multi-turn history
-    assert "--chat-template-kwargs" in pa
-    # Load takes 30-45s for a 25GB GGUF + mlock — timeout must accommodate.
+    assert "--mlock" in pa
+    assert "--cont-batching" in pa
+    assert "--n-gpu-layers" in pa
+    # Baseline uses the embedded template — no template_path override
+    assert m.binary.template_path is None
+    assert "--jinja" in pa
+    # Baseline does NOT include workload-specific tuning (those live in presets)
+    assert "--cache-reuse" not in pa
+    assert "--slot-prompt-similarity" not in pa
+    assert "--chat-template-kwargs" not in pa
+    assert "--temp" not in pa
+    # Health timeout accommodates large-GGUF load even in the generic case.
     assert m.network.health_timeout >= 60
+
+
+def test_llamacpp_hermes_preset() -> None:
+    """The Qwen3.6-35B-A3B Hermes preset carries the production tuning."""
+    m = load_manifest("llamacpp", preset="qwen3.6-35b-a3b-hermes-agent-64gb")
+    assert m.name == "llamacpp"  # preset targets the llamacpp engine
+    pa = list(m.binary.program_args)
+    # Hermes Agent class tuning
+    assert pa[pa.index("--ctx-size") + 1] == "131072"
+    assert pa[pa.index("--parallel") + 1] == "2"
+    assert "--cache-reuse" in pa
+    assert "--slot-prompt-similarity" in pa
+    # froggeric chat template override (no --jinja)
+    assert m.binary.template_path is not None
+    assert m.binary.template_path.endswith(".jinja")
+    assert "--jinja" not in pa
+    # Qwen3.6 thinking-mode reco sampling
+    assert pa[pa.index("--temp") + 1] == "0.6"
+    assert pa[pa.index("--top-p") + 1] == "0.95"
+    assert pa[pa.index("--top-k") + 1] == "20"
+    assert "--chat-template-kwargs" in pa
+
+
+def test_llamacpp_aux_baseline_specifics() -> None:
+    """Baseline llamacpp-aux.toml is the generic OSS-safe defaults (no tuning)."""
+    m = load_manifest("llamacpp-aux")
+    assert m.network.port == 8082
+    assert m.network.health_endpoint == "/health"
+    assert m.plist.name == "com.asiai.llamacpp-aux"
+    assert m.firewall.anchor_name == "com.asiai.llamacpp-aux"
+    assert m.binary.process_pattern == "llms/gguf/aux/active.gguf"
+    assert m.binary.model_path == "~/llms/gguf/aux/active.gguf"
+    # Small-model health timeout: ≤30s
+    assert m.network.health_timeout <= 30
+    pa = list(m.binary.program_args)
+    assert "--mlock" in pa
+    assert "--cont-batching" in pa
+    # No workload-specific tuning in the baseline
+    assert "--cache-reuse" not in pa
+    assert "--slot-prompt-similarity" not in pa
+
+
+def test_llamacpp_aux_presets_target_engine_and_carry_tuning() -> None:
+    """Both aux presets (1.7B and 4B) target llamacpp-aux and carry tuning."""
+    for preset in (
+        "qwen3-1.7b-instruct-hermes-compression",
+        "qwen3-4b-instruct-hermes-compression",
+    ):
+        m = load_manifest("llamacpp-aux", preset=preset)
+        assert m.name == "llamacpp-aux", preset
+        pa = list(m.binary.program_args)
+        assert "--ctx-size" in pa, preset
+        assert pa[pa.index("--parallel") + 1] == "2", preset
+        assert "--cache-reuse" in pa, preset
+        # KV cache q8 keeps the aux footprint small
+        assert "--cache-type-k" in pa, preset
+        assert pa[pa.index("--cache-type-k") + 1] == "q8_0", preset
+
+
+def test_llamacpp_and_aux_process_patterns_are_disjoint() -> None:
+    """Critical invariant: pkill -f on one must never match the other's cmdline.
+
+    The real semantic we care about is: given a representative cmdline for
+    each instance (the kind ``pgrep -f`` actually sees in production), the
+    pattern of one engine must not match the cmdline of the other. Testing
+    only ``main not in aux`` (substring on the patterns themselves) misses
+    that target — see code review M1.
+    """
+    main_pat = load_manifest("llamacpp").binary.process_pattern
+    aux_pat = load_manifest("llamacpp-aux").binary.process_pattern
+
+    main_cmdline = (
+        "/opt/homebrew/bin/llama-server --ctx-size 131072 --parallel 2 "
+        "--model /Users/jmn/llms/gguf/active.gguf --port 8080"
+    )
+    aux_cmdline = (
+        "/opt/homebrew/bin/llama-server --ctx-size 32768 --parallel 4 "
+        "--model /Users/jmn/llms/gguf/aux/active.gguf --port 8082"
+    )
+
+    assert main_pat in main_cmdline  # main matches its own cmdline
+    assert aux_pat in aux_cmdline  # aux matches its own cmdline
+    assert main_pat not in aux_cmdline  # main pattern must miss aux cmdline
+    assert aux_pat not in main_cmdline  # aux pattern must miss main cmdline
+    # And the ports differ.
+    assert load_manifest("llamacpp").network.port != load_manifest("llamacpp-aux").network.port
 
 
 def test_load_unknown_engine_raises() -> None:

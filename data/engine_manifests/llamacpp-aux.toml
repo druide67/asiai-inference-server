@@ -1,0 +1,67 @@
+# Engine manifest — llama.cpp auxiliary instance — generic baseline
+#
+# Companion to ``llamacpp`` (main, port 8080). Same binary, different model
+# bound at launch via a separate symlink. Use case: cheap fast auxiliary
+# tasks (title generation, summarization, classification) offloaded from
+# the main agent model.
+#
+# This baseline targets a generic out-of-the-box install. For pre-tuned
+# configurations (e.g. Qwen3-1.7B-Instruct compression for Hermes Agent),
+# see the preset files under ``data/engine_manifests/presets/``.
+#   aisctl install llamacpp-aux --preset <preset-name>
+
+name = "llamacpp-aux"
+display = "llama.cpp aux (small model, port 8082)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+# Discriminates aux from main via the model path in cmdline. ``pgrep``/
+# ``pkill`` will match this literal substring; the main llamacpp manifest
+# uses ``llms/gguf/active.gguf`` (no ``/aux/`` segment) — the two patterns
+# are mutually exclusive.
+process_pattern = "llms/gguf/aux/active.gguf"
+# User-managed symlink. Convention:
+#   ln -sf ~/llms/gguf/aux/<small-model>.gguf ~/llms/gguf/aux/active.gguf
+model_path = "~/llms/gguf/aux/active.gguf"
+# Generic baseline flags. Use a preset for tuned configurations.
+program_args = [
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--mlock",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux"
+throttle_interval = 10
+timeout = 30
+
+[network]
+# 8082 (avoids the turboquant 8081 conflict on hosts that may run both).
+# Ports used by other engines: ollama=11434, lmstudio=1234, omlx=8800,
+# turboquant=8081, llamacpp=8080, asiai-monitor=8642.
+port = 8082
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 30s because a small (1-3B) aux model loads in 3-10s.
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux"
+stdout = "llamacpp-aux.log"
+stderr = "llamacpp-aux.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []
