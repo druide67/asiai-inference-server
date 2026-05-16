@@ -24,6 +24,7 @@ from typing import Any
 
 from ais_core import lifecycle, memory, sudoers
 from ais_core.manifest import EngineManifest, list_manifests, load_manifest
+from ais_engines.llamacpp import LlamaCppDriver
 from ais_engines.lmstudio import LMStudioDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
@@ -34,6 +35,7 @@ DRIVER_FACTORIES = {
     "lmstudio": LMStudioDriver.from_manifest,
     "omlx": OmlxDriver.from_manifest,
     "turboquant": TurboquantDriver.from_manifest,
+    "llamacpp": LlamaCppDriver.from_manifest,
 }
 
 
@@ -57,9 +59,7 @@ def _jsonify(obj: Any) -> Any:
 
 def _resolve_manifest(name: str) -> EngineManifest:
     if name not in list_manifests():
-        raise SystemExit(
-            f"unknown engine {name!r}; known: {', '.join(list_manifests())}"
-        )
+        raise SystemExit(f"unknown engine {name!r}; known: {', '.join(list_manifests())}")
     return load_manifest(name)
 
 
@@ -98,12 +98,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     for name in targets:
         m = _resolve_manifest(name)
         state = lifecycle.current_state(m)
-        rows.append({
-            "engine": name,
-            "state": state.value,
-            "port": m.network.port,
-            "plist": m.plist.name,
-        })
+        rows.append(
+            {
+                "engine": name,
+                "state": state.value,
+                "port": m.network.port,
+                "plist": m.plist.name,
+            }
+        )
 
     if args.json:
         _emit({"engines": rows}, as_json=True)

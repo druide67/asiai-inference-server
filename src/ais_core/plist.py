@@ -69,9 +69,7 @@ def build_plist_dict(
             "labels must match com.asiai.<engine>"
         )
 
-    program_path = (
-        manifest.wrapper.install_path if manifest.wrapper.needed else binary_path
-    )
+    program_path = manifest.wrapper.install_path if manifest.wrapper.needed else binary_path
     if program_path is None:
         raise PlistError(
             f"{manifest.name}: wrapper.needed but install_path is unset; "
@@ -80,7 +78,15 @@ def build_plist_dict(
 
     program_args: list[str] = [program_path]
     if not manifest.wrapper.needed:
+        # Order: manifest.binary.program_args (user-controlled flags) first,
+        # then --model (single-model engines), then --host/--port (always last
+        # so they can't be accidentally overridden by program_args). All
+        # currently-supported engines use named flags only — no positional
+        # subcommand. If we add an engine that takes a positional command
+        # before its flags, this order needs revisiting.
         program_args.extend(manifest.binary.program_args)
+        if manifest.binary.model_path:
+            program_args.extend(["--model", os.path.expanduser(manifest.binary.model_path)])
         if manifest.network.bind:
             program_args.extend(
                 [
@@ -93,24 +99,18 @@ def build_plist_dict(
 
     user_home = os.path.expanduser(f"~{user}")
     binary_dir = str(Path(binary_path).parent) if binary_path else "/usr/local/bin"
-    path_value = ":".join(
-        [binary_dir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-    )
+    path_value = ":".join([binary_dir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
 
     env: dict[str, str] = {"HOME": user_home, "PATH": path_value}
     for entry in manifest.env_vars:
         key, _, value = entry.partition("=")
         if key in env and key not in ("HOME", "PATH"):
-            raise PlistError(
-                f"{manifest.name}: duplicate env var {key!r} in manifest"
-            )
+            raise PlistError(f"{manifest.name}: duplicate env var {key!r} in manifest")
         env[key] = value
 
     return {
         "Label": manifest.plist.name,
-        "Comment": (
-            f"{manifest.display} LLM Server — managed by asiai-inference-server"
-        ),
+        "Comment": (f"{manifest.display} LLM Server — managed by asiai-inference-server"),
         "ProgramArguments": program_args,
         "UserName": user,
         "EnvironmentVariables": env,

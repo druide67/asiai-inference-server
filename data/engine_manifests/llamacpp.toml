@@ -1,0 +1,79 @@
+# Engine manifest — llama.cpp (llama-server)
+#
+# Upstream: https://github.com/ggml-org/llama.cpp
+# Binary:   llama-server (installed via `brew install llama.cpp`)
+#
+# Single-model-per-instance: --model <path> is bound at launch via the
+# `model_path` field below. To switch models, update the symlink target
+# at the path below and `aisctl restart llamacpp`.
+#
+# Optimized defaults for Apple Silicon multi-turn agent workloads
+# (Hermes Agent class): KV cache q8_0, --cache-reuse for prefix reuse
+# across requests, slot management, full Metal offload.
+
+name = "llamacpp"
+display = "llama.cpp (llama-server)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llama-server"
+# User-managed symlink. Convention: point to the active GGUF model.
+#   ln -sf ~/llms/gguf/<MyModel>.gguf ~/llms/gguf/active.gguf
+# Tilde-expanded at plist generation, becomes an absolute path in
+# ProgramArguments. Switching models = re-link + `aisctl restart llamacpp`.
+model_path = "~/llms/gguf/active.gguf"
+# Runtime flags. --host/--port are emitted automatically from [network]
+# below (avoid duplicating). --model is injected from model_path above.
+program_args = [
+    "--ctx-size", "131072",
+    "--parallel", "3",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp"
+throttle_interval = 10
+timeout = 60
+
+[network]
+# 8080 is llama-server's upstream default. It's also a common dev-server
+# port (nginx test, Apache, Docker containers). If 8080 is occupied on the
+# host, the KeepAlive throttle bounces the daemon in a 10s loop — surface
+# it via `aisctl status` (state = "unhealthy") and override by editing
+# this port if needed. Ports used by other engines: ollama=11434,
+# lmstudio=1234, omlx=8800, turboquant=8081, asiai-monitor=8642.
+port = 8080
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 60s because loading a 25GB+ GGUF and mlock-ing 35GB+ of memory can
+# take 30-45s on M-series unified memory.
+health_timeout = 60
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp"
+stdout = "llamacpp.log"
+stderr = "llamacpp.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

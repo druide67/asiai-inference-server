@@ -16,10 +16,10 @@ from ais_core.manifest import (
     load_manifest,
 )
 
-EXPECTED_ENGINES = {"ollama", "lmstudio", "omlx", "turboquant"}
+EXPECTED_ENGINES = {"ollama", "lmstudio", "omlx", "turboquant", "llamacpp"}
 
 
-def test_list_manifests_returns_four_engines() -> None:
+def test_list_manifests_returns_all_engines() -> None:
     names = list_manifests()
     assert set(names) == EXPECTED_ENGINES
     assert names == sorted(names)
@@ -67,6 +67,26 @@ def test_turboquant_specifics() -> None:
     assert m.wrapper.needed is True
     assert m.wrapper.template == "wrapper-start.sh.tpl"
     # 70B cold-start is slow — manifest must reflect that.
+    assert m.network.health_timeout >= 60
+
+
+def test_llamacpp_specifics() -> None:
+    m = load_manifest("llamacpp")
+    assert m.network.port == 8080
+    assert m.network.health_endpoint == "/health"
+    assert m.plist.name == "com.asiai.llamacpp"
+    assert m.firewall.anchor_name == "com.asiai.llamacpp"
+    # Single-model-per-instance: bound at launch via --model
+    assert m.binary.model_path is not None
+    assert m.binary.model_path.startswith("~/")
+    assert m.binary.model_path.endswith(".gguf")
+    assert not m.wrapper.needed
+    assert not m.binary.builds_from_source
+    # Optimized flags must be present in program_args
+    assert "--cache-reuse" in m.binary.program_args
+    assert "--slot-prompt-similarity" in m.binary.program_args
+    assert "--mlock" in m.binary.program_args
+    # Load takes 30-45s for a 25GB GGUF + mlock — timeout must accommodate.
     assert m.network.health_timeout >= 60
 
 
@@ -151,20 +171,20 @@ def test_env_var_must_be_key_value() -> None:
 @pytest.mark.parametrize(
     "bad_pattern",
     [
-        ".",                  # matches every cmdline
-        ".*",                 # explicit greedy
-        ".*sshd",             # would target sshd
-        "(ollama|sshd)",      # alternation
-        "ollama|sshd",        # alternation no parens
-        "[a-z]+",             # char class
-        "ollama\\s",          # backslash escape
-        "ollama$",            # anchor
-        "^ollama",            # anchor start
-        "ollama?",            # quantifier
-        "0lookups",           # leading digit (we require leading letter)
-        "",                   # empty
-        " ollama",            # leading space
-        "ollama ",            # trailing space
+        ".",  # matches every cmdline
+        ".*",  # explicit greedy
+        ".*sshd",  # would target sshd
+        "(ollama|sshd)",  # alternation
+        "ollama|sshd",  # alternation no parens
+        "[a-z]+",  # char class
+        "ollama\\s",  # backslash escape
+        "ollama$",  # anchor
+        "^ollama",  # anchor start
+        "ollama?",  # quantifier
+        "0lookups",  # leading digit (we require leading letter)
+        "",  # empty
+        " ollama",  # leading space
+        "ollama ",  # trailing space
     ],
 )
 def test_dangerous_process_pattern_rejected(bad_pattern: str) -> None:

@@ -48,6 +48,7 @@ def test_ollama_plist_no_wrapper_no_bind_args() -> None:
     assert d["ThrottleInterval"] == 10
     assert d["TimeOut"] == 30
     import os
+
     expected_log = os.path.expanduser("~/Library/Logs/asiai/ollama/ollama.log")
     assert d["StandardOutPath"] == expected_log
 
@@ -77,6 +78,44 @@ def test_omlx_plist_appends_host_port_when_bind_set() -> None:
     ]
 
 
+def test_llamacpp_plist_injects_model_path_expanded() -> None:
+    """llama-server needs --model <abs_path> bound at launch.
+
+    The manifest stores a tilde path (``~/llms/gguf/active.gguf``) so it
+    stays Mac-portable; the plist renderer must expand it to an absolute
+    path before emitting ProgramArguments.
+    """
+    import os
+
+    m = load_manifest("llamacpp")
+    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
+    args = d["ProgramArguments"]
+
+    # First element is the binary path
+    assert args[0] == "/opt/homebrew/bin/llama-server"
+    # --model must be present with an expanded absolute path
+    assert "--model" in args
+    model_idx = args.index("--model")
+    expanded = args[model_idx + 1]
+    assert expanded.startswith("/")  # absolute path, no tilde left
+    assert expanded == os.path.expanduser("~/llms/gguf/active.gguf")
+    # --host/--port still appended at the end from [network]
+    assert "--host" in args
+    assert "0.0.0.0" in args
+    assert "--port" in args
+    assert "8080" in args
+    # No duplicate --host or --port from program_args (manifest hygiene)
+    assert args.count("--host") == 1
+    assert args.count("--port") == 1
+
+
+def test_plist_no_model_arg_when_model_path_unset() -> None:
+    """Engines that don't bind a model at launch must not get --model injected."""
+    m = load_manifest("ollama")
+    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+    assert "--model" not in d["ProgramArguments"]
+
+
 def test_render_plist_xml_is_valid_plist() -> None:
     m = load_manifest("ollama")
     xml_bytes = render_plist_xml(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
@@ -93,9 +132,7 @@ def test_render_plist_xml_escapes_ampersand_in_env_values() -> None:
         m,
         env_vars=tuple([*list(m.env_vars), "WITH_AMP=foo&bar"]),
     )
-    xml_bytes = render_plist_xml(
-        m_with_amp, user="jmn", binary_path="/opt/homebrew/bin/ollama"
-    )
+    xml_bytes = render_plist_xml(m_with_amp, user="jmn", binary_path="/opt/homebrew/bin/ollama")
     assert b"&amp;" in xml_bytes
     parsed = plistlib.loads(xml_bytes)
     assert parsed["EnvironmentVariables"]["WITH_AMP"] == "foo&bar"

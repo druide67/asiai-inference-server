@@ -59,6 +59,12 @@ class BinarySpec:
     process_pattern: str
     program_args: tuple[str, ...] = ()
     builds_from_source: bool = False
+    # Optional model file path injected as ``--model <path>`` in ProgramArguments.
+    # Currently used by engines that bind to a single model at launch time
+    # (e.g. llama-server: one instance = one GGUF). Tilde-expanded at plist
+    # generation time. Convention: user-managed symlink at the target so
+    # the manifest stays Mac-portable (e.g. ``~/llms/gguf/active.gguf``).
+    model_path: str | None = None
 
     def resolve(self) -> str | None:
         """Return the first existing binary candidate, expanding ``~``.
@@ -159,8 +165,7 @@ def _bundled_manifest_dir() -> Path:
         return editable
 
     raise FileNotFoundError(
-        f"engine_manifests/ not found under {bundled} or {editable}; "
-        "install layout is broken"
+        f"engine_manifests/ not found under {bundled} or {editable}; install layout is broken"
     )
 
 
@@ -200,6 +205,7 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
                 process_pattern=binary_raw["process_pattern"],
                 program_args=tuple(binary_raw.get("program_args", [])),
                 builds_from_source=bool(binary_raw.get("builds_from_source", False)),
+                model_path=binary_raw.get("model_path"),
             ),
             plist=PlistSpec(
                 name=plist_raw["name"],
@@ -259,9 +265,7 @@ def _validate(m: EngineManifest, *, source: str) -> None:
         )
 
     if m.wrapper.needed and not m.wrapper.install_path:
-        raise ManifestError(
-            f"{source}: wrapper.needed=true but wrapper.install_path is empty"
-        )
+        raise ManifestError(f"{source}: wrapper.needed=true but wrapper.install_path is empty")
 
     if not m.binary.candidates:
         raise ManifestError(f"{source}: binary.candidates is empty")
@@ -276,9 +280,7 @@ def _validate(m: EngineManifest, *, source: str) -> None:
 
     for var in m.env_vars:
         if "=" not in var:
-            raise ManifestError(
-                f"{source}: environment.vars entry {var!r} must be 'KEY=VALUE'"
-            )
+            raise ManifestError(f"{source}: environment.vars entry {var!r} must be 'KEY=VALUE'")
 
 
 def is_valid_plist_label(label: str) -> bool:

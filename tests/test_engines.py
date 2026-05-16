@@ -8,6 +8,7 @@ import pytest
 
 from ais_core.manifest import load_manifest
 from ais_engines.base import EngineDriver, RestartOnlyDriver, UnloadOutcome
+from ais_engines.llamacpp import LlamaCppDriver
 from ais_engines.lmstudio import LMStudioDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
@@ -58,8 +59,11 @@ def test_native_unload_success_skips_restart() -> None:
 
     assert mock_restart.call_count == 0
     assert result == UnloadOutcome(
-        engine="ollama", model="llama3.2", method="api",
-        success=True, detail="unloaded llama3.2 via native API",
+        engine="ollama",
+        model="llama3.2",
+        method="api",
+        success=True,
+        detail="unloaded llama3.2 via native API",
     )
     assert fake.calls == ["llama3.2"]
 
@@ -179,6 +183,7 @@ def test_list_loaded_models_empty_when_engine_lacks_method() -> None:
         (LMStudioDriver.from_manifest, "lmstudio"),
         (OmlxDriver.from_manifest, "omlx"),
         (TurboquantDriver.from_manifest, "turboquant"),
+        (LlamaCppDriver.from_manifest, "llamacpp"),
     ],
 )
 def test_factories_load_correct_manifest(factory, expected_name: str) -> None:
@@ -194,6 +199,15 @@ def test_omlx_driver_is_restart_only_subclass() -> None:
 def test_turboquant_driver_is_restart_only_subclass() -> None:
     driver = TurboquantDriver.from_manifest()
     assert isinstance(driver, RestartOnlyDriver)
+
+
+def test_llamacpp_driver_is_restart_only_subclass() -> None:
+    """llama-server has no native unload API — must use restart-only path."""
+    driver = LlamaCppDriver.from_manifest()
+    assert isinstance(driver, RestartOnlyDriver)
+    assert driver.name == "llamacpp"
+    # _try_native_unload always returns False on RestartOnlyDriver
+    assert driver._try_native_unload("any-model") is False
 
 
 def test_ollama_driver_is_not_restart_only() -> None:
@@ -219,8 +233,9 @@ def test_factories_handle_engine_constructor_typeerror() -> None:
     """If asiai's engine constructor signature changes, fall back to no-arg."""
     from ais_engines.base import make_asiai_engine_proxy
 
-    fake_engine_cls = MagicMock(side_effect=[TypeError("base_url unsupported"),
-                                              _FakeEngineWithUnload()])
+    fake_engine_cls = MagicMock(
+        side_effect=[TypeError("base_url unsupported"), _FakeEngineWithUnload()]
+    )
     with patch.dict(
         "sys.modules",
         {"asiai.engines.ollama": MagicMock(OllamaEngine=fake_engine_cls)},
@@ -256,9 +271,12 @@ def test_make_asiai_engine_proxy_logs_warning_on_construction_failure(
     from ais_engines.base import make_asiai_engine_proxy
 
     fake_cls = MagicMock(side_effect=[TypeError("base_url"), RuntimeError("noargs too")])
-    with caplog.at_level(logging.WARNING, logger="ais_engines.base"), patch.dict(
-        "sys.modules",
-        {"asiai.engines.ollama": MagicMock(OllamaEngine=fake_cls)},
+    with (
+        caplog.at_level(logging.WARNING, logger="ais_engines.base"),
+        patch.dict(
+            "sys.modules",
+            {"asiai.engines.ollama": MagicMock(OllamaEngine=fake_cls)},
+        ),
     ):
         engine = make_asiai_engine_proxy(
             load_manifest("ollama"),
