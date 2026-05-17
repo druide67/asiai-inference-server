@@ -36,14 +36,19 @@ candidates = [
 ]
 process_pattern = "llms/gguf/aux/active.gguf"
 model_path = "~/llms/gguf/aux/active.gguf"
-# Tuning rationale:
-# - --ctx-size 98304 / --parallel 2 = ~49K per slot, sized for OrbStack
-#   co-tenancy. Hermes segments inputs above 49K — accepted trade-off
-#   for the per-token quality gain over 1.7B.
-# - KV cache q8 keeps the footprint under 3 GB despite the 98K context.
+# Tuning rationale (updated per PRISM ADR-004 D3, Merlin whisper msg-1779026375):
+# - --parallel 1: slot natif 98K satisfies Hermes Agent
+#   check_compression_model_feasibility >= 64K NATIVELY. No more bypass via
+#   auxiliary.compression.context_length override in config.yaml. Trade-off:
+#   pas de 2 compressions aux concurrent. Acceptable car Merlin solo + retex
+#   2026-05-17 montre que 2 compressions simultanées rare.
+# - --ctx-size 98304 (slot 98K total): couvre la compression Hermes 50-77K
+#   typique sans segmentation côté Hermes. Marge confort 21K supplémentaire.
+# - KV cache q8 keeps the footprint compact despite the 98K context (Qwen3-4B
+#   has 36 layers × 8 KV heads × 128 head_dim, ~5 GB KV q8 at 98K).
 program_args = [
     "--ctx-size", "98304",
-    "--parallel", "2",
+    "--parallel", "1",
     "--cont-batching",
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",

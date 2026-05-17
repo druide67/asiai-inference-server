@@ -147,15 +147,18 @@ def test_llamacpp_aux_baseline_specifics() -> None:
 
 def test_llamacpp_aux_presets_target_engine_and_carry_tuning() -> None:
     """Both aux presets (1.7B and 4B) target llamacpp-aux and carry tuning."""
-    for preset in (
-        "qwen3-1.7b-instruct-hermes-compression",
-        "qwen3-4b-instruct-hermes-compression",
-    ):
+    # Per-preset expected parallel value (4B parallel=1 after PRISM ADR-004 D3,
+    # 1.7B legacy parallel=2 kept for non-Hermes use cases <64K).
+    expected_parallel = {
+        "qwen3-1.7b-instruct-hermes-compression": "2",
+        "qwen3-4b-instruct-hermes-compression": "1",
+    }
+    for preset, par in expected_parallel.items():
         m = load_manifest("llamacpp-aux", preset=preset)
         assert m.name == "llamacpp-aux", preset
         pa = list(m.binary.program_args)
         assert "--ctx-size" in pa, preset
-        assert pa[pa.index("--parallel") + 1] == "2", preset
+        assert pa[pa.index("--parallel") + 1] == par, preset
         assert "--cache-reuse" in pa, preset
         # KV cache q8 keeps the aux footprint small
         assert "--cache-type-k" in pa, preset

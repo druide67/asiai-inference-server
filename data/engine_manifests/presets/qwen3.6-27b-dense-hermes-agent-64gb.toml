@@ -1,0 +1,99 @@
+# Preset — Qwen3.6-27B Dense (hybrid attention) for Hermes Agent on 64 GB hosts
+#
+# Target hardware: Apple Silicon M-series with 64+ GB unified memory.
+#   Validated target: Mac Mini M4 Pro 64 GB co-tenant Hermes Agent + OrbStack.
+# Target use case: Hermes Agent class — multi-turn agentic sessions, 60-80
+#   api_calls per cycle, tool-calling fiability matters more than peak decode.
+# Target model: Qwen3.6-27B (dense, hybrid attention architecture).
+#   GGUF: unsloth/Qwen3.6-27B-GGUF UD-Q5_K_XL (~18.7 GB on disk).
+#   Symlink ~/llms/gguf/active.gguf → your chosen GGUF.
+# Chat template: froggeric v19 (Qwen3.6 official |items minijinja fix
+#   + more imperative tool-call escalation than v18).
+#   Symlink ~/llms/templates/active.jinja → froggeric v19 template.
+#
+# Architecture rationale (validated via HF config.json 2026-05-17):
+# - 64 layers TOTAL, but hybrid: 16 full_attention + 48 linear_attention
+#   (DeltaNet/Mamba-style). Only the 16 full_attention layers consume KV cache.
+# - 4 KV heads (aggressive GQA), head_dim 256.
+# - max_position_embeddings 262144 (256K) NATIVE — no rope scaling needed.
+# - KV per token q8: 16 × 4 × 256 × 2 × 1 byte = 32 KB → 8.4 GB at 256K ctx.
+# - Total RAM expected: 19 (model mlock) + 8.4 (KV main) = ~27 GB main,
+#   leaving ample headroom for aux 4B (~10 GB) + OS + OrbStack + Hermes.
+#
+# Performance rationale (per PRISM ADR-004 review 2026-05-17):
+# - Qwen3.6-27B dense > 35B-A3B MoE on SWE-bench Verified (77.2 vs 73.4),
+#   Terminal-Bench (59.3 vs 51.5), VITA-Bench agentic (+17%).
+# - Stability multi-turn supérieure: pas de dérive routing MoE sur ctx long.
+# - Slot natif 256K = élimine P1 (slot saturé) observé sur 35B-A3B parallel=2 65K.
+#
+# Install: aisctl install llamacpp --preset qwen3.6-27b-dense-hermes-agent-64gb
+
+name = "llamacpp"
+display = "llama.cpp (Qwen3.6-27B Dense, Hermes Agent, 64 GB preset, parallel=1 slot 256K)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/active.gguf"
+model_path = "~/llms/gguf/active.gguf"
+template_path = "~/llms/templates/active.jinja"
+# Tuning rationale (per PRISM ADR-004 + Merlin whisper msg-1779026375):
+# - --parallel 1: single slot natif 256K. Pas de partage = pas de saturation
+#   structurelle observée sur multi-turn (P1 eliminated). Hermes Agent solo,
+#   2 sessions concurrent rare; trade-off concurrence vs slot ample = OK.
+# - --ctx-size 262144: max_position natif Qwen3.6-27B, slot effectif 256K.
+# - --cache-reuse 256 + --slot-prompt-similarity 0.5: prefix cache reuse
+#   across requests (key win on multi-turn, validated 2026-05-16 migration).
+# - KV cache q8: trades minor precision for ~50% memory savings.
+# - --chat-template-kwargs preserve_thinking keeps reasoning blocks in
+#   multi-turn history (asiai parser counts both reasoning + content tokens
+#   in throughput as of commit 0b7378d).
+# - --temp/--top-p/--top-k: Qwen3.6 thinking-mode official recommendations.
+program_args = [
+    "--ctx-size", "262144",
+    "--parallel", "1",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--chat-template-kwargs", "{\"preserve_thinking\": true}",
+    "--temp", "0.6",
+    "--top-p", "0.95",
+    "--top-k", "20",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp"
+throttle_interval = 10
+timeout = 60
+
+[network]
+port = 8080
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 60s because loading 18.7GB GGUF + mlock + mmap-warm of 8GB KV takes 20-40s.
+health_timeout = 60
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp"
+stdout = "llamacpp.log"
+stderr = "llamacpp.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []
