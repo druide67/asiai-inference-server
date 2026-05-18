@@ -8,8 +8,9 @@ Fleet manager for local LLM inference engines on Apple Silicon.
 `asiai-inference-server` is the **control plane** companion to
 [`asiai`](https://asiai.dev) (the observability/benchmark CLI). Where `asiai`
 *observes* what's running on your Mac, this project *manages* it: install,
-start, stop, unload, and orchestrate inference engines (Ollama, LM Studio,
-oMLX, TurboQuant, …) across one or several Apple Silicon machines.
+start, stop, unload, and orchestrate inference engines (llama.cpp,
+Ollama, LM Studio, oMLX, TurboQuant, mlx-lm, vMLX, …) across one or
+several Apple Silicon machines.
 
 It also fixes the long-standing macOS pain point: **engine memory that never
 gets freed** because of the unified-memory compressor. Killing a process

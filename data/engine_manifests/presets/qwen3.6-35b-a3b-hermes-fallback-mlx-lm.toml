@@ -49,6 +49,14 @@ process_pattern = "mlx_lm.server"
 #   by default. No flag toggles it on/off as of 0.31.3.
 # - HF_HUB_CACHE is auto-created by the wrapper before starting the
 #   server (mlx-lm crashes if the directory is missing).
+# - Sampling defaults (mlx-lm 0.31.x): temperature=1.0, top_p=1.0,
+#   top_k=0 — these are the upstream defaults if a client omits them.
+#   Qwen3.6 thinking-mode recommendations are temperature=0.6, top_p=0.95,
+#   top_k=20. Configure the orchestrator (e.g. Hermes) to send these
+#   per-request — they cannot be baked into the daemon command line.
+# - Pre-install check: ``lsof -nP -iTCP:8000 -sTCP:LISTEN`` should be
+#   empty before ``aisctl install``. vllm-mlx and any other engine that
+#   defaults to 8000 cannot coexist on the same host.
 program_args = []
 builds_from_source = false
 

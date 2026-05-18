@@ -25,7 +25,9 @@ timeout = 60
 # engines side-by-side. Override at install time if your environment has
 # 8003 already taken.
 port = 8003
-bind = "0.0.0.0"
+# Default to loopback. Presets that need LAN exposure should override
+# ``bind`` to ``0.0.0.0`` and pair the install with ``--firewall lan-only``.
+bind = "127.0.0.1"
 health_endpoint = "/v1/models"
 health_timeout = 30
 

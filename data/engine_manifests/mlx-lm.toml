@@ -41,7 +41,11 @@ timeout = 30
 
 [network]
 port = 8000
-bind = "0.0.0.0"
+# Default to loopback so an unconfigured install never exposes the
+# upstream "not for production" server beyond this host. Presets that
+# want LAN access (e.g. Hermes fallback) override ``bind`` to ``0.0.0.0``
+# and are expected to be paired with ``aisctl install --firewall lan-only``.
+bind = "127.0.0.1"
 health_endpoint = "/v1/models"
 health_timeout = 30
 
