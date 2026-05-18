@@ -16,7 +16,16 @@ from ais_core.manifest import (
     load_manifest,
 )
 
-EXPECTED_ENGINES = {"ollama", "lmstudio", "omlx", "turboquant", "llamacpp", "llamacpp-aux"}
+EXPECTED_ENGINES = {
+    "ollama",
+    "lmstudio",
+    "omlx",
+    "turboquant",
+    "llamacpp",
+    "llamacpp-aux",
+    "vmlx",
+    "mlx-lm",
+}
 
 
 def test_list_manifests_returns_all_engines() -> None:
@@ -59,6 +68,17 @@ def test_omlx_specifics() -> None:
     m = load_manifest("omlx")
     assert m.network.port == 8800
     assert m.options.get("log_level") == "info"
+
+
+def test_vmlx_specifics() -> None:
+    m = load_manifest("vmlx")
+    assert m.network.port == 8003
+    assert m.network.health_endpoint == "/v1/models"
+    assert m.binary.process_pattern == "vmlx serve"
+    assert m.plist.name == "com.asiai.vmlx"
+    assert m.firewall.anchor_name == "com.asiai.vmlx"
+    assert not m.wrapper.needed
+    assert not m.binary.builds_from_source
 
 
 def test_turboquant_specifics() -> None:
@@ -305,6 +325,7 @@ def test_dangerous_process_pattern_rejected(bad_pattern: str) -> None:
         "lmstudio-server-start",
         "llama-server-turboquant",
         "omlx serve",
+        "vmlx serve",
         "a/b/c",
         "engine.bin",
     ],

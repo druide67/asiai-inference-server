@@ -1,0 +1,45 @@
+# Engine manifest — vMLX
+# https://vmlx.net — MLX-native inference server with Mamba/SSM hybrid support.
+
+name = "vmlx"
+display = "vMLX"
+
+[binary]
+candidates = [
+    "~/.local/bin/vmlx",
+    "/opt/homebrew/bin/vmlx",
+    "/usr/local/bin/vmlx",
+]
+process_pattern = "vmlx serve"
+program_args = ["serve"]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.vmlx"
+throttle_interval = 15
+timeout = 60
+
+[network]
+# vMLX's documented default is 8000 (same as mlx-lm and vllm-mlx), so we
+# offset to 8003 to avoid collisions on hosts that may run several MLX
+# engines side-by-side. Override at install time if your environment has
+# 8003 already taken.
+port = 8003
+bind = "0.0.0.0"
+health_endpoint = "/v1/models"
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.vmlx"
+
+[logs]
+dir = "~/Library/Logs/asiai/vmlx"
+stdout = "vmlx-stdout.log"
+stderr = "vmlx-stderr.log"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

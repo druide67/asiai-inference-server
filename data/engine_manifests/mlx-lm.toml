@@ -1,0 +1,75 @@
+# Engine manifest — mlx-lm
+# Apple-maintained MLX inference (ml-explore/mlx-examples), exposing
+# ``python -m mlx_lm.server`` as an OpenAI-compatible HTTP API.
+#
+# mlx-lm has no native CLI binary — the server is a Python module invoked
+# from a venv. We therefore install a shell wrapper at /usr/local/bin that
+# resolves the venv Python and execs the module. The wrapper template lives
+# at ``contrib/mlx-lm/wrapper-start.sh.tpl``.
+#
+# [security] mlx-lm's own README warns that the server is "not recommended
+# for production" — it only implements basic security checks. Operators
+# exposing it beyond loopback should front it with a reverse proxy
+# (bearer auth, rate-limit, audit). Auth integration is tracked as a
+# follow-up user story; the MVP driver assumes LAN-only deployment.
+#
+# mlx-lm keeps its upstream default port 8000. vMLX in this repo is
+# offset to 8003 so the two engines can coexist on a single host without
+# additional tuning. vllm-mlx (not aisrv-managed but observed by asiai)
+# also defaults to 8000; mutually exclusive with mlx-lm.
+
+name = "mlx-lm"
+display = "mlx-lm"
+
+[binary]
+# mlx-lm has no native CLI; ``aisctl install`` writes a wrapper script at
+# the path declared under ``[wrapper]`` and the plist points at that wrapper.
+# The candidates below are therefore the wrapper install paths the launcher
+# may find on disk — the canonical one comes first.
+candidates = [
+    "/usr/local/bin/mlx-lm-server-start",
+    "/opt/homebrew/bin/mlx-lm-server-start",
+]
+process_pattern = "mlx_lm.server"
+program_args = []
+builds_from_source = false
+
+[plist]
+name = "com.asiai.mlx-lm"
+throttle_interval = 15
+timeout = 30
+
+[network]
+port = 8000
+bind = "0.0.0.0"
+health_endpoint = "/v1/models"
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.mlx-lm"
+
+[logs]
+dir = "~/Library/Logs/asiai/mlx-lm"
+stdout = "mlx-lm-stdout.log"
+stderr = "mlx-lm-stderr.log"
+
+[wrapper]
+# mlx-lm requires a shell wrapper that resolves the venv Python, ensures the
+# HuggingFace cache directory exists (mlx-lm crashes on a missing
+# ``~/.cache/huggingface/hub``), then execs ``python -m mlx_lm.server``.
+needed = true
+install_path = "/usr/local/bin/mlx-lm-server-start"
+
+[environment]
+# MLXLM_PYTHON: override the wrapper's auto-discovery of the venv python.
+# MLXLM_MODEL:  path or HF repo id passed to ``--model``.
+# MLXLM_PORT:   override the listening port (defaults to manifest port).
+vars = []
+
+[options]
+# Reference defaults consumed by the wrapper template at install time.
+# Adopters should pin the version and the model path through a preset
+# rather than editing this baseline.
+default_model = "~/llms/mlx/active"
+log_level = "info"

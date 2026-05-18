@@ -11,9 +11,11 @@ from ais_engines.base import EngineDriver, RestartOnlyDriver, UnloadOutcome
 from ais_engines.llamacpp import LlamaCppDriver
 from ais_engines.llamacpp_aux import LlamaCppAuxDriver
 from ais_engines.lmstudio import LMStudioDriver
+from ais_engines.mlx_lm import MlxLmDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
 from ais_engines.turboquant import TurboquantDriver
+from ais_engines.vmlx import VmlxDriver
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -186,6 +188,8 @@ def test_list_loaded_models_empty_when_engine_lacks_method() -> None:
         (TurboquantDriver.from_manifest, "turboquant"),
         (LlamaCppDriver.from_manifest, "llamacpp"),
         (LlamaCppAuxDriver.from_manifest, "llamacpp-aux"),
+        (VmlxDriver.from_manifest, "vmlx"),
+        (MlxLmDriver.from_manifest, "mlx-lm"),
     ],
 )
 def test_factories_load_correct_manifest(factory, expected_name: str) -> None:
@@ -196,6 +200,43 @@ def test_factories_load_correct_manifest(factory, expected_name: str) -> None:
 def test_omlx_driver_is_restart_only_subclass() -> None:
     driver = OmlxDriver.from_manifest()
     assert isinstance(driver, RestartOnlyDriver)
+
+
+def test_vmlx_driver_is_restart_only_subclass() -> None:
+    driver = VmlxDriver.from_manifest()
+    assert isinstance(driver, RestartOnlyDriver)
+    assert driver.name == "vmlx"
+    # vMLX has no native unload API — restart-only.
+    assert driver._try_native_unload("any-model") is False
+
+
+def test_vmlx_from_manifest_loads_engine_proxy() -> None:
+    driver = VmlxDriver.from_manifest()
+    assert driver.manifest.name == "vmlx"
+    assert driver.manifest.network.port == 8003
+
+
+def test_mlx_lm_from_manifest_loads_engine_proxy() -> None:
+    driver = MlxLmDriver.from_manifest()
+    assert driver.manifest.name == "mlx-lm"
+    assert driver.manifest.network.port == 8000
+
+
+def test_mlx_lm_driver_is_restart_only() -> None:
+    driver = MlxLmDriver.from_manifest()
+    assert isinstance(driver, RestartOnlyDriver)
+    assert driver.name == "mlx-lm"
+    # mlx-lm has no native unload API — restart-only.
+    assert driver._try_native_unload("any-model") is False
+
+
+def test_mlx_lm_manifest_wrapper_needed() -> None:
+    """mlx-lm has no native binary — must declare a wrapper install path."""
+    m = load_manifest("mlx-lm")
+    assert m.wrapper.needed is True
+    assert m.wrapper.install_path == "/usr/local/bin/mlx-lm-server-start"
+    assert m.plist.name == "com.asiai.mlx-lm"
+    assert m.firewall.anchor_name == "com.asiai.mlx-lm"
 
 
 def test_turboquant_driver_is_restart_only_subclass() -> None:

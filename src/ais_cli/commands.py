@@ -33,9 +33,11 @@ from ais_core.manifest import (
 from ais_engines.llamacpp import LlamaCppDriver
 from ais_engines.llamacpp_aux import LlamaCppAuxDriver
 from ais_engines.lmstudio import LMStudioDriver
+from ais_engines.mlx_lm import MlxLmDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
 from ais_engines.turboquant import TurboquantDriver
+from ais_engines.vmlx import VmlxDriver
 
 DRIVER_FACTORIES = {
     "ollama": OllamaDriver.from_manifest,
@@ -44,6 +46,8 @@ DRIVER_FACTORIES = {
     "turboquant": TurboquantDriver.from_manifest,
     "llamacpp": LlamaCppDriver.from_manifest,
     "llamacpp-aux": LlamaCppAuxDriver.from_manifest,
+    "vmlx": VmlxDriver.from_manifest,
+    "mlx-lm": MlxLmDriver.from_manifest,
 }
 
 
