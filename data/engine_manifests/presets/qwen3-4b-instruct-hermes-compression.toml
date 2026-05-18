@@ -37,17 +37,18 @@ candidates = [
 process_pattern = "llms/gguf/aux/active.gguf"
 model_path = "~/llms/gguf/aux/active.gguf"
 # Tuning rationale (updated per PRISM ADR-004 D3, Merlin whisper msg-1779026375):
-# - --parallel 1: slot natif 98K satisfies Hermes Agent
-#   check_compression_model_feasibility >= 64K NATIVELY. No more bypass via
-#   auxiliary.compression.context_length override in config.yaml. Trade-off:
-#   pas de 2 compressions aux concurrent. Acceptable car Merlin solo + retex
-#   2026-05-17 montre que 2 compressions simultanées rare.
-# - --ctx-size 98304 (slot 98K total): couvre la compression Hermes 50-77K
-#   typique sans segmentation côté Hermes. Marge confort 21K supplémentaire.
-# - KV cache q8 keeps the footprint compact despite the 98K context (Qwen3-4B
-#   has 36 layers × 8 KV heads × 128 head_dim, ~5 GB KV q8 at 98K).
+# - --parallel 1: single slot at native max ctx; auxiliary agent class doesn't
+#   need concurrent compressions and the larger ctx covers main-model
+#   threshold escalations (e.g. main 27B Dense ctx 262144 × 0.80 threshold
+#   = 209715 tokens compression target).
+# - --ctx-size 262144 (slot 256K native): matches Qwen3-4B max_position_
+#   embeddings. Previously 98K which auto-lowered Hermes compression
+#   threshold when the main model went past it (bump 2026-05-18 to align
+#   with main M5 27B Dense 256K).
+# - KV cache q8 keeps the footprint compact despite the 256K context (Qwen3-4B
+#   has 36 layers × 8 KV heads × 128 head_dim → ~13 GB KV q8 at 256K).
 program_args = [
-    "--ctx-size", "98304",
+    "--ctx-size", "262144",
     "--parallel", "1",
     "--cont-batching",
     "--flash-attn", "on",
