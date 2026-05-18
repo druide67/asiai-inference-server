@@ -36,7 +36,7 @@ candidates = [
 ]
 process_pattern = "llms/gguf/aux/active.gguf"
 model_path = "~/llms/gguf/aux/active.gguf"
-# Tuning rationale (updated per PRISM ADR-004 D3, Merlin whisper msg-1779026375):
+# Tuning rationale (2026-05-18 review):
 # - --parallel 1: single slot at native max ctx; auxiliary agent class doesn't
 #   need concurrent compressions and the larger ctx covers main-model
 #   threshold escalations (e.g. main 27B Dense ctx 262144 × 0.80 threshold
@@ -44,9 +44,15 @@ model_path = "~/llms/gguf/aux/active.gguf"
 # - --ctx-size 262144 (slot 256K native): matches Qwen3-4B max_position_
 #   embeddings. Previously 98K which auto-lowered Hermes compression
 #   threshold when the main model went past it (bump 2026-05-18 to align
-#   with main M5 27B Dense 256K).
+#   with the main 27B Dense 256K context).
 # - KV cache q8 keeps the footprint compact despite the 256K context (Qwen3-4B
-#   has 36 layers × 8 KV heads × 128 head_dim → ~13 GB KV q8 at 256K).
+#   has 36 layers × 8 KV heads × 128 head_dim × 2 (K+V) × 1 byte × 262144
+#   tokens = ~18 GB KV q8 at 256K). Pair with the ~3 GB model RSS and ~1 GB
+#   activations to budget ~22 GB total. On a 64 GB host with main model
+#   offloaded to a different machine the headroom is comfortable; when the
+#   fallback main (~25 GB) is co-located on the same 64 GB host total RAM
+#   consumption climbs to ~50 GB, leaving ~14 GB for OS and orchestrator —
+#   tenable but no longer generous.
 program_args = [
     "--ctx-size", "262144",
     "--parallel", "1",

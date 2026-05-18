@@ -1,8 +1,8 @@
 # Preset — Qwen3.6-35B-A3B served by mlx-lm for Hermes Agent fallback
 #
-# Target role: FALLBACK on a 64 GB host (e.g. M4 Pro). When the PRIMARY
-#   (M5 host running llamacpp + 27B Dense) is unreachable, the Hermes
-#   orchestrator routes to this endpoint.
+# Target role: FALLBACK on a 64 GB host (e.g. Apple M4 Pro). When the
+#   PRIMARY endpoint (a larger machine running llamacpp + 27B Dense) is
+#   unreachable, the Hermes orchestrator routes to this endpoint.
 # Target hardware: Apple Silicon M-series with 64+ GB unified memory.
 # Target use case: Hermes Agent class — multi-turn agentic sessions.
 #   mlx-lm provides contiguous prefix cache reuse (the metric that makes
@@ -14,8 +14,8 @@
 #   default MLXLM_MODEL path resolves automatically. Alternatively override
 #   via the MLXLM_MODEL environment variable at install time.
 #
-# Bench reference (2026-05-18, see claude-shared-wiki/wiki/benchmarks):
-#   M4 Pro mlx-lm 0.31.3 + 35B-A3B MLX-4bit
+# Bench reference (2026-05-18, Apple Silicon M4 Pro 64 GB):
+#   mlx-lm 0.31.3 + 35B-A3B MLX-4bit
 #     TTFT cold       9.1 s
 #     TTFT prefix-hit 2.16 s  (prefix cache reuse YES)
 #     Decode short    53.2 tok/s

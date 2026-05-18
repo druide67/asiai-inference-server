@@ -20,7 +20,7 @@
 # - Total RAM expected: 19 (model mlock) + 8.4 (KV main) = ~27 GB main,
 #   leaving ample headroom for aux 4B (~10 GB) + OS + OrbStack + Hermes.
 #
-# Performance rationale (per PRISM ADR-004 review 2026-05-17):
+# Performance rationale (2026-05-17 multi-reviewer assessment):
 # - Qwen3.6-27B dense > 35B-A3B MoE on SWE-bench Verified (77.2 vs 73.4),
 #   Terminal-Bench (59.3 vs 51.5), VITA-Bench agentic (+17%).
 # - Stability multi-turn supérieure: pas de dérive routing MoE sur ctx long.
@@ -39,7 +39,7 @@ candidates = [
 process_pattern = "llms/gguf/active.gguf"
 model_path = "~/llms/gguf/active.gguf"
 template_path = "~/llms/templates/active.jinja"
-# Tuning rationale (per PRISM ADR-004 + Merlin whisper msg-1779026375):
+# Tuning rationale (2026-05-17 multi-reviewer assessment + operator review):
 # - --parallel 1: single slot natif 256K. Pas de partage = pas de saturation
 #   structurelle observée sur multi-turn (P1 eliminated). Hermes Agent solo,
 #   2 sessions concurrent rare; trade-off concurrence vs slot ample = OK.

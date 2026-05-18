@@ -59,6 +59,10 @@ if ! "${PY}" -c "import mlx_lm" >/dev/null 2>&1; then
 fi
 
 MODEL_PATH="${MLXLM_MODEL:-${HOME}/llms/mlx/active}"
+# Expand a leading ~ to $HOME since launchd does not pre-expand env vars
+# and quoted bash parameters skip tilde expansion. mlx-lm receives the
+# argument literally and would fail to find the model directory.
+MODEL_PATH="${MODEL_PATH/#\~/${HOME}}"
 PORT="${MLXLM_PORT:-8000}"
 HOST="${MLXLM_HOST:-0.0.0.0}"
 
