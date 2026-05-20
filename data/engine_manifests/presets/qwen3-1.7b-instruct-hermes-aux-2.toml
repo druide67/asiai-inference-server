@@ -40,11 +40,18 @@ model_path = "~/llms/gguf/aux2/active.gguf"
 # - --parallel 2: tolerate session_search + skills_hub concurrent during
 #   a tick. approval is bursty single-call but cheap.
 # - --ctx-size 65536: family convention (64K minimum on all aux slots).
+# - --rope-scaling yarn + --yarn-orig-ctx 40960: Qwen3-1.7B training
+#   context is 40K. Serving at 64K without YaRN extrapolation degrades
+#   quality past the training window. With YaRN, quality stays acceptable
+#   up to the asked ctx (Qwen team validated this for the 1.7B / 0.6B
+#   sizes).
 # - KV q8_0 + --flash-attn on: same conservative trade-off as the primary
 #   aux slot.
 program_args = [
     "--ctx-size", "65536",
     "--parallel", "2",
+    "--rope-scaling", "yarn",
+    "--yarn-orig-ctx", "40960",
     "--cont-batching",
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",
