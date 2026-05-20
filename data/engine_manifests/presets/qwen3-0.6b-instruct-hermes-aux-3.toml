@@ -54,6 +54,7 @@ program_args = [
     "--parallel", "2",
     "--rope-scaling", "yarn",
     "--yarn-orig-ctx", "40960",
+    "--rope-freq-scale", "0.625",
     "--cont-batching",
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",
