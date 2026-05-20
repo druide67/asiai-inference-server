@@ -187,7 +187,6 @@ def test_list_loaded_models_empty_when_engine_lacks_method() -> None:
         (OmlxDriver.from_manifest, "omlx"),
         (TurboquantDriver.from_manifest, "turboquant"),
         (LlamaCppDriver.from_manifest, "llamacpp"),
-        (LlamaCppAuxDriver.from_manifest, "llamacpp-aux"),
         (VmlxDriver.from_manifest, "vmlx"),
         (MlxLmDriver.from_manifest, "mlx-lm"),
     ],
@@ -195,6 +194,25 @@ def test_list_loaded_models_empty_when_engine_lacks_method() -> None:
 def test_factories_load_correct_manifest(factory, expected_name: str) -> None:
     driver = factory()
     assert driver.manifest.name == expected_name
+
+
+_AUX_INSTANCES = ["llamacpp-aux-1", "llamacpp-aux-2", "llamacpp-aux-3", "llamacpp-aux-4"]
+
+
+@pytest.mark.parametrize("instance", _AUX_INSTANCES)
+def test_llamacpp_aux_family_factory_loads_each_instance(instance: str) -> None:
+    """One driver class, N instances — each discovered by manifest name."""
+    driver = LlamaCppAuxDriver.from_manifest_name(instance)
+    assert driver.manifest.name == instance
+
+
+def test_llamacpp_aux_from_manifest_requires_explicit_manifest() -> None:
+    """The family driver has no default instance — ``from_manifest()`` without
+    args must fail loudly rather than picking an arbitrary sibling."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="explicit manifest"):
+        LlamaCppAuxDriver.from_manifest()
 
 
 def test_omlx_driver_is_restart_only_subclass() -> None:
@@ -253,10 +271,11 @@ def test_llamacpp_driver_is_restart_only_subclass() -> None:
     assert driver._try_native_unload("any-model") is False
 
 
-def test_llamacpp_aux_driver_is_restart_only_subclass() -> None:
-    driver = LlamaCppAuxDriver.from_manifest()
+@pytest.mark.parametrize("instance", _AUX_INSTANCES)
+def test_llamacpp_aux_driver_is_restart_only_subclass(instance: str) -> None:
+    driver = LlamaCppAuxDriver.from_manifest_name(instance)
     assert isinstance(driver, RestartOnlyDriver)
-    assert driver.name == "llamacpp-aux"
+    assert driver.name == instance
     assert driver._try_native_unload("any-model") is False
 
 

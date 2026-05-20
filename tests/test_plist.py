@@ -148,21 +148,31 @@ def test_plist_no_template_arg_when_template_path_unset() -> None:
     assert "--chat-template-file" not in d["ProgramArguments"]
 
 
-def test_llamacpp_aux_plist_uses_aux_model_path_and_no_template() -> None:
-    """llamacpp-aux binds the aux model path and ships no chat template override."""
+@pytest.mark.parametrize(
+    "name, port",
+    [
+        ("llamacpp-aux-1", "8090"),
+        ("llamacpp-aux-2", "8091"),
+        ("llamacpp-aux-3", "8092"),
+        ("llamacpp-aux-4", "8093"),
+    ],
+)
+def test_llamacpp_aux_plist_uses_aux_model_path_and_no_template(name: str, port: str) -> None:
+    """Each llamacpp-aux-N binds its own auxN/ model path on a distinct port."""
     import os
 
-    m = load_manifest("llamacpp-aux")
+    m = load_manifest(name)
     d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
     args = d["ProgramArguments"]
 
     assert "--model" in args
     expanded = args[args.index("--model") + 1]
-    assert expanded == os.path.expanduser("~/llms/gguf/aux/active.gguf")
-    # aux doesn't override the template
+    instance_suffix = name.rsplit("-", 1)[-1]
+    assert expanded == os.path.expanduser(f"~/llms/gguf/aux{instance_suffix}/active.gguf")
+    # aux baseline doesn't override the template
     assert "--chat-template-file" not in args
-    # Port discriminates from main instance (8082, not 8081 to avoid turboquant)
-    assert args[args.index("--port") + 1] == "8082"
+    # Port discriminates from main instance and the three peers.
+    assert args[args.index("--port") + 1] == port
 
 
 def test_render_plist_xml_is_valid_plist() -> None:

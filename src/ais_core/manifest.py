@@ -12,11 +12,24 @@ Why TOML
 TOML reads cleaner than JSON (comments, no trailing-comma traps) for files
 edited by humans.
 
-Why bundled, not user-editable
-------------------------------
-Manifests describe the engine itself (Ollama is Ollama everywhere), so they
-ship with the package. User overrides go in ``~/.config/asiai-inference-server/``
-in v0.2+ — never in the bundled manifests.
+Bundled defaults + user overrides
+---------------------------------
+Manifests describe the engine itself (Ollama is Ollama everywhere), so the
+baseline ships with the package. Users who want to add their own engine
+instances (e.g. ``llamacpp-aux-5`` for a fifth auxiliary slot) or override
+the bundled tuning of a preset drop their TOML into the XDG user config
+directory:
+
+    $XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/<name>.toml
+    $XDG_CONFIG_HOME/asiai-inference-server/presets/<preset>.toml
+
+The override path is ``~/.config/asiai-inference-server/`` by default and
+can be relocated wholesale via the ``ASIAI_USER_CONFIG_DIR`` environment
+variable (testing, sandboxed installs).
+
+When a user manifest or preset shares its name with a bundled file, the
+user version wins and a warning is logged at load time so operators see
+the override happening.
 
 Plist label policy
 ------------------
@@ -30,11 +43,14 @@ separate plist files; an ``aisctl engine install`` writes a fresh
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 PLIST_LABEL_RE = re.compile(r"^com\.asiai\.[a-z0-9-]+$")
 ANCHOR_NAME_RE = re.compile(r"^com\.asiai\.[a-z0-9-]+$")
@@ -175,24 +191,106 @@ def _bundled_manifest_dir() -> Path:
     )
 
 
+def _user_config_dir() -> Path:
+    """Resolve the XDG user-config directory for asiai-inference-server.
+
+    Order of precedence:
+
+    1. ``ASIAI_USER_CONFIG_DIR`` environment variable — full override of the
+       whole user-config tree (used by tests, sandboxed installs, multi-host
+       layouts).
+    2. ``XDG_CONFIG_HOME/asiai-inference-server`` if ``XDG_CONFIG_HOME`` is set.
+    3. ``~/.config/asiai-inference-server`` (POSIX default).
+    """
+    override = os.environ.get("ASIAI_USER_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg).expanduser() / "asiai-inference-server"
+    return Path("~/.config/asiai-inference-server").expanduser()
+
+
+def _user_manifest_dir() -> Path:
+    return _user_config_dir() / "engine_manifests"
+
+
+def _user_preset_dir() -> Path:
+    return _user_config_dir() / "presets"
+
+
 def list_manifests() -> list[str]:
-    """Return the names of every bundled baseline manifest, sorted."""
-    return sorted(p.stem for p in _bundled_manifest_dir().glob("*.toml"))
+    """Return the names of every discoverable engine manifest, sorted.
+
+    Union of bundled manifests (shipped with the package) and any user
+    manifests dropped in the XDG user-config directory. A user manifest
+    that shares a stem with a bundled one is silently included once in
+    the returned set — the user version wins at ``load_manifest()`` time
+    (with a warning log).
+    """
+    names = {p.stem for p in _bundled_manifest_dir().glob("*.toml")}
+    user_dir = _user_manifest_dir()
+    if user_dir.is_dir():
+        names |= {p.stem for p in user_dir.glob("*.toml")}
+    return sorted(names)
 
 
 def list_presets() -> list[str]:
-    """Return the names of every bundled preset, sorted.
+    """Return the names of every discoverable preset, sorted.
 
-    Presets live under ``data/engine_manifests/presets/`` and are full,
-    self-contained manifests tuned for a specific model + use case (e.g.
-    ``qwen3.6-35b-a3b-hermes-agent-64gb``). At ``aisctl install`` time the
-    user picks the preset that matches their hardware and use case, or
-    sticks with the engine baseline for a generic out-of-the-box config.
+    Presets are full self-contained manifests tuned for a specific model
+    plus use case. Bundled presets live under ``data/engine_manifests/presets/``
+    in the package and serve as documented examples (see the ``README.md``
+    next to them). Users add their own presets under
+    ``$XDG_CONFIG_HOME/asiai-inference-server/presets/`` — these are picked
+    up automatically and override any bundled preset of the same name.
     """
-    presets_dir = _bundled_manifest_dir() / "presets"
-    if not presets_dir.is_dir():
-        return []
-    return sorted(p.stem for p in presets_dir.glob("*.toml"))
+    bundled = _bundled_manifest_dir() / "presets"
+    names = set()
+    if bundled.is_dir():
+        names |= {p.stem for p in bundled.glob("*.toml")}
+    user_dir = _user_preset_dir()
+    if user_dir.is_dir():
+        names |= {p.stem for p in user_dir.glob("*.toml")}
+    return sorted(names)
+
+
+def _find_manifest_path(name: str) -> Path | None:
+    """User dir first (override semantics), bundled dir second."""
+    user = _user_manifest_dir() / f"{name}.toml"
+    if user.is_file():
+        bundled = _bundled_manifest_dir() / f"{name}.toml"
+        if bundled.is_file():
+            logger.warning(
+                "user manifest %s overrides bundled manifest (user=%s, bundled=%s)",
+                name,
+                user,
+                bundled,
+            )
+        return user
+    bundled = _bundled_manifest_dir() / f"{name}.toml"
+    if bundled.is_file():
+        return bundled
+    return None
+
+
+def _find_preset_path(preset: str) -> Path | None:
+    """User dir first (override semantics), bundled dir second."""
+    user = _user_preset_dir() / f"{preset}.toml"
+    if user.is_file():
+        bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
+        if bundled.is_file():
+            logger.warning(
+                "user preset %s overrides bundled preset (user=%s, bundled=%s)",
+                preset,
+                user,
+                bundled,
+            )
+        return user
+    bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
+    if bundled.is_file():
+        return bundled
+    return None
 
 
 def preset_summary(preset: str) -> dict[str, str]:
@@ -201,9 +299,9 @@ def preset_summary(preset: str) -> dict[str, str]:
     Avoids the full ``EngineManifest`` validation cost when callers only
     need to surface the engine + display for listings.
     """
-    path = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
-    if not path.is_file():
-        raise FileNotFoundError(f"No preset {preset!r} at {path}")
+    path = _find_preset_path(preset)
+    if path is None:
+        raise FileNotFoundError(f"No preset {preset!r}")
     with path.open("rb") as f:
         raw = tomllib.load(f)
     return {
@@ -216,25 +314,28 @@ def preset_summary(preset: str) -> dict[str, str]:
 def load_manifest(name: str, preset: str | None = None) -> EngineManifest:
     """Load and validate a manifest.
 
-    Without ``preset``, loads the engine baseline ``<name>.toml`` (generic
-    OSS-safe defaults). With ``preset``, loads ``presets/<preset>.toml``
-    instead — a self-contained manifest tuned for a specific use case.
+    Without ``preset``, loads the engine baseline ``<name>.toml``. With
+    ``preset``, loads ``presets/<preset>.toml`` instead — a self-contained
+    manifest tuned for a specific use case.
+
+    Both baseline and preset are looked up in the user config dir first
+    (``$XDG_CONFIG_HOME/asiai-inference-server/``) and the bundled package
+    dir second. A user file with the same name overrides the bundled one
+    and emits a warning at load time.
 
     The preset is responsible for declaring every field it needs (no merge
-    with the baseline). Presets named after a specific model and workload
-    ship pre-baked tuning that real users can adopt without editing TOML.
+    with the baseline).
     """
     if preset is not None:
-        path = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
-        if not path.is_file():
+        path = _find_preset_path(preset)
+        if path is None:
             raise FileNotFoundError(
-                f"No preset {preset!r} for engine {name!r} at {path}; "
-                f"available presets: {list_presets()}"
+                f"No preset {preset!r} for engine {name!r}; available presets: {list_presets()}"
             )
     else:
-        path = _bundled_manifest_dir() / f"{name}.toml"
-        if not path.is_file():
-            raise FileNotFoundError(f"No manifest for engine {name!r} at {path}")
+        path = _find_manifest_path(name)
+        if path is None:
+            raise FileNotFoundError(f"No manifest for engine {name!r}")
 
     with path.open("rb") as f:
         raw = tomllib.load(f)

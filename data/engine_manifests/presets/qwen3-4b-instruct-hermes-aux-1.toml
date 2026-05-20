@@ -1,0 +1,101 @@
+# Example preset — Qwen3-4B-Instruct on llamacpp-aux-1 (port 8090, primary aux slot)
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Example target role mix (Hermes Agent class):
+#   - web_extract (burst x4 articles during briefing turns)
+#   - compression (session auto-compression)
+#   - mcp (MCP tool gateway routing)
+#   - triage / curator workloads
+#   Primary aux instance with the biggest model and highest concurrency.
+#
+# Target hardware: Apple Silicon M-series 64 GB co-tenant with three other
+# llamacpp-aux instances (1.7B on 8091, 0.6B on 8092, VL-7B on 8093) and
+# the optional :8000 35B-A3B MLX fallback (lazy-loaded).
+# Target model: Qwen3-4B-Instruct (-2507 revision).
+#   GGUF: unsloth/Qwen3-4B-Instruct-2507-GGUF UD-Q5_K_XL.
+#   Symlink ~/llms/gguf/aux1/active.gguf → your chosen GGUF.
+# Family rationale: Qwen3 tokenizer shared with Qwen3.6 used as the main,
+#   prompt cache compatibility preserved across the host.
+#
+# Memory footprint (M4 64 GB, multi-instance co-tenant):
+#   model ~3 GB (Q5_K_XL) + KV q8 at ctx 64K parallel 4 ≈ ~2 GB
+#   (Qwen3-4B: 36 layers × 8 KV heads × 128 head_dim) ≈ ~5 GB total.
+#   Leaves headroom for the three peers (~9 GB combined) + macOS + the
+#   orchestrator + any container runtime on the same host.
+#
+# Slot size: ctx 65536 / parallel 4 = 16K per slot. web_extract pages
+# observed up to ~32K tokens — the orchestrator will segment input above
+# 16K, accepted trade-off for the parallel=4 burst capacity. If
+# segmentation cost dominates in production, options are:
+#   - reduce parallel to 2 (slot 32K, halves burst capacity)
+#   - or raise ctx to 131072 (slot 32K at parallel 4, +KV ~2 GB footprint)
+#
+# Install: aisctl install llamacpp-aux-1 --preset qwen3-4b-instruct-hermes-aux-1
+
+name = "llamacpp-aux-1"
+display = "llama.cpp aux-1 (Qwen3-4B Hermes primary multi-role)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux1/active.gguf"
+model_path = "~/llms/gguf/aux1/active.gguf"
+# Tuning rationale:
+# - --parallel 4: web_extract burst x4 during briefing tick is the
+#   bottleneck. Concurrent compression/mcp = sustained 3-4 calls expected.
+# - --ctx-size 65536: orchestrator convention (64K minimum across all
+#   aux slots, see family manifest).
+# - KV q8_0 + --flash-attn on: conservative KV quant trade-off. Re-evaluate
+#   on bench data; if web_extract quality drops on dense pages, this
+#   instance is the candidate to swap to q4_0 (vision aux being the other).
+# - --cache-reuse 256 + --slot-prompt-similarity 0.5: same system prompts
+#   recur across web_extract calls (same compressor sys, different page
+#   input) — prefix cache reuse is the metric to monitor on this instance.
+program_args = [
+    "--ctx-size", "65536",
+    "--parallel", "4",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux-1"
+throttle_interval = 10
+timeout = 30
+
+[network]
+port = 8090
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 30s: 4B GGUF + 2 GB KV mlock loads in 8-15s on M-series NVMe.
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux-1"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux-1"
+stdout = "llamacpp-aux-1.log"
+stderr = "llamacpp-aux-1.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

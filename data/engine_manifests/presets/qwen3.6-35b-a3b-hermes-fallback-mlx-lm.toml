@@ -1,8 +1,12 @@
-# Preset — Qwen3.6-35B-A3B served by mlx-lm for Hermes Agent fallback
+# Example preset — Qwen3.6-35B-A3B served by mlx-lm for Hermes Agent fallback
 #
-# Target role: FALLBACK on a 64 GB host (e.g. Apple M4 Pro). When the
-#   PRIMARY endpoint (a larger machine running llamacpp + 27B Dense) is
-#   unreachable, the Hermes orchestrator routes to this endpoint.
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Target role: FALLBACK on a 64 GB host. When the PRIMARY endpoint
+#   (a larger machine running a heavier model) is unreachable, the
+#   orchestrator routes to this endpoint.
 # Target hardware: Apple Silicon M-series with 64+ GB unified memory.
 # Target use case: Hermes Agent class — multi-turn agentic sessions.
 #   mlx-lm provides contiguous prefix cache reuse (the metric that makes

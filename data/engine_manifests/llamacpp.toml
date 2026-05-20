@@ -20,9 +20,10 @@ candidates = [
     "/opt/homebrew/bin/llama-server",
     "/usr/local/bin/llama-server",
 ]
-# Discriminates the main instance (8080) from llamacpp-aux (8082) by the
-# model path in cmdline. The /aux/ segment breaks the substring match in
-# both directions — see test_llamacpp_and_aux_process_patterns_are_disjoint.
+# Discriminates the main instance (8080) from the llamacpp-aux-1/2/3/4
+# family (8090-8093) by the model path in cmdline. The auxN/ segments
+# break the substring match in both directions — see
+# test_llamacpp_and_aux_process_patterns_are_disjoint.
 process_pattern = "llms/gguf/active.gguf"
 # User-managed symlink to the active GGUF. Convention:
 #   ln -sf ~/llms/gguf/<MyModel>.gguf ~/llms/gguf/active.gguf

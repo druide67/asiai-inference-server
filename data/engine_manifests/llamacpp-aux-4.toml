@@ -1,0 +1,57 @@
+# Engine manifest — llama.cpp auxiliary instance #4 — generic baseline
+#
+# Member of the llamacpp-aux-1/2/3/4 family. See ``llamacpp-aux-1.toml``
+# for the family rationale and port assignment convention.
+#
+# Vision slot: this instance is intended for multimodal models. The
+# associated preset must provide ``--mmproj <path>`` in its program_args.
+# The aux4/ symlink convention should include a ``mmproj.gguf`` companion
+# next to ``active.gguf``.
+#
+#   aisctl install llamacpp-aux-4 --preset <preset-name>
+
+name = "llamacpp-aux-4"
+display = "llama.cpp aux #4 (port 8093, vision slot)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux4/active.gguf"
+model_path = "~/llms/gguf/aux4/active.gguf"
+program_args = [
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--mlock",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux-4"
+throttle_interval = 10
+# 60s: vision GGUF + mmproj typically heavier to mmap than text-only.
+timeout = 60
+
+[network]
+port = 8093
+bind = "0.0.0.0"
+health_endpoint = "/health"
+health_timeout = 60
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux-4"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux-4"
+stdout = "llamacpp-aux-4.log"
+stderr = "llamacpp-aux-4.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

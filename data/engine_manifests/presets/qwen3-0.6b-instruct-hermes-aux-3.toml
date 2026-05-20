@@ -1,0 +1,85 @@
+# Example preset — Qwen3-0.6B-Instruct on llamacpp-aux-3 (port 8092, small aux slot)
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Example target role (Hermes Agent class):
+#   - title_generation
+#   Smallest aux instance, dedicated to the cheapest and most frequent
+#   flow (one title per new session).
+#
+# Target hardware: Apple Silicon M-series 64 GB co-tenant with three other
+# llamacpp-aux instances (4B on 8090, 1.7B on 8091, VL-7B on 8093).
+# Target model: Qwen3-0.6B-Instruct.
+#   GGUF: unsloth/Qwen3-0.6B-Instruct-GGUF Q8_0 (Q8 acceptable at this
+#   size; minimal RAM impact and stronger quality than Q4 on a sub-1B
+#   model).
+#   Symlink ~/llms/gguf/aux3/active.gguf → your chosen GGUF.
+#
+# Memory footprint (M4 64 GB, multi-instance co-tenant):
+#   model ~0.7 GB + KV q8 at ctx 64K parallel 2 ≈ ~1 GB total. Smallest
+#   peer on the host.
+#
+# Install: aisctl install llamacpp-aux-3 --preset qwen3-0.6b-instruct-hermes-aux-3
+
+name = "llamacpp-aux-3"
+display = "llama.cpp aux-3 (Qwen3-0.6B Hermes title-gen)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux3/active.gguf"
+model_path = "~/llms/gguf/aux3/active.gguf"
+# Tuning rationale:
+# - --parallel 2: burst tolerance for batch title generation (session
+#   import or replay). Single-flow otherwise.
+# - --ctx-size 65536: over-provisioned for title generation (input ~2-5K
+#   tokens, output <50). Kept at the family convention for ops simplicity.
+# - Q8_0 GGUF: quality matters on a 0.6B model; Q4 would visibly degrade
+#   title coherence. The 0.4 GB additional RAM vs Q4 is negligible.
+program_args = [
+    "--ctx-size", "65536",
+    "--parallel", "2",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux-3"
+throttle_interval = 10
+timeout = 30
+
+[network]
+port = 8092
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 30s: 0.6B GGUF loads in 3-5s.
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux-3"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux-3"
+stdout = "llamacpp-aux-3.log"
+stderr = "llamacpp-aux-3.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

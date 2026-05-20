@@ -22,7 +22,10 @@ EXPECTED_ENGINES = {
     "omlx",
     "turboquant",
     "llamacpp",
-    "llamacpp-aux",
+    "llamacpp-aux-1",
+    "llamacpp-aux-2",
+    "llamacpp-aux-3",
+    "llamacpp-aux-4",
     "vmlx",
     "mlx-lm",
 }
@@ -146,17 +149,30 @@ def test_llamacpp_hermes_preset() -> None:
     assert "--chat-template-kwargs" in pa
 
 
-def test_llamacpp_aux_baseline_specifics() -> None:
-    """Baseline llamacpp-aux.toml is the generic OSS-safe defaults (no tuning)."""
-    m = load_manifest("llamacpp-aux")
-    assert m.network.port == 8082
+@pytest.mark.parametrize(
+    "name, port",
+    [
+        ("llamacpp-aux-1", 8090),
+        ("llamacpp-aux-2", 8091),
+        ("llamacpp-aux-3", 8092),
+        ("llamacpp-aux-4", 8093),
+    ],
+)
+def test_llamacpp_aux_baseline_specifics(name: str, port: int) -> None:
+    """Baseline llamacpp-aux-N.toml is the generic OSS-safe defaults (no tuning).
+
+    Each manifest in the aux family declares its own port (8090-8093) and a
+    distinct ``llms/gguf/auxN/active.gguf`` symlink path so the four
+    instances coexist on the host without process-pattern cross-match.
+    """
+    m = load_manifest(name)
+    assert m.network.port == port
     assert m.network.health_endpoint == "/health"
-    assert m.plist.name == "com.asiai.llamacpp-aux"
-    assert m.firewall.anchor_name == "com.asiai.llamacpp-aux"
-    assert m.binary.process_pattern == "llms/gguf/aux/active.gguf"
-    assert m.binary.model_path == "~/llms/gguf/aux/active.gguf"
-    # Small-model health timeout: ≤30s
-    assert m.network.health_timeout <= 30
+    assert m.plist.name == f"com.asiai.{name}"
+    assert m.firewall.anchor_name == f"com.asiai.{name}"
+    instance_suffix = name.rsplit("-", 1)[-1]  # "1", "2", "3", "4"
+    assert m.binary.process_pattern == f"llms/gguf/aux{instance_suffix}/active.gguf"
+    assert m.binary.model_path == f"~/llms/gguf/aux{instance_suffix}/active.gguf"
     pa = list(m.binary.program_args)
     assert "--mlock" in pa
     assert "--cont-batching" in pa
@@ -165,53 +181,91 @@ def test_llamacpp_aux_baseline_specifics() -> None:
     assert "--slot-prompt-similarity" not in pa
 
 
-def test_llamacpp_aux_presets_target_engine_and_carry_tuning() -> None:
-    """Both aux presets (1.7B and 4B) target llamacpp-aux and carry tuning."""
-    # Per-preset expected parallel value (4B parallel=1 after PRISM ADR-004 D3,
-    # 1.7B legacy parallel=2 kept for non-Hermes use cases <64K).
-    expected_parallel = {
-        "qwen3-1.7b-instruct-hermes-compression": "2",
-        "qwen3-4b-instruct-hermes-compression": "1",
-    }
-    for preset, par in expected_parallel.items():
-        m = load_manifest("llamacpp-aux", preset=preset)
-        assert m.name == "llamacpp-aux", preset
-        pa = list(m.binary.program_args)
-        assert "--ctx-size" in pa, preset
-        assert pa[pa.index("--parallel") + 1] == par, preset
-        assert "--cache-reuse" in pa, preset
-        # KV cache q8 keeps the aux footprint small
-        assert "--cache-type-k" in pa, preset
-        assert pa[pa.index("--cache-type-k") + 1] == "q8_0", preset
+@pytest.mark.parametrize(
+    "name, preset, expected_parallel",
+    [
+        ("llamacpp-aux-1", "qwen3-4b-instruct-hermes-aux-1", "4"),
+        ("llamacpp-aux-2", "qwen3-1.7b-instruct-hermes-aux-2", "2"),
+        ("llamacpp-aux-3", "qwen3-0.6b-instruct-hermes-aux-3", "2"),
+        ("llamacpp-aux-4", "qwen2.5-vl-7b-instruct-hermes-aux-4", "1"),
+    ],
+)
+def test_llamacpp_aux_presets_target_engine_and_carry_tuning(
+    name: str, preset: str, expected_parallel: str
+) -> None:
+    """Each aux-N preset targets its own manifest and carries Hermes-class tuning."""
+    m = load_manifest(name, preset=preset)
+    assert m.name == name
+    pa = list(m.binary.program_args)
+    assert "--ctx-size" in pa
+    assert pa[pa.index("--ctx-size") + 1] == "65536"
+    assert pa[pa.index("--parallel") + 1] == expected_parallel
+    assert "--cache-reuse" in pa
+    # KV cache q8 keeps each aux footprint small enough to coexist on M4 64 GB.
+    assert pa[pa.index("--cache-type-k") + 1] == "q8_0"
+    assert pa[pa.index("--cache-type-v") + 1] == "q8_0"
 
 
 def test_llamacpp_and_aux_process_patterns_are_disjoint() -> None:
-    """Critical invariant: pkill -f on one must never match the other's cmdline.
+    """Critical invariant: pkill -f on one must never match a peer's cmdline.
 
     The real semantic we care about is: given a representative cmdline for
     each instance (the kind ``pgrep -f`` actually sees in production), the
-    pattern of one engine must not match the cmdline of the other. Testing
-    only ``main not in aux`` (substring on the patterns themselves) misses
-    that target — see code review M1.
+    pattern of one engine must not match the cmdline of any other. The
+    aux-N suffixes mean each ``auxN/`` segment in the model path
+    discriminates one instance against the four others (main + 3 peers).
     """
     main_pat = load_manifest("llamacpp").binary.process_pattern
-    aux_pat = load_manifest("llamacpp-aux").binary.process_pattern
+    aux_pats = {
+        f"llamacpp-aux-{i}": load_manifest(f"llamacpp-aux-{i}").binary.process_pattern
+        for i in range(1, 5)
+    }
 
-    main_cmdline = (
-        "/opt/homebrew/bin/llama-server --ctx-size 131072 --parallel 2 "
-        "--model /Users/jmn/llms/gguf/active.gguf --port 8080"
-    )
-    aux_cmdline = (
-        "/opt/homebrew/bin/llama-server --ctx-size 32768 --parallel 4 "
-        "--model /Users/jmn/llms/gguf/aux/active.gguf --port 8082"
-    )
+    cmdlines = {
+        "llamacpp": (
+            "/opt/homebrew/bin/llama-server --ctx-size 131072 --parallel 2 "
+            "--model /path/to/llms/gguf/active.gguf --port 8080"
+        ),
+        "llamacpp-aux-1": (
+            "/opt/homebrew/bin/llama-server --ctx-size 65536 --parallel 4 "
+            "--model /path/to/llms/gguf/aux1/active.gguf --port 8090"
+        ),
+        "llamacpp-aux-2": (
+            "/opt/homebrew/bin/llama-server --ctx-size 65536 --parallel 2 "
+            "--model /path/to/llms/gguf/aux2/active.gguf --port 8091"
+        ),
+        "llamacpp-aux-3": (
+            "/opt/homebrew/bin/llama-server --ctx-size 65536 --parallel 2 "
+            "--model /path/to/llms/gguf/aux3/active.gguf --port 8092"
+        ),
+        "llamacpp-aux-4": (
+            "/opt/homebrew/bin/llama-server --ctx-size 65536 --parallel 1 "
+            "--model /path/to/llms/gguf/aux4/active.gguf --port 8093"
+        ),
+    }
 
-    assert main_pat in main_cmdline  # main matches its own cmdline
-    assert aux_pat in aux_cmdline  # aux matches its own cmdline
-    assert main_pat not in aux_cmdline  # main pattern must miss aux cmdline
-    assert aux_pat not in main_cmdline  # aux pattern must miss main cmdline
-    # And the ports differ.
-    assert load_manifest("llamacpp").network.port != load_manifest("llamacpp-aux").network.port
+    # Each pattern matches its own cmdline.
+    assert main_pat in cmdlines["llamacpp"]
+    for name, pat in aux_pats.items():
+        assert pat in cmdlines[name], name
+
+    # Main pattern misses every aux cmdline.
+    for name in aux_pats:
+        assert main_pat not in cmdlines[name], name
+
+    # Each aux pattern misses every peer cmdline (main + 3 sibling aux).
+    for name, pat in aux_pats.items():
+        for other_name, other_cmdline in cmdlines.items():
+            if other_name == name:
+                continue
+            assert pat not in other_cmdline, (name, other_name)
+
+    # All five ports are distinct.
+    ports = {
+        "llamacpp": load_manifest("llamacpp").network.port,
+        **{name: load_manifest(name).network.port for name in aux_pats},
+    }
+    assert len(set(ports.values())) == len(ports), ports
 
 
 def test_load_unknown_engine_raises() -> None:

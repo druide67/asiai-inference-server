@@ -1,0 +1,98 @@
+# Example preset — Qwen2.5-VL-7B-Instruct on llamacpp-aux-4 (port 8093, vision slot)
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Example target role (Hermes Agent class):
+#   - vision (image understanding, OCR, screenshot triage)
+#   Single-flow vision instance with mmproj.
+#
+# Target hardware: Apple Silicon M-series 64 GB co-tenant with three other
+# llamacpp-aux instances (4B on 8090, 1.7B on 8091, 0.6B on 8092).
+# Target model: Qwen2.5-VL-7B-Instruct.
+#   GGUF: unsloth/Qwen2.5-VL-7B-Instruct-GGUF UD-Q4_K_M.
+#   mmproj: unsloth/Qwen2.5-VL-7B-Instruct-GGUF mmproj-F16.gguf
+#   Symlink ~/llms/gguf/aux4/active.gguf → your chosen text GGUF.
+#   Symlink ~/llms/gguf/aux4/mmproj.gguf → matching mmproj.
+#
+# Memory footprint (M4 64 GB, multi-instance co-tenant):
+#   model ~5 GB (Q4_K_M) + mmproj ~1.4 GB (F16) + KV q8 at ctx 64K
+#   parallel 1 ≈ ~0.7 GB ≈ ~7 GB total. Heaviest aux peer.
+#
+# Slot size: ctx 65536 / parallel 1 = 64K. Single flow accommodates
+# multi-image flows (page-level OCR, multi-screenshot triage).
+#
+# Fallback dégradé pattern (operator-driven, see brief): when a remote
+# PRIMARY is unreachable and the host needs to load a heavier fallback
+# model, the orchestrator may stop this aux-4 to free ~7 GB and load
+# the fallback elsewhere. The instance must remain individually
+# stoppable via ``aisctl stop llamacpp-aux-4``.
+#
+# Install: aisctl install llamacpp-aux-4 --preset qwen2.5-vl-7b-instruct-hermes-aux-4
+
+name = "llamacpp-aux-4"
+display = "llama.cpp aux-4 (Qwen2.5-VL-7B Hermes vision)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux4/active.gguf"
+model_path = "~/llms/gguf/aux4/active.gguf"
+# Tuning rationale:
+# - --parallel 1: vision calls are not concurrent during a tick (single
+#   screenshot/image per turn); slot 64K covers multi-image flows.
+# - --ctx-size 65536: family convention. Also matches typical vision
+#   context (1-4 high-res images encoded ~4-16K vision tokens each).
+# - --mmproj: required for the vision path; resolved via the aux4/mmproj
+#   symlink set by the operator before ``aisctl install``.
+# - KV q8_0 + --flash-attn on: same conservative trade-off as siblings.
+#   Vision OCR on dense pages may show quality drop with q8_0 vs f16;
+#   bench during sprint 2 validates this empirically before promoting
+#   to production.
+program_args = [
+    "--ctx-size", "65536",
+    "--parallel", "1",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--jinja",
+    "--mmproj", "~/llms/gguf/aux4/mmproj.gguf",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux-4"
+throttle_interval = 10
+# 60s: 7B + 1.4 GB mmproj mlock can take 15-25s on M-series NVMe.
+timeout = 60
+
+[network]
+port = 8093
+bind = "0.0.0.0"
+health_endpoint = "/health"
+health_timeout = 60
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux-4"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux-4"
+stdout = "llamacpp-aux-4.log"
+stderr = "llamacpp-aux-4.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

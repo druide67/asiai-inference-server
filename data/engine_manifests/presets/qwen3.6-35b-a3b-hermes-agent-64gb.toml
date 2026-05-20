@@ -1,7 +1,10 @@
-# Preset — Qwen3.6-35B-A3B with Hermes Agent multi-turn workloads (64 GB host)
+# Example preset — Qwen3.6-35B-A3B with Hermes Agent multi-turn workloads (64 GB host)
 #
-# Target hardware: Apple Silicon M-series with 64+ GB unified memory
-#   (validated on M4 Pro 64 GB and M5 Max 128 GB).
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Target hardware: Apple Silicon M-series with 64+ GB unified memory.
 # Target use case: Hermes Agent class — multi-turn agentic sessions with
 #   prefix cache reuse across requests, slot management, full Metal offload.
 # Target model: Qwen3.6-35B-A3B (sparse MoE, ~3B active, ~35B parameters).

@@ -1,0 +1,86 @@
+# Example preset — Qwen3-1.7B-Instruct on llamacpp-aux-2 (port 8091, medium aux slot)
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Example target role mix (Hermes Agent class):
+#   - session_search
+#   - skills_hub
+#   - approval
+#   Medium-sized aux instance with parallel=2 for the burst of
+#   session_search and skills_hub during a turn.
+#
+# Target hardware: Apple Silicon M-series 64 GB co-tenant with three other
+# llamacpp-aux instances (4B on 8090, 0.6B on 8092, VL-7B on 8093).
+# Target model: Qwen3-1.7B-Instruct (-2507 revision).
+#   GGUF: unsloth/Qwen3-1.7B-Instruct-GGUF UD-Q4_K_M.
+#   Symlink ~/llms/gguf/aux2/active.gguf → your chosen GGUF.
+#
+# Memory footprint (M4 64 GB, multi-instance co-tenant):
+#   model ~1.2 GB + KV q8 at ctx 64K parallel 2 ≈ ~1.5 GB total.
+#
+# Slot size: ctx 65536 / parallel 2 = 32K per slot. Adequate for
+# session_search, skills_hub, approval which typically stay under ~10K
+# input tokens.
+#
+# Install: aisctl install llamacpp-aux-2 --preset qwen3-1.7b-instruct-hermes-aux-2
+
+name = "llamacpp-aux-2"
+display = "llama.cpp aux-2 (Qwen3-1.7B Hermes medium aux)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux2/active.gguf"
+model_path = "~/llms/gguf/aux2/active.gguf"
+# Tuning rationale:
+# - --parallel 2: tolerate session_search + skills_hub concurrent during
+#   a tick. approval is bursty single-call but cheap.
+# - --ctx-size 65536: family convention (64K minimum on all aux slots).
+# - KV q8_0 + --flash-attn on: same conservative trade-off as the primary
+#   aux slot.
+program_args = [
+    "--ctx-size", "65536",
+    "--parallel", "2",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "q8_0",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux-2"
+throttle_interval = 10
+timeout = 30
+
+[network]
+port = 8091
+bind = "0.0.0.0"
+health_endpoint = "/health"
+health_timeout = 30
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux-2"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux-2"
+stdout = "llamacpp-aux-2.log"
+stderr = "llamacpp-aux-2.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

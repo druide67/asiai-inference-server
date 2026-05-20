@@ -1,9 +1,12 @@
-# Preset — Qwen3.6-27B Dense (hybrid attention) for Hermes Agent on 64 GB hosts
+# Example preset — Qwen3.6-27B Dense (hybrid attention) for Hermes Agent on 64 GB hosts
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
 #
 # Target hardware: Apple Silicon M-series with 64+ GB unified memory.
-#   Validated target: Mac Mini M4 Pro 64 GB co-tenant Hermes Agent + OrbStack.
 # Target use case: Hermes Agent class — multi-turn agentic sessions, 60-80
-#   api_calls per cycle, tool-calling fiability matters more than peak decode.
+#   api_calls per cycle, tool-calling reliability matters more than peak decode.
 # Target model: Qwen3.6-27B (dense, hybrid attention architecture).
 #   GGUF: unsloth/Qwen3.6-27B-GGUF UD-Q5_K_XL (~18.7 GB on disk).
 #   Symlink ~/llms/gguf/active.gguf → your chosen GGUF.

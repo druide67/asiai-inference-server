@@ -19,7 +19,9 @@ import argparse
 import dataclasses
 import json
 import os
+import re
 import sys
+from collections.abc import Callable
 from typing import Any
 
 from ais_core import lifecycle, memory, sudoers
@@ -39,16 +41,92 @@ from ais_engines.omlx import OmlxDriver
 from ais_engines.turboquant import TurboquantDriver
 from ais_engines.vmlx import VmlxDriver
 
-DRIVER_FACTORIES = {
+# Static driver registrations — engines that exist as a single instance,
+# one driver class each. Lookups for these names short-circuit ahead of
+# the family-pattern dispatch below.
+_STATIC_DRIVER_FACTORIES: dict[str, Callable[[], Any]] = {
     "ollama": OllamaDriver.from_manifest,
     "lmstudio": LMStudioDriver.from_manifest,
     "omlx": OmlxDriver.from_manifest,
     "turboquant": TurboquantDriver.from_manifest,
     "llamacpp": LlamaCppDriver.from_manifest,
-    "llamacpp-aux": LlamaCppAuxDriver.from_manifest,
     "vmlx": VmlxDriver.from_manifest,
     "mlx-lm": MlxLmDriver.from_manifest,
 }
+
+# Family-pattern registrations — names matching the regex resolve to the
+# associated driver class, instantiated with the matched manifest name.
+# This lets a new instance (e.g. ``llamacpp-aux-5``) be added by dropping
+# a TOML on disk, with no Python code change. New families (e.g.
+# ``mlx-lm-aux-N``) follow the same pattern: regex + class.
+_FAMILY_PATTERNS: list[tuple[re.Pattern[str], type]] = [
+    (re.compile(r"^llamacpp-aux-\d+$"), LlamaCppAuxDriver),
+]
+
+
+def get_driver_factory(name: str) -> Callable[[], Any]:
+    """Return a zero-arg factory that builds the driver for ``name``.
+
+    Looks first in the mutable :data:`DRIVER_FACTORIES` snapshot (the
+    static registry plus any family instance discovered at module load,
+    plus anything tests may have injected via ``patch.dict``). Falls back
+    to the family-pattern dispatch for engine names whose manifest landed
+    on disk after import time (user added a new ``llamacpp-aux-5.toml``
+    in their XDG dir, hot deployment, etc.). Raises ``KeyError`` if
+    neither path matches — the CLI handler converts that into a user-
+    facing ``SystemExit``.
+    """
+    snapshot = DRIVER_FACTORIES.get(name)
+    if snapshot is not None:
+        return snapshot
+    for pattern, driver_cls in _FAMILY_PATTERNS:
+        if pattern.match(name):
+            return lambda n=name, cls=driver_cls: cls.from_manifest_name(n)
+    raise KeyError(name)
+
+
+def _known_engine_names() -> set[str]:
+    """Names the CLI knows how to dispatch to, regardless of which TOMLs
+    happen to be on disk right now.
+
+    This is the union of (a) static registry names and (b) any manifest
+    name on disk that matches a family pattern. It's the set used to
+    answer "is this a known engine" at the CLI boundary.
+    """
+    names = set(_STATIC_DRIVER_FACTORIES)
+    for n in list_manifests():
+        for pattern, _ in _FAMILY_PATTERNS:
+            if pattern.match(n):
+                names.add(n)
+                break
+    return names
+
+
+def _build_driver_factories() -> dict[str, Callable[[], Any]]:
+    """Snapshot the dispatch table: static engines + discovered family instances.
+
+    Family instances are discovered by scanning ``list_manifests()`` and
+    matching against ``_FAMILY_PATTERNS``. Manifests added on disk after
+    this module is imported are NOT in the returned dict — runtime
+    dispatch for those goes through :func:`get_driver_factory` directly,
+    which re-evaluates the family patterns on each call.
+
+    The dict is mutable so existing test helpers (``unittest.mock.patch.dict``,
+    insertion of fakes) keep working. New code should prefer
+    :func:`get_driver_factory` to benefit from on-disk discovery.
+    """
+    factories: dict[str, Callable[[], Any]] = dict(_STATIC_DRIVER_FACTORIES)
+    for n in list_manifests():
+        if n in factories:
+            continue
+        for pattern, driver_cls in _FAMILY_PATTERNS:
+            if pattern.match(n):
+                factories[n] = lambda name=n, cls=driver_cls: cls.from_manifest_name(name)
+                break
+    return factories
+
+
+DRIVER_FACTORIES: dict[str, Callable[[], Any]] = _build_driver_factories()
 
 
 def _emit(payload: Any, *, as_json: bool) -> None:
@@ -80,10 +158,20 @@ def _resolve_manifest(name: str, preset: str | None = None) -> EngineManifest:
 
 
 def _driver_for(manifest: EngineManifest):
-    factory = DRIVER_FACTORIES.get(manifest.name)
-    if factory is None:
-        raise SystemExit(f"no driver registered for engine {manifest.name!r}")
-    return factory(manifest)
+    try:
+        factory = get_driver_factory(manifest.name)
+    except KeyError as e:
+        raise SystemExit(f"no driver registered for engine {manifest.name!r}") from e
+    # The static-registry factories accept an optional manifest argument;
+    # the family-pattern factories ignore it (they re-load by name).
+    # Calling with the manifest passes through cleanly in both shapes:
+    # the static ones use it, the family ones drop it silently. This
+    # keeps the call site uniform and lets tests inject a fake factory
+    # that asserts on the manifest if they want to.
+    try:
+        return factory(manifest)
+    except TypeError:
+        return factory()
 
 
 # ---------------------------------------------------------------------------
