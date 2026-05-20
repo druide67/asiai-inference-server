@@ -39,7 +39,11 @@ model_path = "~/llms/gguf/aux2/active.gguf"
 # Tuning rationale:
 # - --parallel 2: tolerate session_search + skills_hub concurrent during
 #   a tick. approval is bursty single-call but cheap.
-# - --ctx-size 65536: family convention (64K minimum on all aux slots).
+# - --ctx-size 131072 (parallel 2 → slot 64K): orchestrators that check
+#   the per-slot context window via /v1/models (e.g. Hermes Agent class)
+#   refuse boot when the SLOT falls below their minimum. llama-server
+#   reports n_ctx = ctx-size / parallel as the slot. We size the total
+#   to (slot ≥ 64K) × parallel = 131072.
 # - --rope-scaling yarn + --yarn-orig-ctx 40960: Qwen3-1.7B training
 #   context is 40K. Serving at 64K without YaRN extrapolation degrades
 #   quality past the training window. With YaRN, quality stays acceptable
@@ -48,7 +52,7 @@ model_path = "~/llms/gguf/aux2/active.gguf"
 # - KV q8_0 + --flash-attn on: same conservative trade-off as the primary
 #   aux slot.
 program_args = [
-    "--ctx-size", "65536",
+    "--ctx-size", "131072",
     "--parallel", "2",
     "--rope-scaling", "yarn",
     "--yarn-orig-ctx", "40960",

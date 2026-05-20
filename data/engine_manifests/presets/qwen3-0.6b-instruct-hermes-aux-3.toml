@@ -36,8 +36,12 @@ model_path = "~/llms/gguf/aux3/active.gguf"
 # Tuning rationale:
 # - --parallel 2: burst tolerance for batch title generation (session
 #   import or replay). Single-flow otherwise.
-# - --ctx-size 65536: over-provisioned for title generation (input ~2-5K
-#   tokens, output <50). Kept at the family convention for ops simplicity.
+# - --ctx-size 131072 (parallel 2 → slot 64K): same orchestrator-slot
+#   constraint as aux-2 — Hermes-style consumers check the per-slot
+#   context window and refuse a slot below 64K. Over-provisioned for
+#   title generation (input ~2-5K tokens, output <50), but the family
+#   convention keeps ops simple and the KV footprint stays trivial at
+#   0.6B model size.
 # - --rope-scaling yarn + --yarn-orig-ctx 40960: Qwen3-0.6B training
 #   context is 40960 (verified against Qwen/Qwen3-0.6B HF config.json,
 #   same as the 1.7B). Serving at 64K without YaRN extrapolation degrades
@@ -46,7 +50,7 @@ model_path = "~/llms/gguf/aux3/active.gguf"
 # - Q8_0 GGUF: quality matters on a 0.6B model; Q4 would visibly degrade
 #   title coherence. The 0.4 GB additional RAM vs Q4 is negligible.
 program_args = [
-    "--ctx-size", "65536",
+    "--ctx-size", "131072",
     "--parallel", "2",
     "--rope-scaling", "yarn",
     "--yarn-orig-ctx", "40960",

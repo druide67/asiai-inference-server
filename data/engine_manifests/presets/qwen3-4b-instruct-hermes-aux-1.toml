@@ -48,8 +48,14 @@ model_path = "~/llms/gguf/aux1/active.gguf"
 # Tuning rationale:
 # - --parallel 4: web_extract burst x4 during briefing tick is the
 #   bottleneck. Concurrent compression/mcp = sustained 3-4 calls expected.
-# - --ctx-size 65536: orchestrator convention (64K minimum across all
-#   aux slots, see family manifest).
+# - --ctx-size 262144 (parallel 4 → slot 64K): orchestrators that check
+#   the per-slot context window via /v1/models (e.g. Hermes Agent class)
+#   refuse boot when the SLOT — not the total — falls below their
+#   minimum. llama-server reports n_ctx = ctx-size / parallel as the
+#   slot. We size the total to (slot ≥ 64K) × parallel = 262144 here,
+#   which matches the model's 256K native context exactly (no YaRN
+#   needed). KV cache cost is large (~18 GB at q8_0); validate against
+#   the host memory budget before deploying.
 # - KV q8_0 + --flash-attn on: conservative KV quant trade-off. Re-evaluate
 #   on bench data; if web_extract quality drops on dense pages, this
 #   instance is the candidate to swap to q4_0 (vision aux being the other).
@@ -57,7 +63,7 @@ model_path = "~/llms/gguf/aux1/active.gguf"
 #   recur across web_extract calls (same compressor sys, different page
 #   input) — prefix cache reuse is the metric to monitor on this instance.
 program_args = [
-    "--ctx-size", "65536",
+    "--ctx-size", "262144",
     "--parallel", "4",
     "--cont-batching",
     "--flash-attn", "on",
