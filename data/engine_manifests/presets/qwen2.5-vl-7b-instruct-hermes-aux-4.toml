@@ -41,13 +41,19 @@ candidates = [
 ]
 process_pattern = "llms/gguf/aux4/active.gguf"
 model_path = "~/llms/gguf/aux4/active.gguf"
+# ``mmproj_path`` is tilde-expanded at plist-generation time, same as
+# ``model_path``. Do NOT pass ``--mmproj ~/...`` in program_args: the
+# tilde would not be expanded and llama-server would fail to load the
+# CLIP companion at startup.
+mmproj_path = "~/llms/gguf/aux4/mmproj.gguf"
 # Tuning rationale:
 # - --parallel 1: vision calls are not concurrent during a tick (single
 #   screenshot/image per turn); slot 64K covers multi-image flows.
 # - --ctx-size 65536: family convention. Also matches typical vision
 #   context (1-4 high-res images encoded ~4-16K vision tokens each).
-# - --mmproj: required for the vision path; resolved via the aux4/mmproj
-#   symlink set by the operator before ``aisctl install``.
+# - mmproj_path (manifest field, not program_args): required for the
+#   vision path. Tilde-expanded at plist-generation time. Resolved via
+#   the aux4/mmproj symlink set by the operator before ``aisctl install``.
 # - KV q8_0 + --flash-attn on: same conservative trade-off as siblings.
 #   Vision OCR on dense pages may show quality drop with q8_0 vs f16;
 #   bench during sprint 2 validates this empirically before promoting
@@ -66,7 +72,6 @@ program_args = [
     "--batch-size", "4096",
     "--n-gpu-layers", "999",
     "--jinja",
-    "--mmproj", "~/llms/gguf/aux4/mmproj.gguf",
 ]
 builds_from_source = false
 

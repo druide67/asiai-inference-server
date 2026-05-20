@@ -148,6 +148,26 @@ def test_plist_no_template_arg_when_template_path_unset() -> None:
     assert "--chat-template-file" not in d["ProgramArguments"]
 
 
+def test_vision_preset_mmproj_path_is_tilde_expanded() -> None:
+    """The aux-4 vision preset declares ``mmproj_path`` as a tilde path.
+
+    Plist generation must inject ``--mmproj <expanded>`` exactly once, with
+    the tilde replaced by the home directory. Passing ``--mmproj`` via
+    program_args would leak a literal ``~`` to llama-server (which does
+    not perform shell expansion) and break loading.
+    """
+    import os
+
+    m = load_manifest("llamacpp-aux-4", preset="qwen2.5-vl-7b-instruct-hermes-aux-4")
+    assert m.binary.mmproj_path is not None
+    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
+    args = d["ProgramArguments"]
+    assert args.count("--mmproj") == 1
+    mmproj_value = args[args.index("--mmproj") + 1]
+    assert mmproj_value == os.path.expanduser(m.binary.mmproj_path)
+    assert "~" not in mmproj_value
+
+
 @pytest.mark.parametrize(
     "name, port",
     [

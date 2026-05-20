@@ -87,6 +87,13 @@ class BinarySpec:
     # with C++-safe equivalents that minijinja can parse). Same tilde-expansion
     # contract as ``model_path``.
     template_path: str | None = None
+    # Optional multimodal projection (mmproj) file path injected as
+    # ``--mmproj <path>``. Used by vision-enabled llama-server instances
+    # to load the CLIP/vision encoder companion to the text-side GGUF.
+    # Same tilde-expansion contract as ``model_path`` — preset writers
+    # should use this field rather than passing ``--mmproj ~/...`` in
+    # ``program_args``, where the tilde would not be expanded.
+    mmproj_path: str | None = None
 
     def resolve(self) -> str | None:
         """Return the first existing binary candidate, expanding ``~``.
@@ -370,6 +377,7 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
                 builds_from_source=bool(binary_raw.get("builds_from_source", False)),
                 model_path=binary_raw.get("model_path"),
                 template_path=binary_raw.get("template_path"),
+                mmproj_path=binary_raw.get("mmproj_path"),
             ),
             plist=PlistSpec(
                 name=plist_raw["name"],
