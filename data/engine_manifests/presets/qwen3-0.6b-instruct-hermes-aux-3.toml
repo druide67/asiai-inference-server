@@ -66,6 +66,7 @@ program_args = [
     "--batch-size", "4096",
     "--n-gpu-layers", "999",
     "--jinja",
+    "--metrics",
 ]
 builds_from_source = false
 
