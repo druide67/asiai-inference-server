@@ -182,24 +182,29 @@ def test_llamacpp_aux_baseline_specifics(name: str, port: int) -> None:
 
 
 @pytest.mark.parametrize(
-    "name, preset, expected_parallel",
+    "name, preset, expected_parallel, expected_ctx_size",
     [
-        ("llamacpp-aux-1", "qwen3-4b-instruct-hermes-aux-1", "4"),
-        ("llamacpp-aux-2", "qwen3-1.7b-instruct-hermes-aux-2", "2"),
-        ("llamacpp-aux-3", "qwen3-0.6b-instruct-hermes-aux-3", "2"),
-        ("llamacpp-aux-4", "qwen2.5-vl-7b-instruct-hermes-aux-4", "1"),
+        # ctx-size sized so the slot (= ctx-size / parallel) stays >= 64K for
+        # orchestrators that gate boot on the per-slot context window.
+        ("llamacpp-aux-1", "qwen3-4b-instruct-hermes-aux-1", "4", "262144"),
+        ("llamacpp-aux-2", "qwen3-1.7b-instruct-hermes-aux-2", "2", "131072"),
+        ("llamacpp-aux-3", "qwen3-0.6b-instruct-hermes-aux-3", "2", "131072"),
+        ("llamacpp-aux-4", "qwen2.5-vl-7b-instruct-hermes-aux-4", "1", "65536"),
     ],
 )
 def test_llamacpp_aux_presets_target_engine_and_carry_tuning(
-    name: str, preset: str, expected_parallel: str
+    name: str, preset: str, expected_parallel: str, expected_ctx_size: str
 ) -> None:
     """Each aux-N preset targets its own manifest and carries Hermes-class tuning."""
     m = load_manifest(name, preset=preset)
     assert m.name == name
     pa = list(m.binary.program_args)
     assert "--ctx-size" in pa
-    assert pa[pa.index("--ctx-size") + 1] == "65536"
+    assert pa[pa.index("--ctx-size") + 1] == expected_ctx_size
     assert pa[pa.index("--parallel") + 1] == expected_parallel
+    # Slot effective is ctx-size / parallel; orchestrators that check via
+    # /v1/models read this as the usable window.
+    assert int(expected_ctx_size) // int(expected_parallel) >= 65536
     assert "--cache-reuse" in pa
     # KV cache q8 keeps each aux footprint small enough to coexist on M4 64 GB.
     assert pa[pa.index("--cache-type-k") + 1] == "q8_0"
