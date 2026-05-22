@@ -1,0 +1,59 @@
+# Engine manifest — llama.cpp auxiliary instance #5 — generic baseline
+#
+# Member of the llamacpp-aux-1/2/3/4/5 family. See ``llamacpp-aux-1.toml``
+# for the family rationale and port assignment convention.
+#
+# Slot #5 is typically used for a *single-flow long-context* role
+# (compression, summarisation, RAG retrieval) where parallel=1 +
+# ctx_total ≥ 200K is desirable. The 8094 port is dedicated so the
+# main multi-role aux on 8090 keeps its parallel=4 burst capacity for
+# fast turns while 8094 absorbs the long-prompt single-flow.
+#
+#   aisctl install llamacpp-aux-5 --preset <preset-name>
+
+name = "llamacpp-aux-5"
+display = "llama.cpp aux #5 (port 8094, single-flow long-context slot)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux5/active.gguf"
+model_path = "~/llms/gguf/aux5/active.gguf"
+program_args = [
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--mlock",
+    "--n-gpu-layers", "999",
+    "--jinja",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux-5"
+throttle_interval = 10
+# 60s: long-context single-flow can mlock larger model + KV than the
+# burst slots, allow extra warmup.
+timeout = 60
+
+[network]
+port = 8094
+bind = "0.0.0.0"
+health_endpoint = "/health"
+health_timeout = 60
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux-5"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux-5"
+stdout = "llamacpp-aux-5.log"
+stderr = "llamacpp-aux-5.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

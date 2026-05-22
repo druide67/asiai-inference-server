@@ -196,7 +196,13 @@ def test_factories_load_correct_manifest(factory, expected_name: str) -> None:
     assert driver.manifest.name == expected_name
 
 
-_AUX_INSTANCES = ["llamacpp-aux-1", "llamacpp-aux-2", "llamacpp-aux-3", "llamacpp-aux-4"]
+_AUX_INSTANCES = [
+    "llamacpp-aux-1",
+    "llamacpp-aux-2",
+    "llamacpp-aux-3",
+    "llamacpp-aux-4",
+    "llamacpp-aux-5",
+]
 
 
 @pytest.mark.parametrize("instance", _AUX_INSTANCES)

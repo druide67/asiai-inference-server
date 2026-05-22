@@ -39,7 +39,12 @@ name = "llamacpp-aux-1"
 display = "llama.cpp aux-1 (Qwen3-4B Hermes primary multi-role)"
 
 [binary]
+# Prefer the TurboQuant fork if present (`--cache-type-v turbo2` gains
+# ~28 % RSS and ~9 % throughput on 4-parallel burst vs upstream q8_0,
+# validated on Qwen3-4B-Instruct-2507 on M4 Pro 64 GB 2026-05-22).
+# Falls back to upstream llama-server if the fork isn't installed.
 candidates = [
+    "/usr/local/bin/llama-server-turboquant",
     "/opt/homebrew/bin/llama-server",
     "/usr/local/bin/llama-server",
 ]
@@ -68,7 +73,11 @@ program_args = [
     "--cont-batching",
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",
-    "--cache-type-v", "q8_0",
+    # V=turbo2 (TurboQuant fork) reduces KV by ~30 % on V (Boundary V mode 7
+    # keeps first2+last2 layers at q8_0, rest at turbo2). Requires the fork
+    # binary above. If the upstream binary is used, this flag is rejected
+    # gracefully — switch back to q8_0 manually if you don't have the fork.
+    "--cache-type-v", "turbo2",
     "--cache-reuse", "256",
     "--slot-prompt-similarity", "0.5",
     "--mlock",

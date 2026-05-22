@@ -26,6 +26,7 @@ EXPECTED_ENGINES = {
     "llamacpp-aux-2",
     "llamacpp-aux-3",
     "llamacpp-aux-4",
+    "llamacpp-aux-5",
     "vmlx",
     "mlx-lm",
 }
@@ -156,6 +157,7 @@ def test_llamacpp_hermes_preset() -> None:
         ("llamacpp-aux-2", 8091),
         ("llamacpp-aux-3", 8092),
         ("llamacpp-aux-4", 8093),
+        ("llamacpp-aux-5", 8094),
     ],
 )
 def test_llamacpp_aux_baseline_specifics(name: str, port: int) -> None:
@@ -182,18 +184,25 @@ def test_llamacpp_aux_baseline_specifics(name: str, port: int) -> None:
 
 
 @pytest.mark.parametrize(
-    "name, preset, expected_parallel, expected_ctx_size",
+    "name, preset, expected_parallel, expected_ctx_size, expected_v_quant",
     [
         # ctx-size sized so the slot (= ctx-size / parallel) stays >= 64K for
         # orchestrators that gate boot on the per-slot context window.
-        ("llamacpp-aux-1", "qwen3-4b-instruct-hermes-aux-1", "4", "262144"),
-        ("llamacpp-aux-2", "qwen3-1.7b-instruct-hermes-aux-2", "2", "131072"),
-        ("llamacpp-aux-3", "qwen3-0.6b-instruct-hermes-aux-3", "2", "131072"),
-        ("llamacpp-aux-4", "qwen2.5-vl-7b-instruct-hermes-aux-4", "1", "65536"),
+        # aux-1 + aux-5 use the TurboQuant V=turbo2 quant (validated 2026-05-22),
+        # other aux instances stay on stock q8_0 (smaller KV footprint already).
+        ("llamacpp-aux-1", "qwen3-4b-instruct-hermes-aux-1", "4", "262144", "turbo2"),
+        ("llamacpp-aux-2", "qwen3-1.7b-instruct-hermes-aux-2", "2", "131072", "q8_0"),
+        ("llamacpp-aux-3", "qwen3-0.6b-instruct-hermes-aux-3", "2", "131072", "q8_0"),
+        ("llamacpp-aux-4", "qwen2.5-vl-7b-instruct-hermes-aux-4", "1", "65536", "q8_0"),
+        ("llamacpp-aux-5", "qwen3-4b-instruct-hermes-aux-5-compression", "1", "262144", "turbo2"),
     ],
 )
 def test_llamacpp_aux_presets_target_engine_and_carry_tuning(
-    name: str, preset: str, expected_parallel: str, expected_ctx_size: str
+    name: str,
+    preset: str,
+    expected_parallel: str,
+    expected_ctx_size: str,
+    expected_v_quant: str,
 ) -> None:
     """Each aux-N preset targets its own manifest and carries Hermes-class tuning."""
     m = load_manifest(name, preset=preset)
@@ -206,9 +215,10 @@ def test_llamacpp_aux_presets_target_engine_and_carry_tuning(
     # /v1/models read this as the usable window.
     assert int(expected_ctx_size) // int(expected_parallel) >= 65536
     assert "--cache-reuse" in pa
-    # KV cache q8 keeps each aux footprint small enough to coexist on M4 64 GB.
+    # K stays q8_0 across all aux presets (K is more sensitive than V to
+    # aggressive quants, validated by failed K=turbo3 / K=q4_0 benchs).
     assert pa[pa.index("--cache-type-k") + 1] == "q8_0"
-    assert pa[pa.index("--cache-type-v") + 1] == "q8_0"
+    assert pa[pa.index("--cache-type-v") + 1] == expected_v_quant
 
 
 def test_llamacpp_and_aux_process_patterns_are_disjoint() -> None:
@@ -223,7 +233,7 @@ def test_llamacpp_and_aux_process_patterns_are_disjoint() -> None:
     main_pat = load_manifest("llamacpp").binary.process_pattern
     aux_pats = {
         f"llamacpp-aux-{i}": load_manifest(f"llamacpp-aux-{i}").binary.process_pattern
-        for i in range(1, 5)
+        for i in range(1, 6)
     }
 
     cmdlines = {
@@ -246,6 +256,10 @@ def test_llamacpp_and_aux_process_patterns_are_disjoint() -> None:
         "llamacpp-aux-4": (
             "/opt/homebrew/bin/llama-server --ctx-size 65536 --parallel 1 "
             "--model /path/to/llms/gguf/aux4/active.gguf --port 8093"
+        ),
+        "llamacpp-aux-5": (
+            "/opt/homebrew/bin/llama-server --ctx-size 262144 --parallel 1 "
+            "--model /path/to/llms/gguf/aux5/active.gguf --port 8094"
         ),
     }
 

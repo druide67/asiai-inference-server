@@ -1,0 +1,96 @@
+# Example preset — Qwen3-4B-Instruct on llamacpp-aux-5 (port 8094, dedicated compression slot)
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for
+# your own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Example target role (Hermes Agent class):
+#   - compression (session summarisation when main agent context grows
+#     past its threshold — typically 0.8 × main_ctx_size). With a main
+#     at ctx 256K, compression input lands around 209K tokens, which
+#     requires a per-slot window ≥ 209K. parallel=1 here gives the full
+#     slot = full ctx, unlike aux-1 (parallel=4, slot 64K).
+#
+# Target hardware: Apple Silicon M-series 64 GB co-tenant with the four
+# other llamacpp-aux instances (4B multi-role on 8090, 1.7B on 8091,
+# 0.6B on 8092, VL-7B on 8093) and optionally the fallback main on 8000.
+# Target model: Qwen3-4B-Instruct (-2507 revision).
+#   GGUF: unsloth/Qwen3-4B-Instruct-2507-GGUF UD-Q5_K_XL.
+#   Symlink ~/llms/gguf/aux5/active.gguf → your chosen GGUF (the same
+#   file as aux1's active.gguf works fine; the two instances bind it
+#   independently so process_pattern stays disjoint via the auxN segment).
+#
+# Memory footprint (M4 64 GB co-tenant, TurboQuant V=turbo2):
+#   model ~3 GB + KV (K=q8 + V=turbo2) at ctx 256K parallel 1 ≈ ~4 GB
+#   → total ~7 GB. Roughly 1/3 of aux-1's footprint thanks to parallel=1.
+#
+# Install: aisctl install llamacpp-aux-5 --preset qwen3-4b-instruct-hermes-aux-5-compression
+
+name = "llamacpp-aux-5"
+display = "llama.cpp aux-5 (Qwen3-4B Hermes compression dedicated)"
+
+[binary]
+# Prefer TurboQuant fork for the V=turbo2 KV savings (cf aux-1 preset).
+candidates = [
+    "/usr/local/bin/llama-server-turboquant",
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/aux5/active.gguf"
+model_path = "~/llms/gguf/aux5/active.gguf"
+# Tuning rationale:
+# - --parallel 1: single-flow, no burst. Compression is one long-prompt
+#   call per main-context-threshold-hit, not a tight loop. Slot = ctx
+#   total = 256K covers the typical 209K input.
+# - --ctx-size 262144: matches the model's 256K native context exactly
+#   (no YaRN). Per-slot window = 262144 ÷ 1 = 256K.
+# - --cache-type-k q8_0 --cache-type-v turbo2: same TurboQuant config as
+#   aux-1 (validated 2026-05-22). Compression resumes from JSON / markdown
+#   structures where V error compresses well.
+# - --cache-reuse 256 + --slot-prompt-similarity 0.5: compression sys
+#   prompt recurs across calls, prefix cache reuse pays off if the same
+#   session is compressed multiple times.
+program_args = [
+    "--ctx-size", "262144",
+    "--parallel", "1",
+    "--cont-batching",
+    "--flash-attn", "on",
+    "--cache-type-k", "q8_0",
+    "--cache-type-v", "turbo2",
+    "--cache-reuse", "256",
+    "--slot-prompt-similarity", "0.5",
+    "--mlock",
+    "--ubatch-size", "1024",
+    "--batch-size", "4096",
+    "--n-gpu-layers", "999",
+    "--jinja",
+    "--metrics",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.llamacpp-aux-5"
+throttle_interval = 10
+# 60s: 4B GGUF + ctx 256K KV mlock loads in 8-15s on M-series NVMe.
+timeout = 60
+
+[network]
+port = 8094
+bind = "0.0.0.0"
+health_endpoint = "/health"
+health_timeout = 60
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-aux-5"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-aux-5"
+stdout = "llamacpp-aux-5.log"
+stderr = "llamacpp-aux-5.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

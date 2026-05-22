@@ -175,6 +175,7 @@ def test_vision_preset_mmproj_path_is_tilde_expanded() -> None:
         ("llamacpp-aux-2", "8091"),
         ("llamacpp-aux-3", "8092"),
         ("llamacpp-aux-4", "8093"),
+        ("llamacpp-aux-5", "8094"),
     ],
 )
 def test_llamacpp_aux_plist_uses_aux_model_path_and_no_template(name: str, port: str) -> None:
