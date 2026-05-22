@@ -51,16 +51,20 @@ candidates = [
 process_pattern = "llms/gguf/aux1/active.gguf"
 model_path = "~/llms/gguf/aux1/active.gguf"
 # Tuning rationale:
-# - --parallel 4: web_extract burst x4 during briefing tick is the
-#   bottleneck. Concurrent compression/mcp = sustained 3-4 calls expected.
-# - --ctx-size 262144 (parallel 4 → slot 64K): orchestrators that check
+# - --parallel 3: web_extract burst lands 4 articles per briefing turn
+#   in the worst case but with network jitter they rarely arrive strictly
+#   simultaneously. parallel=3 lets 3 articles fire in parallel and the
+#   4th queues for ~0.5-1s (the slot freeing as the fastest of the 3
+#   finishes). Trade-off accepted vs parallel=4 to free ~3 GB of GPU
+#   wired memory for a sibling dedicated long-context slot (e.g. aux-5
+#   compression on port 8094).
+# - --ctx-size 196608 (parallel 3 → slot 64K): orchestrators that check
 #   the per-slot context window via /v1/models (e.g. Hermes Agent class)
 #   refuse boot when the SLOT — not the total — falls below their
 #   minimum. llama-server reports n_ctx = ctx-size / parallel as the
-#   slot. We size the total to (slot ≥ 64K) × parallel = 262144 here,
-#   which matches the model's 256K native context exactly (no YaRN
-#   needed). KV cache cost is large (~18 GB at q8_0); validate against
-#   the host memory budget before deploying.
+#   slot. We size the total to (slot ≥ 64K) × parallel = 196608 here,
+#   keeping the slot at 64K (Hermes minimum) while trimming the KV by
+#   ~25% vs ctx 262144.
 # - KV q8_0 + --flash-attn on: conservative KV quant trade-off. Re-evaluate
 #   on bench data; if web_extract quality drops on dense pages, this
 #   instance is the candidate to swap to q4_0 (vision aux being the other).
@@ -68,8 +72,8 @@ model_path = "~/llms/gguf/aux1/active.gguf"
 #   recur across web_extract calls (same compressor sys, different page
 #   input) — prefix cache reuse is the metric to monitor on this instance.
 program_args = [
-    "--ctx-size", "262144",
-    "--parallel", "4",
+    "--ctx-size", "196608",
+    "--parallel", "3",
     "--cont-batching",
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",

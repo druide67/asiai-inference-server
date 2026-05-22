@@ -190,7 +190,7 @@ def test_llamacpp_aux_baseline_specifics(name: str, port: int) -> None:
         # orchestrators that gate boot on the per-slot context window.
         # aux-1 + aux-5 use the TurboQuant V=turbo2 quant (validated 2026-05-22),
         # other aux instances stay on stock q8_0 (smaller KV footprint already).
-        ("llamacpp-aux-1", "qwen3-4b-instruct-hermes-aux-1", "4", "262144", "turbo2"),
+        ("llamacpp-aux-1", "qwen3-4b-instruct-hermes-aux-1", "3", "196608", "turbo2"),
         ("llamacpp-aux-2", "qwen3-1.7b-instruct-hermes-aux-2", "2", "131072", "q8_0"),
         ("llamacpp-aux-3", "qwen3-0.6b-instruct-hermes-aux-3", "2", "131072", "q8_0"),
         ("llamacpp-aux-4", "qwen2.5-vl-7b-instruct-hermes-aux-4", "1", "65536", "q8_0"),
@@ -242,7 +242,7 @@ def test_llamacpp_and_aux_process_patterns_are_disjoint() -> None:
             "--model /path/to/llms/gguf/active.gguf --port 8080"
         ),
         "llamacpp-aux-1": (
-            "/opt/homebrew/bin/llama-server --ctx-size 65536 --parallel 4 "
+            "/opt/homebrew/bin/llama-server --ctx-size 196608 --parallel 3 "
             "--model /path/to/llms/gguf/aux1/active.gguf --port 8090"
         ),
         "llamacpp-aux-2": (
