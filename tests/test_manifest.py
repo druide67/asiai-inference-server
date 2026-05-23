@@ -29,6 +29,7 @@ EXPECTED_ENGINES = {
     "llamacpp-aux-5",
     "vmlx",
     "mlx-lm",
+    "rapidmlx",
 }
 
 
@@ -134,9 +135,12 @@ def test_llamacpp_hermes_preset() -> None:
     m = load_manifest("llamacpp", preset="qwen3.6-35b-a3b-hermes-agent-64gb")
     assert m.name == "llamacpp"  # preset targets the llamacpp engine
     pa = list(m.binary.program_args)
-    # Hermes Agent class tuning
-    assert pa[pa.index("--ctx-size") + 1] == "131072"
-    assert pa[pa.index("--parallel") + 1] == "2"
+    # Hermes Agent class tuning — updated 2026-05-23 to use the
+    # Qwen3.6-35B-A3B native 256K context with parallel=1 (slot 256K
+    # complete) following the PM decision to switch M5 main inference
+    # from Qwen3.6-27B Dense to 35B-A3B for viable Hermes tick.
+    assert pa[pa.index("--ctx-size") + 1] == "262144"
+    assert pa[pa.index("--parallel") + 1] == "1"
     assert "--cache-reuse" in pa
     assert "--slot-prompt-similarity" in pa
     # froggeric chat template override (no --jinja)

@@ -70,6 +70,7 @@ def test_list_human_output(capsys: pytest.CaptureFixture[str]) -> None:
         assert f"llamacpp-aux-{i}" in out
     assert "vmlx" in out
     assert "mlx-lm" in out
+    assert "rapidmlx" in out
 
 
 def test_list_json_output(capsys: pytest.CaptureFixture[str]) -> None:
@@ -90,6 +91,7 @@ def test_list_json_output(capsys: pytest.CaptureFixture[str]) -> None:
         "llamacpp-aux-5",
         "vmlx",
         "mlx-lm",
+        "rapidmlx",
     }
 
 
@@ -127,8 +129,10 @@ def test_status_all_engines_when_no_arg(capsys: pytest.CaptureFixture[str]) -> N
     out = capsys.readouterr().out
     payload = json.loads(out)
     assert rc == 0
-    # 8 baseline engines + 4 extra aux-N siblings (aux-2/3/4/5) = 12
-    assert len(payload["engines"]) == 12
+    # 9 baseline engines (ollama, lmstudio, omlx, turboquant, llamacpp,
+    # llamacpp-aux-1, vmlx, mlx-lm, rapidmlx) + 4 extra aux-N siblings
+    # (aux-2/3/4/5) = 13
+    assert len(payload["engines"]) == 13
 
 
 # ---------------------------------------------------------------------------

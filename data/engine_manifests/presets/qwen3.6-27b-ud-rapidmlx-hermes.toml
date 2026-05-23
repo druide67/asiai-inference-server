@@ -1,0 +1,94 @@
+# Example preset — Qwen3.6-27B-UD-MLX-4bit served by Rapid-MLX for Hermes Agent
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Target role: PRIMARY M5 candidate alternative to ``llamacpp`` running
+# Qwen3.6-35B-A3B. Trade-off vs the 35B-A3B production preset:
+#   - 27B Dense gives stronger agentic-quality scores (SWE-bench Verified,
+#     Terminal-Bench, VITA-Bench) per published benchmarks (+5pp typical).
+#   - Rapid-MLX's "snapshots RNN" technique unlocks cross-USER prefix cache
+#     reuse on Qwen3.6 hybrid arch — the property llama.cpp ``--cache-reuse``
+#     loses (silently disabled via ``llama_memory_can_shift=false``).
+#   - Bench 2026-05-23 SOLO M5: TTFT prefix-test 283-2435ms (median 527ms)
+#     vs TTFT cold 8954ms = 17x faster cross-USER.
+#   - Decode warm ~20 tok/s (vs llamacpp 35B-A3B ~80 tok/s, lower).
+#   - Estimated Hermes tick (60 calls/turn): ~22 min on Rapid-MLX 27B-UD
+#     vs ~8 min on llamacpp 35B-A3B. Pick by quality vs throughput priority.
+#
+# Target hardware: Apple Silicon M-series with 64+ GB unified memory.
+#   The 27B-UD-MLX-4bit weights take ~14 GB on disk + ~36 GB working set
+#   (Rapid-MLX advisory). M5 Max 128 GB has ample headroom; M4 64 GB
+#   needs Hermes / other engines stopped during serve.
+# Target use case: Hermes Agent class — multi-turn agentic sessions,
+#   60-80 api_calls per cycle, tool-calling reliability matters.
+# Target model: unsloth/Qwen3.6-27B-UD-MLX-4bit (~14 GB on disk).
+#   Rapid-MLX alias: ``qwen3.6-27b-ud`` (resolved internally to the HF id).
+#   Snapshot cache persists at ``~/.cache/vllm-mlx/prefix_cache/`` across
+#   restarts — first session is cold, subsequent sessions warm-start.
+#
+# Cohabitation caveat (validated 2026-05-23 night):
+#   Running Rapid-MLX alongside an actively-decoding llama.cpp main on the
+#   same M5 GPU triggers swap thrash (M5 swap 5.4 -> 14.2 GB observed)
+#   and collapses Rapid-MLX decode to ~0.4 tok/s. Either stop the
+#   competing engine before installing this preset, or schedule the
+#   ``aisctl install`` during a Hermes-off window.
+#
+# Install: aisctl install rapidmlx --preset qwen3.6-27b-ud-rapidmlx-hermes
+
+name = "rapidmlx"
+display = "Rapid-MLX (Qwen3.6-27B-UD MLX-4bit, Hermes Agent preset)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/rapid-mlx",
+    "/usr/local/bin/rapid-mlx",
+]
+process_pattern = "rapid-mlx serve"
+# Rapid-MLX uses ``rapid-mlx serve <model> --host H --port P``. Host
+# + port are emitted automatically by the plist generator from
+# [network]; the rest goes here.
+program_args = [
+    "serve",
+    "qwen3.6-27b-ud",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.rapidmlx"
+throttle_interval = 15
+# 60s leaves room for first-start MLX warmup and HF cache scan.
+timeout = 60
+
+[network]
+port = 8004
+bind = "0.0.0.0"
+health_endpoint = "/v1/models"
+# 90s on first start: Rapid-MLX may download the MLX-4bit shards from
+# HuggingFace on first-ever serve (~14 GB), then warm the model.
+health_timeout = 90
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.rapidmlx"
+
+[logs]
+dir = "~/Library/Logs/asiai/rapidmlx"
+stdout = "rapidmlx-stdout.log"
+stderr = "rapidmlx-stderr.log"
+
+[wrapper]
+needed = false
+
+[environment]
+# RAPIDMLX_MODEL: the wrapper passes this positionally to ``rapid-mlx
+# serve``. Accepts a Rapid-MLX alias (resolved internally), an HF repo
+# id, or a local MLX directory path.
+# RAPIDMLX_PORT / RAPIDMLX_HOST: optional; default to the manifest
+# network section values.
+# RAPIDMLX_BIN: optional; override the wrapper's binary auto-discovery
+# if the rapid-mlx entry point is in a non-standard location.
+vars = [
+    "RAPIDMLX_MODEL=qwen3.6-27b-ud",
+]

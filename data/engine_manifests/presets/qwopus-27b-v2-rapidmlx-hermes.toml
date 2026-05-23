@@ -1,0 +1,68 @@
+# Example preset — Qwopus3.6-27B-v2 (Jackrong finetune of Qwen3.6-27B Dense)
+# served by Rapid-MLX for Hermes Agent
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class. Copy and
+# edit for your own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Target role: Quality-focused alternative to the standard Qwen3.6-27B
+# Dense. Qwopus is a SFT finetune of Qwen3.6-27B Dense via "Trace
+# Inversion" (Jackrong). Reported gains over the base model:
+#   - MMLU-Pro 87.43 % vs 84.86 % (+2.57 pp)
+#   - SWE-bench Verified 75.25 % (152/202, single-shot agentic)
+#   - -35.9 % tokens for correct answers (918 vs 1433)
+# Architecture unchanged (hybrid DeltaNet + full_attention) — Rapid-MLX
+# snapshots RNN technique applies identically to llama.cpp baseline.
+#
+# Target hardware: Apple Silicon M-series with 32+ GB unified memory.
+#   ~14 GB MLX-4bit on disk + working set per Rapid-MLX advisory.
+# Target model: HuggingFace ``Jackrong/Qwopus3.6-27B-v2-MLX-4bit``.
+#   Rapid-MLX accepts the full HF repo id as the positional model arg.
+#
+# Caveat (upstream HF model card):
+#   - Greedy decoding (temperature ≈ 0) causes infinite ``<think>``
+#     loops on this finetune. Use temperature=1.0 in client requests.
+#   - Trained for ``<think>...</think>`` structured CoT output — clients
+#     should be prepared to consume / strip these blocks.
+#
+# Install: aisctl install rapidmlx --preset qwopus-27b-v2-rapidmlx-hermes
+
+name = "rapidmlx"
+display = "Rapid-MLX (Qwopus3.6-27B-v2 MLX-4bit, Hermes Agent preset)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/rapid-mlx",
+    "/usr/local/bin/rapid-mlx",
+]
+process_pattern = "rapid-mlx serve"
+program_args = [
+    "serve",
+    "Jackrong/Qwopus3.6-27B-v2-MLX-4bit",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.rapidmlx"
+throttle_interval = 15
+timeout = 90
+
+[network]
+port = 8004
+bind = "0.0.0.0"
+health_endpoint = "/v1/models"
+health_timeout = 120
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.rapidmlx"
+
+[logs]
+dir = "~/Library/Logs/asiai/rapidmlx"
+stdout = "rapidmlx-stdout.log"
+stderr = "rapidmlx-stderr.log"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []

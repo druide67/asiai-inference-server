@@ -38,6 +38,7 @@ from ais_engines.lmstudio import LMStudioDriver
 from ais_engines.mlx_lm import MlxLmDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
+from ais_engines.rapidmlx import RapidMlxDriver
 from ais_engines.turboquant import TurboquantDriver
 from ais_engines.vmlx import VmlxDriver
 
@@ -52,6 +53,7 @@ _STATIC_DRIVER_FACTORIES: dict[str, Callable[[], Any]] = {
     "llamacpp": LlamaCppDriver.from_manifest,
     "vmlx": VmlxDriver.from_manifest,
     "mlx-lm": MlxLmDriver.from_manifest,
+    "rapidmlx": RapidMlxDriver.from_manifest,
 }
 
 # Family-pattern registrations — names matching the regex resolve to the

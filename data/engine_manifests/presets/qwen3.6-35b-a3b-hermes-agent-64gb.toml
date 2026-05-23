@@ -40,8 +40,8 @@ template_path = "~/llms/templates/active.jinja"
 #   cache reuse across requests (the key win on multi-turn workloads).
 # - KV cache q8 q8 trades minor precision for ~50% memory savings.
 program_args = [
-    "--ctx-size", "131072",
-    "--parallel", "2",
+    "--ctx-size", "262144",
+    "--parallel", "1",
     "--cont-batching",
     "--flash-attn", "on",
     "--cache-type-k", "q8_0",
