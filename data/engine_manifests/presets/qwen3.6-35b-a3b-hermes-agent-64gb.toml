@@ -56,6 +56,7 @@ program_args = [
     "--temp", "0.6",
     "--top-p", "0.95",
     "--top-k", "20",
+    "--metrics",
 ]
 builds_from_source = false
 
