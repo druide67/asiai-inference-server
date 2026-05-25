@@ -35,6 +35,7 @@ import contextlib
 import http.server
 import json
 import logging
+import re
 import shutil
 import signal
 import socketserver
@@ -59,6 +60,7 @@ SHUTDOWN_GRACE_SECONDS = 5.0
 # timeout there is intentionally tighter so we fail fast at the edge).
 COMMAND_TIMEOUTS: dict[str, float] = {
     "purge": 30.0,
+    "load": 300.0,
     "unload": 60.0,
     "stop": 60.0,
     "start": 120.0,
@@ -100,16 +102,23 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
         raise ValueError(f"unknown command: {command}")
     argv = [_aisctl_binary(), command, "--json"]
     engine = args.get("engine")
-    if command in {"start", "stop", "restart", "install", "uninstall", "unload"}:
+    if command in {"start", "stop", "restart", "install", "uninstall", "unload", "load"}:
         if not isinstance(engine, str) or not engine:
             raise ValueError(f"command {command} requires args.engine (string)")
         argv.append(engine)
-    if command == "unload":
+    if command in ("unload", "load"):
         model = args.get("model")
+        if command == "load" and not model:
+            raise ValueError("command load requires args.model (string)")
         if model is not None:
             if not isinstance(model, str) or not model:
                 raise ValueError("args.model must be a non-empty string when set")
             argv.append(model)
+        keep_alive = args.get("keep_alive")
+        if command == "load" and keep_alive:
+            if not isinstance(keep_alive, str) or not re.match(r"^[0-9]+[smh]?$", keep_alive):
+                raise ValueError("args.keep_alive must match [0-9]+[smh]?")
+            argv.extend(["--keep-alive", keep_alive])
     if command == "upgrade":
         # upgrade isn't a built-in aisctl subcommand yet; route via brew
         # under the engine's well-known formula name. Until aisrv ships

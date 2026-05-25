@@ -8,8 +8,16 @@ manager so that nodes with no engines installed can still be observed.
 
 Subcommands
 -----------
-``aisctl fleet push <nickname> <command> [--engine E] [--model M]``
-    POSTs a single command to a remote node's ``asiai web``.
+``aisctl fleet push <target> <command> [--engine E] [--model M]``
+    POSTs ``command`` to one or many nodes. ``target`` may be:
+
+    - a literal nickname (``studio``) — single-node push
+    - ``@all`` — broadcast to every node in ``fleet.json``
+    - ``@role:dev`` — broadcast to every node whose ``role == "dev"``
+
+    Broadcast pushes run in parallel (one thread per node) and return a
+    non-zero exit code if at least one target failed.
+
 ``aisctl fleet info <nickname>``
     Print the resolved node (without echoing the token) for debugging.
 
@@ -22,6 +30,7 @@ hand-editing the file.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import sys
 import urllib.error
@@ -31,10 +40,13 @@ from typing import Any
 
 from asiai.fleet import config as fleet_config
 
+_BROADCAST_MAX_WORKERS = 16
+
 # Mirror of ``asiai.web.routes.fleet.COMMAND_TIMEOUTS`` (LAN-facing).
 # Tighter than the upstream loopback timeouts so the client fails fast.
 COMMAND_TIMEOUTS: dict[str, float] = {
     "purge": 20.0,
+    "load": 240.0,
     "unload": 45.0,
     "stop": 45.0,
     "start": 90.0,
@@ -50,6 +62,33 @@ _MAX_RESPONSE_BYTES = 1 * 1024 * 1024  # 1 MB cap on response body
 def _resolve_node(nickname: str) -> dict[str, Any] | None:
     """Return the fleet.json entry for ``nickname`` or None."""
     return fleet_config.find_node(nickname)
+
+
+def _resolve_targets(target: str) -> tuple[list[dict[str, Any]], str | None]:
+    """Expand a target selector into a list of nodes.
+
+    ``target`` accepts:
+
+    - a plain nickname (most common case) → list of 1 node, or empty
+    - ``@all`` → every node in fleet.json
+    - ``@role:<value>`` → every node whose ``role`` field equals ``value``
+
+    Returns ``(nodes, error)``. ``error`` is set when the selector is
+    malformed; ``nodes`` may be empty if the selector matched zero
+    nodes (caller decides if that's an error).
+    """
+    if not target.startswith("@"):
+        node = _resolve_node(target)
+        return ([node] if node else [], None)
+    if target == "@all":
+        return (fleet_config.get_nodes(), None)
+    if target.startswith("@role:"):
+        role = target[len("@role:") :].strip()
+        if not role:
+            return ([], "empty role after '@role:'")
+        nodes = [n for n in fleet_config.get_nodes() if n.get("role") == role]
+        return (nodes, None)
+    return ([], f"unknown selector '{target}' (use a nickname, @all, or @role:<value>)")
 
 
 def _do_push(
@@ -118,17 +157,36 @@ def _do_push(
         return (0, {"error": "io_error", "detail": str(e)})
 
 
-def _cmd_push(args: argparse.Namespace) -> int:
-    """``aisctl fleet push <nickname> <command> [--engine ...] [--model ...]``."""
-    node = _resolve_node(args.nickname)
-    if node is None:
-        msg = f"no node named '{args.nickname}' in fleet.json"
-        if args.json:
-            print(json.dumps({"ok": False, "error": msg}))
-        else:
-            print(f"✗ {msg}", file=sys.stderr)
-        return 1
+def _format_single_result(
+    nickname: str, command: str, status: int, body: dict[str, Any], *, prefix: str = ""
+) -> bool:
+    """Render one node's push result. Returns True if the call succeeded."""
+    ok = isinstance(body, dict) and body.get("ok")
+    if ok:
+        print(f"{prefix}✓ {command} on {nickname} (http={status})")
+        if body.get("stdout"):
+            stdout_text = body["stdout"].rstrip()
+            if stdout_text:
+                print(stdout_text)
+        return True
+    err = body.get("error") if isinstance(body, dict) else None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    line = f"{prefix}✗ {command} on {nickname} failed (http={status}): {err}"
+    if detail:
+        line += f" — {detail}"
+    print(line, file=sys.stderr)
+    if isinstance(body, dict) and body.get("stderr"):
+        stderr_text = body["stderr"].rstrip()
+        if stderr_text:
+            print(stderr_text, file=sys.stderr)
+    return False
 
+
+def _cmd_push(args: argparse.Namespace) -> int:
+    """``aisctl fleet push <target> <command> [--engine ...] [--model ...]``.
+
+    ``target`` may be a literal nickname, ``@all``, or ``@role:<value>``.
+    """
     if args.command not in COMMAND_TIMEOUTS:
         allowed = ", ".join(sorted(COMMAND_TIMEOUTS))
         msg = f"unknown command '{args.command}' (allowed: {allowed})"
@@ -138,34 +196,98 @@ def _cmd_push(args: argparse.Namespace) -> int:
             print(f"✗ {msg}", file=sys.stderr)
         return 2
 
+    nodes, target_err = _resolve_targets(args.nickname)
+    if target_err:
+        msg = target_err
+        if args.json:
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"✗ {msg}", file=sys.stderr)
+        return 1
+    if not nodes:
+        msg = (
+            f"no node named '{args.nickname}' in fleet.json"
+            if not args.nickname.startswith("@")
+            else f"selector '{args.nickname}' matched zero nodes"
+        )
+        if args.json:
+            print(json.dumps({"ok": False, "error": msg}))
+        else:
+            print(f"✗ {msg}", file=sys.stderr)
+        return 1
+
     cmd_args: dict[str, Any] = {}
     if args.engine:
         cmd_args["engine"] = args.engine
     if args.model:
         cmd_args["model"] = args.model
+    if getattr(args, "keep_alive", None):
+        cmd_args["keep_alive"] = args.keep_alive
 
-    status, body = _do_push(node, args.command, cmd_args, timeout=args.timeout)
-
-    if args.json:
-        print(json.dumps({"http_status": status, **body}))
-    else:
-        ok = isinstance(body, dict) and body.get("ok")
-        if ok:
-            print(f"✓ {args.command} on {args.nickname} (http={status})")
-            if body.get("stdout"):
-                print(body["stdout"].rstrip())
+    # Single-node path stays simple (matches Phase 2.0 behavior).
+    if len(nodes) == 1:
+        node = nodes[0]
+        status, body = _do_push(node, args.command, cmd_args, timeout=args.timeout)
+        if args.json:
+            print(json.dumps({"http_status": status, "nickname": node.get("nickname"), **body}))
+            ok = isinstance(body, dict) and body.get("ok")
         else:
-            err = body.get("error") if isinstance(body, dict) else None
-            detail = body.get("detail") if isinstance(body, dict) else None
-            print(
-                f"✗ {args.command} on {args.nickname} failed (http={status}): {err}"
-                + (f" — {detail}" if detail else ""),
-                file=sys.stderr,
-            )
-            if isinstance(body, dict) and body.get("stderr"):
-                print(body["stderr"].rstrip(), file=sys.stderr)
+            ok = _format_single_result(node.get("nickname", "?"), args.command, status, body)
+        return 0 if (200 <= status < 300 and ok) else 3
 
-    return 0 if (200 <= status < 300 and body.get("ok")) else 3
+    # Broadcast: fan out in parallel, then aggregate.
+    def _one(node: dict[str, Any]) -> tuple[dict[str, Any], int, dict[str, Any]]:
+        st, bd = _do_push(node, args.command, cmd_args, timeout=args.timeout)
+        return (node, st, bd)
+
+    results: list[tuple[dict[str, Any], int, dict[str, Any]]] = []
+    workers = min(_BROADCAST_MAX_WORKERS, len(nodes))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for fut in concurrent.futures.as_completed(ex.submit(_one, n) for n in nodes):
+            try:
+                results.append(fut.result())
+            except Exception as e:  # pragma: no cover — defensive
+                results.append(({"nickname": "?"}, 0, {"ok": False, "error": str(e)}))
+
+    # Preserve fleet.json order in the rendered output for human readability.
+    nick_order = {n.get("nickname"): i for i, n in enumerate(nodes)}
+    results.sort(key=lambda r: nick_order.get(r[0].get("nickname"), 1_000_000))
+
+    succeeded = 0
+    failed = 0
+    if args.json:
+        payload = {
+            "target": args.nickname,
+            "command": args.command,
+            "results": [
+                {
+                    "nickname": node.get("nickname"),
+                    "http_status": status,
+                    **body,
+                }
+                for node, status, body in results
+            ],
+        }
+        print(json.dumps(payload))
+        for _node, status, body in results:
+            ok = isinstance(body, dict) and body.get("ok") and 200 <= status < 300
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+    else:
+        print(f"=== broadcast {args.command} → {len(nodes)} node(s) ({args.nickname}) ===")
+        for node, status, body in results:
+            ok = _format_single_result(
+                node.get("nickname", "?"), args.command, status, body, prefix="  "
+            )
+            if ok:
+                succeeded += 1
+            else:
+                failed += 1
+        print(f"--- {succeeded} ok, {failed} failed ---", file=sys.stderr if failed else None)
+
+    return 0 if failed == 0 else 3
 
 
 def _cmd_info(args: argparse.Namespace) -> int:
@@ -214,7 +336,13 @@ def add_fleet_subparser(subparsers: argparse._SubParsersAction) -> None:
         help="Write command to execute on the remote.",
     )
     p_push.add_argument("--engine", help="Engine name (required for everything except purge).")
-    p_push.add_argument("--model", help="Model name (for unload).")
+    p_push.add_argument("--model", help="Model name (for unload / load).")
+    p_push.add_argument(
+        "--keep-alive",
+        default=None,
+        help="For the 'load' command: how long to keep the model resident "
+        "(e.g. '5m', '30s'). Ollama only — ignored elsewhere.",
+    )
     p_push.add_argument(
         "--timeout",
         type=float,

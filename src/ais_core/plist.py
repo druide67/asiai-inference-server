@@ -105,7 +105,14 @@ def build_plist_dict(
 
     user_home = os.path.expanduser(f"~{user}")
     binary_dir = str(Path(binary_path).parent) if binary_path else "/usr/local/bin"
-    path_value = ":".join([binary_dir, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"])
+    # ``~/.local/bin`` is where ``uv tool install`` lands binaries by
+    # default — put it ahead of system paths so a daemon launched by
+    # launchd finds the user-installed CLI before any older system
+    # variant (homebrew, /usr/local).
+    user_local_bin = f"{user_home}/.local/bin"
+    path_value = ":".join(
+        [binary_dir, user_local_bin, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    )
 
     env: dict[str, str] = {"HOME": user_home, "PATH": path_value}
     for entry in manifest.env_vars:
