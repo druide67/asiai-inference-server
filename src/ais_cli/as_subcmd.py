@@ -140,72 +140,125 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
         ),
     )
 
-    engine_sub = parser.add_subparsers(
-        dest="engine_cmd", required=True, metavar="<subcommand>"
-    )
+    engine_sub = parser.add_subparsers(dest="engine_cmd", required=True, metavar="<subcommand>")
 
     # --- subcommands ----------------------------------------------------
     # Each entry: (name, help, [(arg_name, kwargs), ...], handler_attr)
     specs = [
-        ("list", "List known engines.", [
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_list"),
-        ("status", "Show engine state.", [
-            (("engine",), {"nargs": "?"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_status"),
-        ("install", "Install + start an engine.", [
-            (("engine",), {}),
-            (("--binary",), {}),
-            (("--user",), {}),
-            (("--firewall",), {"choices": ["lan-only", "none"], "default": "none"}),
-            (("--dry-run",), {"action": "store_true"}),
-            (("--force",), {"action": "store_true"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_install"),
-        ("uninstall", "Remove an engine.", [
-            (("engine",), {}),
-            (("--dry-run",), {"action": "store_true"}),
-            (("--force",), {"action": "store_true"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_uninstall"),
-        ("start", "Start an engine.", [
-            (("engine",), {}),
-            (("--dry-run",), {"action": "store_true"}),
-            (("--force",), {"action": "store_true"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_start"),
-        ("stop", "Stop an engine.", [
-            (("engine",), {}),
-            (("--dry-run",), {"action": "store_true"}),
-            (("--force",), {"action": "store_true"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_stop"),
-        ("restart", "Restart an engine.", [
-            (("engine",), {}),
-            (("--dry-run",), {"action": "store_true"}),
-            (("--force",), {"action": "store_true"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_restart"),
-        ("unload", "Unload a model (API or restart fallback).", [
-            (("engine",), {}),
-            (("model",), {"nargs": "?"}),
-            (("--force",), {"action": "store_true"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_unload"),
-        ("purge", "sudo purge + measured delta.", [
-            (("--dry-run",), {"action": "store_true"}),
-            (("--force",), {"action": "store_true"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_purge"),
-        ("repair", "Clean stale lock + report orphan plists.", [
-            (("--dry-run",), {"action": "store_true"}),
-            (("--json",), {"action": "store_true"}),
-        ], "cmd_repair"),
-        ("bootstrap", "Install /etc/sudoers.d/asiai-inference (visudo-validated).", [
-            (("--install-sudoers",), {"action": "store_true"}),
-            (("--dry-run",), {"action": "store_true"}),
-        ], "cmd_bootstrap"),
+        (
+            "list",
+            "List known engines.",
+            [
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_list",
+        ),
+        (
+            "status",
+            "Show engine state.",
+            [
+                (("engine",), {"nargs": "?"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_status",
+        ),
+        (
+            "install",
+            "Install + start an engine.",
+            [
+                (("engine",), {}),
+                (("--binary",), {}),
+                (("--user",), {}),
+                (("--firewall",), {"choices": ["lan-only", "none"], "default": "none"}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_install",
+        ),
+        (
+            "uninstall",
+            "Remove an engine.",
+            [
+                (("engine",), {}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_uninstall",
+        ),
+        (
+            "start",
+            "Start an engine.",
+            [
+                (("engine",), {}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_start",
+        ),
+        (
+            "stop",
+            "Stop an engine.",
+            [
+                (("engine",), {}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_stop",
+        ),
+        (
+            "restart",
+            "Restart an engine.",
+            [
+                (("engine",), {}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_restart",
+        ),
+        (
+            "unload",
+            "Unload a model (API or restart fallback).",
+            [
+                (("engine",), {}),
+                (("model",), {"nargs": "?"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_unload",
+        ),
+        (
+            "purge",
+            "sudo purge + measured delta.",
+            [
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_purge",
+        ),
+        (
+            "repair",
+            "Clean stale lock + report orphan plists.",
+            [
+                (("--dry-run",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_repair",
+        ),
+        (
+            "bootstrap",
+            "Install /etc/sudoers.d/asiai-inference (visudo-validated).",
+            [
+                (("--install-sudoers",), {"action": "store_true"}),
+                (("--dry-run",), {"action": "store_true"}),
+            ],
+            "cmd_bootstrap",
+        ),
     ]
 
     for name, help_text, sub_args, handler_attr in specs:
@@ -225,6 +278,7 @@ def _lazy_handler(attr_name: str):
 
     def thunk(args: argparse.Namespace) -> int:
         from ais_cli import commands as _c
+
         return int(getattr(_c, attr_name)(args))
 
     thunk.__name__ = f"lazy_{attr_name}"

@@ -85,9 +85,7 @@ def validate_anchor(anchor_text: str) -> None:
         capture_output=True,
     )
     if proc.returncode != 0:
-        raise FirewallError(
-            f"pfctl rejected anchor: {proc.stderr.strip() or proc.stdout.strip()}"
-        )
+        raise FirewallError(f"pfctl rejected anchor: {proc.stderr.strip() or proc.stdout.strip()}")
 
 
 def install_anchor(
@@ -127,9 +125,7 @@ def install_anchor(
         tmp_path = staging / f"{manifest.firewall.anchor_name}.anchor"
         tmp_path.write_text(content, encoding="utf-8")
         try:
-            subprocess.run(
-                ["sudo", "/bin/mkdir", "-p", PF_ANCHORS_DIR], check=True
-            )
+            subprocess.run(["sudo", "/bin/mkdir", "-p", PF_ANCHORS_DIR], check=True)
             subprocess.run(["sudo", "/bin/mv", str(tmp_path), dst], check=True)
             subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", dst], check=True)
             subprocess.run(["sudo", "/bin/chmod", "644", dst], check=True)
@@ -195,19 +191,11 @@ def _atomic_write_pf_conf(new_text: str) -> None:
         tmp_path = staging / "pf.conf"
         tmp_path.write_text(new_text, encoding="utf-8")
         try:
-            subprocess.run(
-                ["sudo", "/bin/mv", str(tmp_path), PF_CONF_PATH], check=True
-            )
-            subprocess.run(
-                ["sudo", "/usr/sbin/chown", "root:wheel", PF_CONF_PATH], check=True
-            )
-            subprocess.run(
-                ["sudo", "/bin/chmod", "644", PF_CONF_PATH], check=True
-            )
+            subprocess.run(["sudo", "/bin/mv", str(tmp_path), PF_CONF_PATH], check=True)
+            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", PF_CONF_PATH], check=True)
+            subprocess.run(["sudo", "/bin/chmod", "644", PF_CONF_PATH], check=True)
         except subprocess.CalledProcessError as e:
-            raise FirewallError(
-                f"Failed to update {PF_CONF_PATH}: {e}"
-            ) from e
+            raise FirewallError(f"Failed to update {PF_CONF_PATH}: {e}") from e
 
 
 def _reload_pf() -> None:
@@ -217,6 +205,4 @@ def _reload_pf() -> None:
         check=False,
         capture_output=True,
     )
-    subprocess.run(
-        ["sudo", "/sbin/pfctl", "-e"], check=False, capture_output=True
-    )
+    subprocess.run(["sudo", "/sbin/pfctl", "-e"], check=False, capture_output=True)

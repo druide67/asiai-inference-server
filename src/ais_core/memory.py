@@ -78,9 +78,7 @@ class VmStat:
         captures both the resident process working set and the compressor
         ballast.
         """
-        return (
-            self.pages_active + self.pages_wired + self.pages_compressed
-        ) * self.page_size_bytes
+        return (self.pages_active + self.pages_wired + self.pages_compressed) * self.page_size_bytes
 
     @property
     def free_bytes(self) -> int:
@@ -108,9 +106,7 @@ def vm_stat_parse(text: str | None = None) -> VmStat:
     versions add and remove counters.
     """
     if text is None:
-        proc = subprocess.run(
-            ["/usr/bin/vm_stat"], check=True, capture_output=True, text=True
-        )
+        proc = subprocess.run(["/usr/bin/vm_stat"], check=True, capture_output=True, text=True)
         text = proc.stdout
 
     page_size = PAGE_SIZE_DEFAULT
