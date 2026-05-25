@@ -23,9 +23,10 @@ import os
 import plistlib
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
+
+from ais_core.io import secure_staging_dir
 
 LAUNCHDAEMONS_DIR = Path("/Library/LaunchDaemons")
 
@@ -112,18 +113,6 @@ def _plist_path(service: str) -> Path:
     return LAUNCHDAEMONS_DIR / f"com.asiai.{'web' if service == 'asiai-web' else service}.plist"
 
 
-def write_plist(service: str, plist: dict[str, Any], dest: Path) -> Path:
-    """Write the plist atomically to a tmp file. Returns the tmp path.
-
-    The caller is responsible for the privileged ``install`` step that
-    moves the file to ``/Library/LaunchDaemons/``.
-    """
-    fd, tmp_path = tempfile.mkstemp(prefix=f"{service}-", suffix=".plist")
-    with os.fdopen(fd, "wb") as f:
-        plistlib.dump(plist, f, sort_keys=False)
-    return Path(tmp_path)
-
-
 def _ensure_logs_dir(user: str) -> None:
     """Create ``~/Library/Logs`` for the user if missing."""
     log_dir = Path(f"/Users/{user}/Library/Logs")
@@ -147,7 +136,19 @@ def _install_one(
     force: bool,
     as_json: bool,
 ) -> dict[str, Any]:
+    """Provision the LaunchDaemon for ``service``.
+
+    Uses the legacy sudoers patterns (``/bin/mv`` + ``chown`` + ``chmod``
+    + ``launchctl load -w``) that ``aisctl bootstrap --install-sudoers``
+    has shipped since v0.0.1, so existing nodes don't need to re-bootstrap
+    before they can install the Phase 2 services. The newer
+    ``launchctl bootstrap system`` rules added to the sudoers fragment
+    in this same release are kept for symmetry but the legacy path stays
+    the default.
+    """
     target = _plist_path(service)
+    label = build_plist(service, user=user, port=port)["Label"]
+
     if target.exists() and not force:
         msg = (
             f"{target} already exists — pass --force to overwrite "
@@ -156,51 +157,52 @@ def _install_one(
         return {"service": service, "ok": False, "error": "already_installed", "detail": msg}
 
     plist = build_plist(service, user=user, port=port)
-    tmp = write_plist(service, plist, target)
-
     _ensure_logs_dir(user)
 
-    install_cmd = [
-        "sudo",
-        "-n",
-        "/usr/bin/install",
-        "-m",
-        "0644",
-        "-o",
-        "root",
-        "-g",
-        "wheel",
-        str(tmp),
-        str(target),
-    ]
-    rc = _run(install_cmd, dry_run=dry_run)
-    if rc != 0:
-        tmp.unlink(missing_ok=True)
-        return {
-            "service": service,
-            "ok": False,
-            "error": "install_failed",
-            "detail": (
-                f"sudo install returned {rc}. Either run 'aisctl bootstrap "
-                "--install-sudoers' to grant non-interactive sudo, or rerun "
-                "as root."
-            ),
-        }
-    tmp.unlink(missing_ok=True)
+    # Sudoers wildcard expects the plist to live in ``/tmp/asiai-XXXX/``
+    # before the ``/bin/mv`` into ``/Library/LaunchDaemons/``. The 0700
+    # staging dir comes from ``ais_core.io.secure_staging_dir`` and
+    # closes the symlink-swap TOCTOU on the mv path.
+    with secure_staging_dir() as staging:
+        # Name the file ``com.asiai.<service>.plist`` so the sudoers
+        # ``/bin/mv /tmp/asiai-*/com.asiai.*.plist /Library/...`` rule
+        # matches without a wildcard expansion surprise.
+        staged = staging / f"{label}.plist"
+        with open(staged, "wb") as f:
+            plistlib.dump(plist, f, sort_keys=False)
+        staged.chmod(0o644)
 
-    # If already loaded (re-install case), bootout first.
-    label = plist["Label"]
-    bootout_cmd = ["sudo", "-n", "/bin/launchctl", "bootout", f"system/{label}"]
-    _run(bootout_cmd, dry_run=dry_run)
+        mv_cmd = ["sudo", "-n", "/bin/mv", str(staged), str(target)]
+        rc = _run(mv_cmd, dry_run=dry_run)
+        if rc != 0:
+            return {
+                "service": service,
+                "ok": False,
+                "error": "install_failed",
+                "detail": (
+                    f"sudo /bin/mv returned {rc}. Run 'aisctl bootstrap "
+                    "--install-sudoers' on this node (interactive once) "
+                    "to grant non-interactive sudo for the Phase 2 ops."
+                ),
+            }
 
-    bootstrap_cmd = ["sudo", "-n", "/bin/launchctl", "bootstrap", "system", str(target)]
-    rc2 = _run(bootstrap_cmd, dry_run=dry_run)
+    # Bring perms in line with what launchd expects on /Library/LaunchDaemons.
+    _run(["sudo", "-n", "/usr/sbin/chown", "root:wheel", str(target)], dry_run=dry_run)
+    _run(["sudo", "-n", "/bin/chmod", "644", str(target)], dry_run=dry_run)
+
+    # Unload any pre-existing daemon under the same label (legacy or
+    # leftover from a previous install) so ``load -w`` doesn't trip on
+    # "service already loaded".
+    _run(["sudo", "-n", "/bin/launchctl", "unload", str(target)], dry_run=dry_run)
+
+    load_cmd = ["sudo", "-n", "/bin/launchctl", "load", "-w", str(target)]
+    rc2 = _run(load_cmd, dry_run=dry_run)
     if rc2 != 0:
         return {
             "service": service,
             "ok": False,
-            "error": "bootstrap_failed",
-            "detail": f"launchctl bootstrap returned {rc2}",
+            "error": "load_failed",
+            "detail": f"launchctl load -w returned {rc2}",
             "plist": str(target),
         }
 
@@ -280,8 +282,9 @@ def cmd_uninstall_service(args: argparse.Namespace) -> int:
             print(msg, file=sys.stderr)
         return 0
 
-    bootout_cmd = ["sudo", "-n", "/bin/launchctl", "bootout", f"system/{label}"]
-    _run(bootout_cmd, dry_run=args.dry_run)
+    # Legacy unload path (matches the sudoers fragment we ship).
+    unload_cmd = ["sudo", "-n", "/bin/launchctl", "unload", "-w", str(target)]
+    _run(unload_cmd, dry_run=args.dry_run)
 
     rm_cmd = ["sudo", "-n", "/bin/rm", "-f", str(target)]
     rc = _run(rm_cmd, dry_run=args.dry_run)
