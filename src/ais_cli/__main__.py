@@ -138,6 +138,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_boot.add_argument("--dry-run", action="store_true")
     p_boot.set_defaults(func=commands.cmd_bootstrap)
 
+    # serve (Phase 2) — loopback HTTP server for fleet write commands
+    from ais_cli.serve import add_serve_subparser
+
+    add_serve_subparser(sub)
+
+    # fleet (Phase 2) — orchestrator-side push to remote nodes
+    from ais_cli.fleet import add_fleet_subparser
+
+    add_fleet_subparser(sub)
+
     return parser
 
 
