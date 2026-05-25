@@ -46,9 +46,17 @@ def build_plist(
     *,
     user: str,
     port: int | None = None,
+    trusted_hosts: str | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Return the plist dict for one of the two Phase 2 services."""
+    """Return the plist dict for one of the two Phase 2 services.
+
+    ``trusted_hosts`` is propagated to ``asiai web`` via
+    ``ASIAI_TRUSTED_HOSTS``: the TrustedHostMiddleware rejects requests
+    whose Host header isn't in this list, so a LAN-facing daemon needs
+    to know its own external IP(s) — e.g. ``192.168.0.16,studio.lan``.
+    Ignored for ``aisctl-serve`` (loopback only).
+    """
     user_home = f"/Users/{user}"
     user_local_bin = _user_local_bin(user)
     path_value = ":".join(
@@ -59,6 +67,8 @@ def build_plist(
         "HOME": user_home,
         "PATH": path_value,
     }
+    if service == "asiai-web" and trusted_hosts:
+        env["ASIAI_TRUSTED_HOSTS"] = trusted_hosts
     if extra_env:
         env.update(extra_env)
 
@@ -132,6 +142,7 @@ def _install_one(
     *,
     user: str,
     port: int | None,
+    trusted_hosts: str | None,
     dry_run: bool,
     force: bool,
     as_json: bool,
@@ -147,7 +158,7 @@ def _install_one(
     the default.
     """
     target = _plist_path(service)
-    label = build_plist(service, user=user, port=port)["Label"]
+    label = build_plist(service, user=user, port=port, trusted_hosts=trusted_hosts)["Label"]
 
     if target.exists() and not force:
         msg = (
@@ -156,7 +167,7 @@ def _install_one(
         )
         return {"service": service, "ok": False, "error": "already_installed", "detail": msg}
 
-    plist = build_plist(service, user=user, port=port)
+    plist = build_plist(service, user=user, port=port, trusted_hosts=trusted_hosts)
     _ensure_logs_dir(user)
 
     # Sudoers wildcard expects the plist to live in ``/tmp/asiai-XXXX/``
@@ -243,6 +254,7 @@ def cmd_install_service(args: argparse.Namespace) -> int:
         service,
         user=user,
         port=args.port,
+        trusted_hosts=args.trusted_hosts,
         dry_run=args.dry_run,
         force=args.force,
         as_json=args.json,
@@ -319,6 +331,14 @@ def add_install_service_subparsers(subparsers: argparse._SubParsersAction) -> No
     )
     p_install.add_argument(
         "--port", type=int, default=None, help="Override the default port for this service."
+    )
+    p_install.add_argument(
+        "--trusted-hosts",
+        default=None,
+        help="Comma-separated extra Host headers asiai web should accept "
+        "(e.g. '192.168.0.16,studio.lan'). Applies only to asiai-web; "
+        "ignored for the loopback aisctl-serve. localhost / 127.0.0.1 / "
+        "*.local are always trusted.",
     )
     p_install.add_argument("--force", action="store_true", help="Overwrite if already installed.")
     p_install.add_argument("--dry-run", action="store_true")
