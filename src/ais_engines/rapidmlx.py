@@ -37,5 +37,7 @@ class RapidMlxDriver(RestartOnlyDriver):
     @classmethod
     def from_manifest(cls, manifest: EngineManifest | None = None) -> RapidMlxDriver:
         m = manifest if manifest is not None else load_manifest("rapidmlx")
-        engine = make_asiai_engine_proxy(m, module="asiai.engines.rapidmlx", class_name="RapidMlxEngine")
+        engine = make_asiai_engine_proxy(
+            m, module="asiai.engines.rapidmlx", class_name="RapidMlxEngine"
+        )
         return cls(m, engine)
