@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -310,6 +311,97 @@ def cmd_unload(args: argparse.Namespace) -> int:
         outcome = driver.unload(args.model)
     _emit(outcome, as_json=args.json)
     return 0 if outcome.success else 2
+
+
+def cmd_load(args: argparse.Namespace) -> int:
+    """Warm-load a model on a running engine so the first inference is hot.
+
+    The implementation is engine-specific:
+
+    - **Ollama** sends a ``POST /api/generate`` with an empty prompt + a
+      ``keep_alive`` window so the model is paged into VRAM and stays
+      there for the configured duration.
+    - **LM Studio** uses the same trick over the OpenAI-compatible
+      ``/v1/chat/completions`` endpoint with ``max_tokens=1``.
+    - Other engines load their model at daemon start (llama.cpp's
+      ``--warmup``, mlx-lm's eager init); for those we return a
+      ``noop`` outcome rather than failing, so the fleet caller can
+      issue a uniform ``load`` everywhere.
+    """
+    import urllib.error
+    import urllib.request
+
+    m = _resolve_manifest(args.engine)
+    # Driver is intentionally not used here: this command targets the
+    # engine's HTTP surface directly (different transport per engine).
+    # We still resolve the manifest to enforce that the engine is known.
+    _driver_for(m)
+    model = args.model
+    keep_alive = getattr(args, "keep_alive", "5m") or "5m"
+
+    name = m.name
+    base = f"http://{m.network.bind}:{m.network.port}"
+    started = time.monotonic()
+
+    def _outcome(method: str, success: bool, detail: str = "") -> dict:
+        return {
+            "engine": name,
+            "model": model,
+            "method": method,
+            "success": success,
+            "detail": detail,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        }
+
+    if name == "ollama":
+        payload = json.dumps(
+            {"model": model, "prompt": "", "keep_alive": keep_alive, "stream": False}
+        ).encode()
+        req = urllib.request.Request(
+            f"{base}/api/generate",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                resp.read(1024)
+            _emit(_outcome("api", True, f"keep_alive={keep_alive}"), as_json=args.json)
+            return 0
+        except (urllib.error.URLError, OSError) as e:
+            _emit(_outcome("api", False, f"ollama error: {e}"), as_json=args.json)
+            return 2
+
+    if name == "lmstudio":
+        payload = json.dumps(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "."}],
+                "max_tokens": 1,
+                "temperature": 0,
+            }
+        ).encode()
+        req = urllib.request.Request(
+            f"{base}/v1/chat/completions",
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                resp.read(1024)
+            _emit(_outcome("api", True, "1-token warm-up"), as_json=args.json)
+            return 0
+        except (urllib.error.URLError, OSError) as e:
+            _emit(_outcome("api", False, f"lmstudio error: {e}"), as_json=args.json)
+            return 2
+
+    # Engines that load their model at daemon start: report noop success.
+    _emit(
+        _outcome("noop", True, f"{name} loads its model at daemon start"),
+        as_json=args.json,
+    )
+    return 0
 
 
 def cmd_purge(args: argparse.Namespace) -> int:

@@ -63,6 +63,13 @@ def generate_sudoers_content(manifests: list[EngineManifest] | None = None) -> s
         "/Library/LaunchDaemons/com.asiai.*.plist",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl stop com.asiai.*",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl start com.asiai.*",
+        # Phase 2 LaunchDaemon bootstrap / bootout (modern launchctl).
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl bootstrap system "
+        "/Library/LaunchDaemons/com.asiai.*.plist",
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl bootout system/com.asiai.*",
+        # Phase 2 install-service uses /usr/bin/install for atomic plist drop.
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/bin/install -m 0644 -o root -g wheel "
+        "/tmp/asiai-* /Library/LaunchDaemons/com.asiai.*.plist",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/sysctl iogpu.wired_limit_mb=*",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /sbin/pfctl -f /etc/pf.conf",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /sbin/pfctl -f /etc/pf.anchors/com.asiai.*",
@@ -87,11 +94,9 @@ def generate_sudoers_content(manifests: list[EngineManifest] | None = None) -> s
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/chown root\\:wheel /etc/pf.conf",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/chmod 644 "
         "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/chmod 644 "
-        "/etc/pf.anchors/com.asiai.*",
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/chmod 644 /etc/pf.anchors/com.asiai.*",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/chmod 644 /etc/pf.conf",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/rm -f "
-        "/Library/LaunchDaemons/com.asiai.*.plist",
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/rm -f /Library/LaunchDaemons/com.asiai.*.plist",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/rm -f /etc/pf.anchors/com.asiai.*",
         "",
     ]
@@ -116,8 +121,7 @@ def validate_content(content: str) -> None:
         )
         if proc.returncode != 0:
             raise SudoersError(
-                f"visudo rejected sudoers content:\n"
-                f"{(proc.stderr or proc.stdout).strip()}"
+                f"visudo rejected sudoers content:\n{(proc.stderr or proc.stdout).strip()}"
             )
 
 
@@ -158,19 +162,11 @@ def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str
         tmp_path.write_text(content, encoding="utf-8")
         tmp_path.chmod(0o440)
         try:
-            subprocess.run(
-                ["sudo", "/bin/mv", str(tmp_path), SUDOERS_PATH], check=True
-            )
-            subprocess.run(
-                ["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_PATH], check=True
-            )
-            subprocess.run(
-                ["sudo", "/bin/chmod", "440", SUDOERS_PATH], check=True
-            )
+            subprocess.run(["sudo", "/bin/mv", str(tmp_path), SUDOERS_PATH], check=True)
+            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_PATH], check=True)
+            subprocess.run(["sudo", "/bin/chmod", "440", SUDOERS_PATH], check=True)
         except subprocess.CalledProcessError as e:
-            raise SudoersError(
-                f"Failed to install {SUDOERS_PATH}: {e}"
-            ) from e
+            raise SudoersError(f"Failed to install {SUDOERS_PATH}: {e}") from e
 
     return SUDOERS_PATH
 

@@ -104,8 +104,10 @@ def test_install_sudoers_invokes_validate_then_mv() -> None:
 
     # The non-TTY guard (US-004 fix) blocks pytest runs by default. We patch
     # sys.stdin.isatty to True so the install path runs end-to-end here.
-    with patch("ais_core.sudoers.subprocess.run", side_effect=fake_run), \
-         patch("ais_core.sudoers.sys.stdin.isatty", return_value=True):
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=fake_run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+    ):
         install_sudoers("# minimal\n")
 
     assert call_order[:2] == ["visudo", "mv"]
@@ -113,14 +115,18 @@ def test_install_sudoers_invokes_validate_then_mv() -> None:
 
 def test_remove_sudoers_when_absent_returns_false() -> None:
     from ais_core.sudoers import remove_sudoers
+
     with patch("ais_core.sudoers.is_installed", return_value=False):
         assert remove_sudoers() is False
 
 
 def test_remove_sudoers_when_present_calls_sudo_rm() -> None:
     from ais_core.sudoers import remove_sudoers
-    with patch("ais_core.sudoers.is_installed", return_value=True), \
-         patch("ais_core.sudoers.subprocess.run") as mock_run:
+
+    with (
+        patch("ais_core.sudoers.is_installed", return_value=True),
+        patch("ais_core.sudoers.subprocess.run") as mock_run,
+    ):
         result = remove_sudoers()
     assert result is True
     cmd = mock_run.call_args.args[0]
@@ -147,8 +153,10 @@ def test_no_temp_files_left_after_validate(tmp_path: Path, monkeypatch) -> None:
 
 def test_install_sudoers_non_tty_raises_with_clear_instructions() -> None:
     """US-004: when run without a controlling terminal, surface clear hint."""
-    with patch("ais_core.sudoers.sys.stdin.isatty", return_value=False), \
-         pytest.raises(SudoersError, match="interactive terminal"):
+    with (
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=False),
+        pytest.raises(SudoersError, match="interactive terminal"),
+    ):
         install_sudoers("# minimal\n")
 
 

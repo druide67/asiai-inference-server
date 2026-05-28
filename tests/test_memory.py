@@ -123,9 +123,11 @@ def test_memory_pressure_unknown_when_binary_missing() -> None:
 
 def test_purge_memory_runs_sudo_purge() -> None:
     fake_vm = VmStat(16384, 1000, 5000, 0, 1000, 2000)
-    with patch("ais_core.memory.vm_stat_parse", return_value=fake_vm), \
-         patch("ais_core.memory.subprocess.run") as mock_run, \
-         patch("ais_core.memory.memory_pressure", return_value="normal"):
+    with (
+        patch("ais_core.memory.vm_stat_parse", return_value=fake_vm),
+        patch("ais_core.memory.subprocess.run") as mock_run,
+        patch("ais_core.memory.memory_pressure", return_value="normal"),
+    ):
         rep = memory.purge_memory()
 
     assert mock_run.call_args.args[0] == ["sudo", "/usr/sbin/purge"]
@@ -136,9 +138,11 @@ def test_purge_memory_runs_sudo_purge() -> None:
 
 def test_purge_memory_dry_run_skips_subprocess() -> None:
     fake_vm = VmStat(16384, 1000, 5000, 0, 1000, 2000)
-    with patch("ais_core.memory.vm_stat_parse", return_value=fake_vm), \
-         patch("ais_core.memory.subprocess.run") as mock_run, \
-         patch("ais_core.memory.memory_pressure", return_value="normal"):
+    with (
+        patch("ais_core.memory.vm_stat_parse", return_value=fake_vm),
+        patch("ais_core.memory.subprocess.run") as mock_run,
+        patch("ais_core.memory.memory_pressure", return_value="normal"),
+    ):
         rep = memory.purge_memory(dry_run=True)
 
     mock_run.assert_not_called()
@@ -206,9 +210,7 @@ def _hold_lock_then_exit(lock_path: str, hold_s: float) -> None:
 def test_operations_lock_cross_process(tmp_path: Path) -> None:
     """Real subprocess holding the lock blocks the parent's acquisition."""
     lock_path = tmp_path / "cross.lock"
-    proc = multiprocessing.Process(
-        target=_hold_lock_then_exit, args=(str(lock_path), 1.5)
-    )
+    proc = multiprocessing.Process(target=_hold_lock_then_exit, args=(str(lock_path), 1.5))
     proc.start()
     time.sleep(0.3)  # let the child acquire first
     try:
@@ -261,9 +263,7 @@ def test_repair_lists_orphan_plists(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(memory, "LAUNCH_DAEMONS_DIR", fake_launchd)
     # Use a never-existing path so the lock branch is a no-op.
-    monkeypatch.setattr(
-        memory, "OPERATIONS_LOCK_PATH", tmp_path / "no_such_lock_file"
-    )
+    monkeypatch.setattr(memory, "OPERATIONS_LOCK_PATH", tmp_path / "no_such_lock_file")
 
     report = memory.repair()
     assert any("com.asiai.ghost.plist" in p for p in report.orphan_plists)

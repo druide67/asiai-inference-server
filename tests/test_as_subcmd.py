@@ -70,9 +70,7 @@ def test_register_with_dataclass_attaches_engine_subparser() -> None:
 
 def test_register_with_dataclass_kwarg() -> None:
     parser, subparsers = _fresh_parser()
-    ctx = RegistrationContext(
-        api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={}
-    )
+    ctx = RegistrationContext(api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={})
     register(context=ctx)
     parser.parse_args(["engine", "purge", "--dry-run"])
 
@@ -130,17 +128,17 @@ def test_register_with_unknown_signature_raises_typeerror() -> None:
 )
 def test_every_subcommand_parses(argv: list[str]) -> None:
     parser, subparsers = _fresh_parser()
-    register(RegistrationContext(
-        api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={}
-    ))
+    register(
+        RegistrationContext(api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={})
+    )
     parser.parse_args(argv)  # raises SystemExit if invalid
 
 
 def test_engine_without_subcommand_is_rejected() -> None:
     parser, subparsers = _fresh_parser()
-    register(RegistrationContext(
-        api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={}
-    ))
+    register(
+        RegistrationContext(api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={})
+    )
     with pytest.raises(SystemExit):
         parser.parse_args(["engine"])
 
@@ -158,9 +156,9 @@ def test_handlers_are_not_imported_at_register_time() -> None:
     only loads when the user actually runs ``asiai engine <subcmd>``.
     """
     parser, subparsers = _fresh_parser()
-    register(RegistrationContext(
-        api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={}
-    ))
+    register(
+        RegistrationContext(api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={})
+    )
     parsed = parser.parse_args(["engine", "list", "--json"])
     # Lazy thunks have a name like "lazy_cmd_list", not the real handler name.
     assert parsed.func.__name__.startswith("lazy_")

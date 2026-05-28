@@ -37,11 +37,11 @@ class LifecycleError(RuntimeError):
 
 
 class EngineState(enum.StrEnum):
-    NOT_INSTALLED = "not_installed"     # no plist file
-    STOPPED = "stopped"                  # plist exists, daemon not loaded
-    LOADED_NOT_RUNNING = "loaded"        # launchctl knows it, no PID
-    UNHEALTHY = "unhealthy"              # PID alive but health endpoint silent
-    RUNNING = "running"                  # PID alive AND health endpoint 2xx
+    NOT_INSTALLED = "not_installed"  # no plist file
+    STOPPED = "stopped"  # plist exists, daemon not loaded
+    LOADED_NOT_RUNNING = "loaded"  # launchctl knows it, no PID
+    UNHEALTHY = "unhealthy"  # PID alive but health endpoint silent
+    RUNNING = "running"  # PID alive AND health endpoint 2xx
 
 
 # ---------------------------------------------------------------------------
@@ -109,17 +109,12 @@ def install(
 
     anchor_path_str: str | None = None
     if enable_firewall:
-        anchor_path_str = firewall.install_anchor(
-            manifest, subnets=subnets, dry_run=dry_run
-        )
+        anchor_path_str = firewall.install_anchor(manifest, subnets=subnets, dry_run=dry_run)
 
     if not dry_run:
         start(manifest)
 
-    health_ok = (
-        not dry_run
-        and wait_for_health(manifest, timeout=manifest.network.health_timeout)
-    )
+    health_ok = not dry_run and wait_for_health(manifest, timeout=manifest.network.health_timeout)
 
     return {
         "engine": manifest.name,
@@ -142,9 +137,7 @@ def uninstall(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
     stop(manifest, dry_run=dry_run)
     plist_removed = plist.remove_plist(manifest, dry_run=dry_run)
     fw_changed = (
-        firewall.remove_anchor(manifest, dry_run=dry_run)
-        if manifest.firewall.supported
-        else False
+        firewall.remove_anchor(manifest, dry_run=dry_run) if manifest.firewall.supported else False
     )
 
     return {
@@ -210,9 +203,7 @@ def stop_existing(manifest: EngineManifest, *, dry_run: bool = False) -> None:
         print(f"[dry-run] would stop existing {manifest.name} services")
         return
 
-    if subprocess.run(
-        ["test", "-f", plist.plist_path(manifest)], check=False
-    ).returncode == 0:
+    if subprocess.run(["test", "-f", plist.plist_path(manifest)], check=False).returncode == 0:
         subprocess.run(
             ["sudo", "/bin/launchctl", "unload", plist.plist_path(manifest)],
             check=False,

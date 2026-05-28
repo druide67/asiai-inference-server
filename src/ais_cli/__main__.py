@@ -102,6 +102,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_unload.add_argument("--json", action="store_true")
     p_unload.set_defaults(func=commands.cmd_unload)
 
+    # load
+    p_load = sub.add_parser(
+        "load",
+        help="Warm-load a model so the first inference is hot (Ollama / LM Studio).",
+    )
+    p_load.add_argument("engine")
+    p_load.add_argument("model")
+    p_load.add_argument(
+        "--keep-alive",
+        default="5m",
+        help="How long to keep the model resident (Ollama only). Default: 5m.",
+    )
+    p_load.add_argument("--force", action="store_true")
+    p_load.add_argument("--json", action="store_true")
+    p_load.set_defaults(func=commands.cmd_load)
+
     # purge
     p_purge = sub.add_parser(
         "purge",
@@ -137,6 +153,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_boot.add_argument("--dry-run", action="store_true")
     p_boot.set_defaults(func=commands.cmd_bootstrap)
+
+    # serve (Phase 2) — loopback HTTP server for fleet write commands
+    from ais_cli.serve import add_serve_subparser
+
+    add_serve_subparser(sub)
+
+    # fleet (Phase 2) — orchestrator-side push to remote nodes
+    from ais_cli.fleet import add_fleet_subparser
+
+    add_fleet_subparser(sub)
+
+    # install-service / uninstall-service (Phase 2) — LaunchDaemons for
+    # the two companion services (asiai-web on the LAN edge, aisctl-serve
+    # on the loopback).
+    from ais_cli.install_service import add_install_service_subparsers
+
+    add_install_service_subparsers(sub)
 
     return parser
 

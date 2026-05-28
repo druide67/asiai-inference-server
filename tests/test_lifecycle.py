@@ -79,6 +79,7 @@ def healthy_server():
 def _manifest_pointing_to_port(port: int):
     """Return a manifest tweaked so its health URL hits the test server."""
     from dataclasses import replace
+
     m = load_manifest("ollama")
     return replace(
         m,
@@ -182,8 +183,13 @@ def test_start_invokes_launchctl_load_w() -> None:
         mock_run.return_value = MagicMock(returncode=0)
         lifecycle.start(m)
     cmd = mock_run.call_args.args[0]
-    assert cmd[:5] == ["sudo", "/bin/launchctl", "load", "-w",
-                       "/Library/LaunchDaemons/com.asiai.ollama.plist"]
+    assert cmd[:5] == [
+        "sudo",
+        "/bin/launchctl",
+        "load",
+        "-w",
+        "/Library/LaunchDaemons/com.asiai.ollama.plist",
+    ]
 
 
 def test_stop_calls_stop_then_unload_then_pkill_only_if_alive() -> None:
@@ -196,8 +202,10 @@ def test_stop_calls_stop_then_unload_then_pkill_only_if_alive() -> None:
         # so the test exercises the full happy path including the pkill branch.
         return MagicMock(returncode=0, stdout=b"", stderr=b"")
 
-    with patch("ais_core.lifecycle.subprocess.run", side_effect=fake_run), \
-         patch("ais_core.lifecycle.time.sleep"):
+    with (
+        patch("ais_core.lifecycle.subprocess.run", side_effect=fake_run),
+        patch("ais_core.lifecycle.time.sleep"),
+    ):
         lifecycle.stop(m)
 
     [c[0] if isinstance(c, list) else c for c in calls]
@@ -214,9 +222,11 @@ def test_stop_calls_stop_then_unload_then_pkill_only_if_alive() -> None:
 def test_install_dry_run_does_not_require_binary_present() -> None:
     """US-003: dry-run must not raise when the binary candidate is absent."""
     m = load_manifest("ollama")
-    with patch("ais_core.manifest.BinarySpec.resolve", return_value=None), \
-         patch("ais_core.lifecycle.stop_existing"), \
-         patch("ais_core.lifecycle.plist.write_plist", return_value="/fake/plist"):
+    with (
+        patch("ais_core.manifest.BinarySpec.resolve", return_value=None),
+        patch("ais_core.lifecycle.stop_existing"),
+        patch("ais_core.lifecycle.plist.write_plist", return_value="/fake/plist"),
+    ):
         result = lifecycle.install(m, user="jmn", dry_run=True)
     assert result["dry_run"] is True
     assert result["binary"] in m.binary.candidates
@@ -228,13 +238,17 @@ def test_install_creates_log_dir_before_launchctl(tmp_path) -> None:
     m = load_manifest("ollama")
     fake_logs_dir = tmp_path / "Library" / "Logs" / "asiai" / "ollama"
 
-    with patch("ais_core.manifest.LogSpec.expanded_dir",
-               new_callable=lambda: property(lambda self: str(fake_logs_dir))), \
-         patch("ais_core.manifest.BinarySpec.resolve", return_value="/opt/homebrew/bin/ollama"), \
-         patch("ais_core.lifecycle.stop_existing"), \
-         patch("ais_core.lifecycle.plist.write_plist", return_value="/fake/plist"), \
-         patch("ais_core.lifecycle.start"), \
-         patch("ais_core.lifecycle.wait_for_health", return_value=True):
+    with (
+        patch(
+            "ais_core.manifest.LogSpec.expanded_dir",
+            new_callable=lambda: property(lambda self: str(fake_logs_dir)),
+        ),
+        patch("ais_core.manifest.BinarySpec.resolve", return_value="/opt/homebrew/bin/ollama"),
+        patch("ais_core.lifecycle.stop_existing"),
+        patch("ais_core.lifecycle.plist.write_plist", return_value="/fake/plist"),
+        patch("ais_core.lifecycle.start"),
+        patch("ais_core.lifecycle.wait_for_health", return_value=True),
+    ):
         lifecycle.install(m, user="jmn", dry_run=False)
     assert fake_logs_dir.is_dir()
 
@@ -247,8 +261,10 @@ def test_current_state_running_when_health_ok_even_if_launchctl_silent() -> None
     probe so the user sees RUNNING when the daemon is actually serving.
     """
     m = load_manifest("ollama")
-    with patch("ais_core.lifecycle.Path.exists", return_value=True), \
-         patch("ais_core.lifecycle.probe_health", return_value=True):
+    with (
+        patch("ais_core.lifecycle.Path.exists", return_value=True),
+        patch("ais_core.lifecycle.probe_health", return_value=True),
+    ):
         state = lifecycle.current_state(m)
     assert state == EngineState.RUNNING
 
@@ -256,9 +272,11 @@ def test_current_state_running_when_health_ok_even_if_launchctl_silent() -> None
 def test_current_state_unhealthy_when_process_but_no_health() -> None:
     """US-017: process running but health probe fails → UNHEALTHY."""
     m = load_manifest("ollama")
-    with patch("ais_core.lifecycle.Path.exists", return_value=True), \
-         patch("ais_core.lifecycle.probe_health", return_value=False), \
-         patch("ais_core.lifecycle.process_alive", return_value=True):
+    with (
+        patch("ais_core.lifecycle.Path.exists", return_value=True),
+        patch("ais_core.lifecycle.probe_health", return_value=False),
+        patch("ais_core.lifecycle.process_alive", return_value=True),
+    ):
         state = lifecycle.current_state(m)
     assert state == EngineState.UNHEALTHY
 
@@ -266,9 +284,11 @@ def test_current_state_unhealthy_when_process_but_no_health() -> None:
 def test_current_state_stopped_when_plist_present_but_silent() -> None:
     """US-017: plist exists but nothing else → STOPPED (terminal fallback)."""
     m = load_manifest("ollama")
-    with patch("ais_core.lifecycle.Path.exists", return_value=True), \
-         patch("ais_core.lifecycle.probe_health", return_value=False), \
-         patch("ais_core.lifecycle.process_alive", return_value=False), \
-         patch("ais_core.lifecycle.is_loaded", return_value=False):
+    with (
+        patch("ais_core.lifecycle.Path.exists", return_value=True),
+        patch("ais_core.lifecycle.probe_health", return_value=False),
+        patch("ais_core.lifecycle.process_alive", return_value=False),
+        patch("ais_core.lifecycle.is_loaded", return_value=False),
+    ):
         state = lifecycle.current_state(m)
     assert state == EngineState.STOPPED
