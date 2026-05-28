@@ -87,6 +87,28 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=getattr(commands, f"cmd_{name}"))
 
+    # upgrade
+    p_upgrade = sub.add_parser(
+        "upgrade",
+        help="brew-upgrade a whitelisted engine; --restart to reconcile the daemon.",
+    )
+    p_upgrade.add_argument("engine")
+    p_upgrade.add_argument(
+        "--restart",
+        action="store_true",
+        help="Restart the daemon after upgrading so it runs the new binary.",
+    )
+    p_upgrade.add_argument("--dry-run", action="store_true")
+    p_upgrade.add_argument("--force", action="store_true")
+    p_upgrade.add_argument(
+        "--timeout",
+        type=float,
+        default=600.0,
+        help="Max seconds for the brew upgrade (default: 600).",
+    )
+    p_upgrade.add_argument("--json", action="store_true")
+    p_upgrade.set_defaults(func=commands.cmd_upgrade)
+
     # unload
     p_unload = sub.add_parser(
         "unload",

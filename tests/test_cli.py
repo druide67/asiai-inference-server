@@ -31,6 +31,7 @@ def test_parser_accepts_each_subcommand() -> None:
         "start",
         "stop",
         "restart",
+        "upgrade",
         "unload",
         "purge",
         "repair",
@@ -39,7 +40,7 @@ def test_parser_accepts_each_subcommand() -> None:
     for cmd in expected_subcommands:
         # Subcommands that take an engine name need one to parse cleanly.
         argv = [cmd]
-        if cmd in {"install", "uninstall", "start", "stop", "restart", "unload"}:
+        if cmd in {"install", "uninstall", "start", "stop", "restart", "upgrade", "unload"}:
             argv.append("ollama")
         parser.parse_args(argv)
 

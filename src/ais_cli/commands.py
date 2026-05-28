@@ -20,6 +20,7 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -33,6 +34,7 @@ from ais_core.manifest import (
     load_manifest,
     preset_summary,
 )
+from ais_core.upgrade import upgrade_argv
 from ais_engines.llamacpp import LlamaCppDriver
 from ais_engines.llamacpp_aux import LlamaCppAuxDriver
 from ais_engines.lmstudio import LMStudioDriver
@@ -297,6 +299,65 @@ def cmd_restart(args: argparse.Namespace) -> int:
         as_json=args.json,
     )
     return 0 if healthy else 2
+
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    """``aisctl upgrade <engine>`` — brew-upgrade a whitelisted engine.
+
+    The formula whitelist lives in :mod:`ais_core.upgrade` (shared with the
+    loopback command server). After a successful upgrade the running daemon
+    still executes the *old* binary; pass ``--restart`` to reconcile it
+    (otherwise we print a hint and leave the process running so an in-flight
+    request isn't interrupted without the operator asking).
+    """
+    m = _resolve_manifest(args.engine)
+    try:
+        argv = upgrade_argv(m.name)
+    except ValueError as e:
+        _emit({"engine": m.name, "ok": False, "error": str(e)}, as_json=args.json)
+        return 2
+
+    if args.dry_run:
+        _emit(
+            {"engine": m.name, "dry_run": True, "argv": argv, "would_restart": args.restart},
+            as_json=args.json,
+        )
+        return 0
+
+    started = time.monotonic()
+    with memory.OperationsLock(force=args.force):
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout,
+            check=False,
+        )
+    ok = proc.returncode == 0
+    result: dict[str, Any] = {
+        "engine": m.name,
+        "ok": ok,
+        "exit_code": proc.returncode,
+        "stdout": proc.stdout[-4096:],
+        "stderr": proc.stderr[-4096:],
+        "duration_ms": int((time.monotonic() - started) * 1000),
+    }
+
+    restarted = False
+    if ok and args.restart:
+        with memory.OperationsLock(force=args.force):
+            lifecycle.restart(m)
+        restarted = lifecycle.wait_for_health(m, timeout=m.network.health_timeout)
+        result["restarted"] = restarted
+    elif ok:
+        result["hint"] = f"running process still on the old build; run 'aisctl restart {m.name}'"
+
+    _emit(result, as_json=args.json)
+    if not ok:
+        return 2
+    if args.restart and not restarted:
+        return 2
+    return 0
 
 
 # ---------------------------------------------------------------------------

@@ -63,8 +63,8 @@ def provide(api_version: int) -> list[dict]:
 
     # Imported lazily so a failure inside aisrv internals degrades to "no
     # provider" on the asiai side rather than an import-time crash.
-    from ais_cli.serve import UPGRADE_FORMULAS
     from ais_core.manifest import list_manifests, load_manifest
+    from ais_core.upgrade import UPGRADE_FORMULAS
 
     out: list[dict] = []
     for stem in list_manifests():

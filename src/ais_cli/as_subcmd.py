@@ -221,6 +221,19 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
             "cmd_restart",
         ),
         (
+            "upgrade",
+            "brew-upgrade a whitelisted engine (--restart to reconcile).",
+            [
+                (("engine",), {}),
+                (("--restart",), {"action": "store_true"}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--timeout",), {"type": float, "default": 600.0}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_upgrade",
+        ),
+        (
             "unload",
             "Unload a model (API or restart fallback).",
             [
