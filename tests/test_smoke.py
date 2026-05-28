@@ -4,9 +4,13 @@ from __future__ import annotations
 
 
 def test_ais_core_import() -> None:
+    import re
+
     import ais_core
 
-    assert ais_core.__version__ == "0.0.1"
+    # Assert the version exists and is semver-shaped rather than pinning
+    # an exact value — pinning forced a test edit on every release bump.
+    assert re.match(r"^\d+\.\d+\.\d+", ais_core.__version__)
 
 
 def test_ais_engines_import() -> None:
