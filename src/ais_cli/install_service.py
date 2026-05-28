@@ -54,7 +54,7 @@ def build_plist(
     ``trusted_hosts`` is propagated to ``asiai web`` via
     ``ASIAI_TRUSTED_HOSTS``: the TrustedHostMiddleware rejects requests
     whose Host header isn't in this list, so a LAN-facing daemon needs
-    to know its own external IP(s) — e.g. ``192.168.0.16,studio.lan``.
+    to know its own external IP(s) — e.g. ``192.0.2.10,studio.lan``.
     Ignored for ``aisctl-serve`` (loopback only).
     """
     user_home = f"/Users/{user}"
@@ -336,7 +336,7 @@ def add_install_service_subparsers(subparsers: argparse._SubParsersAction) -> No
         "--trusted-hosts",
         default=None,
         help="Comma-separated extra Host headers asiai web should accept "
-        "(e.g. '192.168.0.16,studio.lan'). Applies only to asiai-web; "
+        "(e.g. '192.0.2.10,studio.lan'). Applies only to asiai-web; "
         "ignored for the loopback aisctl-serve. localhost / 127.0.0.1 / "
         "*.local are always trusted.",
     )

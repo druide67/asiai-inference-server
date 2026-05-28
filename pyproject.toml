@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "asiai-inference-server"
-version = "0.0.1"
+version = "0.1.0"
 description = "Fleet manager for local LLM inference engines on Apple Silicon"
 readme = "README.md"
 license = "Apache-2.0"
