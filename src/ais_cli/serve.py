@@ -47,6 +47,8 @@ from typing import Any
 
 from asiai.auth import loopback as asiai_loopback
 
+from ais_core.upgrade import upgrade_argv
+
 logger = logging.getLogger("aisctl.serve")
 
 LOOPBACK_HOST = "127.0.0.1"
@@ -120,38 +122,13 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
                 raise ValueError("args.keep_alive must match [0-9]+[smh]?")
             argv.extend(["--keep-alive", keep_alive])
     if command == "upgrade":
-        # upgrade isn't a built-in aisctl subcommand yet; route via brew
-        # under the engine's well-known formula name. Until aisrv ships
-        # a native ``aisctl upgrade``, this is a thin shim with a fixed
-        # formula whitelist to prevent argv injection.
+        # Routes to the same brew-upgrade argv the native ``aisctl upgrade``
+        # uses. The formula whitelist (ais_core.upgrade) is the single
+        # source of truth that prevents argv injection.
         if not isinstance(engine, str) or not engine:
             raise ValueError("upgrade requires args.engine")
-        argv = _upgrade_argv(engine)
+        argv = upgrade_argv(engine)
     return argv
-
-
-# Whitelist of Homebrew formulas an upgrade may target. Anything not in
-# this set is rejected at validation time — defends against an attacker
-# who somehow bypasses the engine regex from passing ``coreutils`` or a
-# tap that runs arbitrary post-install hooks.
-UPGRADE_FORMULAS: dict[str, str] = {
-    "ollama": "ollama",
-    "llamacpp": "llama.cpp",
-    "lmstudio": "lm-studio",
-    "rapidmlx": "rapid-mlx",
-    "turboquant": "turboquant",
-}
-
-
-def _upgrade_argv(engine: str) -> list[str]:
-    formula = UPGRADE_FORMULAS.get(engine)
-    if not formula:
-        raise ValueError(
-            f"upgrade is not whitelisted for engine '{engine}' "
-            f"(allowed: {', '.join(sorted(UPGRADE_FORMULAS))})"
-        )
-    brew = shutil.which("brew") or "/opt/homebrew/bin/brew"
-    return [brew, "upgrade", formula]
 
 
 def _execute(argv: list[str], timeout: float) -> dict[str, Any]:

@@ -47,6 +47,9 @@ aisctl = "ais_cli.__main__:main"
 [project.entry-points."asiai.subcommands"]
 engine = "ais_cli.as_subcmd:register"
 
+[project.entry-points."asiai.version_sources"]
+engines = "ais_cli.version_sources:provide"
+
 [project.entry-points."asiai.mcp.tools"]
 inference_server = "ais_mcp.tools:register"
 
