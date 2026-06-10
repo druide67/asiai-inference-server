@@ -105,8 +105,7 @@ def user_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect the user-config root to ``tmp_path`` and create the
     standard subtree."""
     monkeypatch.setenv("ASIAI_USER_CONFIG_DIR", str(tmp_path))
-    (tmp_path / "engine_manifests").mkdir()
-    (tmp_path / "presets").mkdir()
+    (tmp_path / "engine_manifests" / "presets").mkdir(parents=True)
     return tmp_path
 
 
@@ -150,7 +149,7 @@ def test_user_manifest_overrides_bundled(user_cfg: Path, caplog) -> None:
 
 
 def test_list_presets_includes_user_added_preset(user_cfg: Path) -> None:
-    (user_cfg / "presets" / "my-custom-preset.toml").write_text(
+    (user_cfg / "engine_manifests" / "presets" / "my-custom-preset.toml").write_text(
         _make_preset_toml("my-custom-preset", "llamacpp-aux-1", 8090)
     )
     presets = list_presets()
@@ -158,7 +157,7 @@ def test_list_presets_includes_user_added_preset(user_cfg: Path) -> None:
 
 
 def test_load_user_added_preset(user_cfg: Path) -> None:
-    (user_cfg / "presets" / "my-custom-preset.toml").write_text(
+    (user_cfg / "engine_manifests" / "presets" / "my-custom-preset.toml").write_text(
         _make_preset_toml("my-custom-preset", "llamacpp-aux-1", 8090)
     )
     m = load_manifest("llamacpp-aux-1", preset="my-custom-preset")
@@ -169,7 +168,7 @@ def test_load_user_added_preset(user_cfg: Path) -> None:
 def test_user_preset_overrides_bundled(user_cfg: Path, caplog) -> None:
     """A user preset sharing the stem with a bundled one wins, with a warning."""
     # Override the bundled aux-1 preset with a user version using a different port.
-    (user_cfg / "presets" / "qwen3-4b-instruct-hermes-aux-1.toml").write_text(
+    (user_cfg / "engine_manifests" / "presets" / "qwen3-4b-instruct-hermes-aux-1.toml").write_text(
         _make_preset_toml("qwen3-4b-instruct-hermes-aux-1", "llamacpp-aux-1", 9090)
     )
     import logging
@@ -223,69 +222,25 @@ def test_cli_discovers_user_added_engine(user_cfg: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mirror preset layout: <config>/engine_manifests/presets/ (issue #7)
+# Pre-v0.3 preset location: <config>/presets/ is dead, loudly (issue #7)
 # ---------------------------------------------------------------------------
 
 
-def test_preset_in_mirror_layout_is_discovered(user_cfg: Path) -> None:
-    """Presets under <config>/engine_manifests/presets/ (mirroring the bundled
-    package layout) must be discoverable — operators create that path
-    spontaneously since user manifests already live in engine_manifests/."""
-    mirror = user_cfg / "engine_manifests" / "presets"
-    mirror.mkdir(parents=True, exist_ok=True)
-    (mirror / "mirror-preset.toml").write_text(
-        _make_preset_toml("mirror-preset", "llamacpp-aux-1", 8090)
-    )
-
-    assert "mirror-preset" in list_presets()
-    m = load_manifest("llamacpp-aux-1", preset="mirror-preset")
-    assert m.display == "user preset mirror-preset"
-
-
-def test_mirror_layout_wins_over_root_layout_with_warning(user_cfg: Path, caplog) -> None:
-    """Same preset name in both user layouts: mirror wins, and the masked
-    legacy file is surfaced with a warning (the operator must know their
-    legacy file is inactive)."""
-    mirror = user_cfg / "engine_manifests" / "presets"
-    mirror.mkdir(parents=True, exist_ok=True)
-    (mirror / "dup-preset.toml").write_text(_make_preset_toml("dup-preset", "llamacpp-aux-1", 8090))
-    (user_cfg / "presets" / "dup-preset.toml").write_text(
-        _make_preset_toml("dup-preset", "llamacpp-aux-1", 9999)
-    )
+def test_legacy_dir_presets_are_ignored_with_warning(user_cfg: Path, caplog) -> None:
+    """TOMLs in the pre-v0.3 root-level presets/ are not resolved anymore,
+    and the operator is told exactly which files moved out of resolution
+    and where to put them — a preset silently dropping out after an
+    upgrade is the same failure class issue #6 exists for."""
+    legacy = user_cfg / "presets"
+    legacy.mkdir()
+    (legacy / "old-preset.toml").write_text(_make_preset_toml("old-preset", "llamacpp-aux-1", 8090))
     import logging
 
     caplog.set_level(logging.WARNING, logger="ais_core.manifest")
-    m = load_manifest("llamacpp-aux-1", preset="dup-preset")
-    assert m.network.port == 8090  # mirror layout wins
-    assert any("dup-preset exists in both user layouts" in rec.message for rec in caplog.records)
-
-
-def test_mirror_preset_overrides_bundled_with_warning(user_cfg: Path, caplog) -> None:
-    """A mirror-layout user preset sharing the stem with a bundled preset wins,
-    with the same override warning as the legacy layout."""
-    mirror = user_cfg / "engine_manifests" / "presets"
-    mirror.mkdir(parents=True, exist_ok=True)
-    (mirror / "qwen3-4b-instruct-hermes-aux-1.toml").write_text(
-        _make_preset_toml("qwen3-4b-instruct-hermes-aux-1", "llamacpp-aux-1", 9091)
-    )
-    import logging
-
-    caplog.set_level(logging.WARNING, logger="ais_core.manifest")
-    m = load_manifest("llamacpp-aux-1", preset="qwen3-4b-instruct-hermes-aux-1")
-    assert m.network.port == 9091  # user mirror wins over bundled
+    assert "old-preset" not in list_presets()
+    with pytest.raises(FileNotFoundError):
+        load_manifest("llamacpp-aux-1", preset="old-preset")
     assert any(
-        "user preset qwen3-4b-instruct-hermes-aux-1 overrides bundled" in rec.message
+        "deprecated location" in rec.message and "old-preset.toml" in rec.getMessage()
         for rec in caplog.records
     )
-
-
-def test_list_presets_dedups_across_user_layouts(user_cfg: Path) -> None:
-    """A preset present in both user layouts is listed exactly once."""
-    mirror = user_cfg / "engine_manifests" / "presets"
-    mirror.mkdir(parents=True, exist_ok=True)
-    (mirror / "dup-preset.toml").write_text(_make_preset_toml("dup-preset", "llamacpp-aux-1", 8090))
-    (user_cfg / "presets" / "dup-preset.toml").write_text(
-        _make_preset_toml("dup-preset", "llamacpp-aux-1", 9999)
-    )
-
-    assert list_presets().count("dup-preset") == 1

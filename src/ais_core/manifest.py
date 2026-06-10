@@ -22,7 +22,11 @@ directory:
 
     $XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/<name>.toml
     $XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/presets/<preset>.toml
-    $XDG_CONFIG_HOME/asiai-inference-server/presets/<preset>.toml  (legacy)
+
+(User presets mirror the bundled package layout: presets live next to the
+manifests they tune. Up to v0.2 they were read from ``presets/`` at the
+config root instead — that location is no longer scanned, and any TOML
+left there triggers a loud warning naming the file and the new path.)
 
 The override path is ``~/.config/asiai-inference-server/`` by default and
 can be relocated wholesale via the ``ASIAI_USER_CONFIG_DIR`` environment
@@ -223,16 +227,44 @@ def _user_manifest_dir() -> Path:
     return _user_config_dir() / "engine_manifests"
 
 
-def _user_preset_dirs() -> tuple[Path, ...]:
-    """Both supported user preset layouts, in precedence order.
+def _user_preset_dir() -> Path:
+    """The single user preset location: ``engine_manifests/presets/``.
 
-    ``engine_manifests/presets/`` mirrors the bundled package layout (presets
-    live next to the manifests they tune) and is what operators create
-    spontaneously; ``presets/`` at the config root is the original documented
-    location. Both are scanned; the mirror layout wins on name collision.
+    Mirrors the bundled package layout (presets live next to the manifests
+    they tune) and is what operators create spontaneously.
     """
-    base = _user_config_dir()
-    return (base / "engine_manifests" / "presets", base / "presets")
+    return _user_manifest_dir() / "presets"
+
+
+def _legacy_preset_dir() -> Path:
+    """Pre-v0.3 user preset location (``presets/`` at the config root).
+
+    No longer scanned — kept only so :func:`_warn_legacy_presets` can tell
+    operators their files moved out of resolution.
+    """
+    return _user_config_dir() / "presets"
+
+
+def _warn_legacy_presets() -> None:
+    """Shout if preset TOMLs linger in the dead pre-v0.3 location.
+
+    Without this, an operator upgrading from v0.2 would get 'unknown preset'
+    (or worse, silently fall back to a bundled preset of the same name) with
+    no hint that their files simply stopped being read.
+    """
+    legacy = _legacy_preset_dir()
+    if not legacy.is_dir():
+        return
+    stale = sorted(p.name for p in legacy.glob("*.toml"))
+    if stale:
+        logger.warning(
+            "ignoring %d preset(s) in deprecated location %s (%s); "
+            "user presets are read from %s — move the files there",
+            len(stale),
+            legacy,
+            ", ".join(stale),
+            _user_preset_dir(),
+        )
 
 
 def list_manifests() -> list[str]:
@@ -257,19 +289,19 @@ def list_presets() -> list[str]:
     Presets are full self-contained manifests tuned for a specific model
     plus use case. Bundled presets live under ``data/engine_manifests/presets/``
     in the package and serve as documented examples (see the ``README.md``
-    next to them). Users add their own presets in either user layout
-    (canonical ``engine_manifests/presets/`` or legacy ``presets/``, see
-    :func:`_user_preset_dirs`) — these are picked up automatically and
-    override any bundled preset of the same name. A name present in
-    several locations is returned once.
+    next to them). Users add their own under
+    ``$XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/presets/`` —
+    these are picked up automatically and override any bundled preset of
+    the same name.
     """
+    _warn_legacy_presets()
     bundled = _bundled_manifest_dir() / "presets"
     names = set()
     if bundled.is_dir():
         names |= {p.stem for p in bundled.glob("*.toml")}
-    for user_dir in _user_preset_dirs():
-        if user_dir.is_dir():
-            names |= {p.stem for p in user_dir.glob("*.toml")}
+    user_dir = _user_preset_dir()
+    if user_dir.is_dir():
+        names |= {p.stem for p in user_dir.glob("*.toml")}
     return sorted(names)
 
 
@@ -293,31 +325,19 @@ def _find_manifest_path(name: str) -> Path | None:
 
 
 def _find_preset_path(preset: str) -> Path | None:
-    """User dirs first (override semantics), bundled dir second.
-
-    Every shadowing is surfaced with a warning so operators see which file
-    actually wins: a user preset masking another user preset (mirror layout
-    over legacy layout), and a user preset overriding a bundled one.
-    """
+    """User dir first (override semantics), bundled dir second."""
+    _warn_legacy_presets()
     bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
-    user_hits = [p for d in _user_preset_dirs() if (p := d / f"{preset}.toml").is_file()]
-    if user_hits:
-        winner = user_hits[0]
-        for shadowed in user_hits[1:]:
-            logger.warning(
-                "user preset %s exists in both user layouts; %s wins, %s is ignored",
-                preset,
-                winner,
-                shadowed,
-            )
+    user = _user_preset_dir() / f"{preset}.toml"
+    if user.is_file():
         if bundled.is_file():
             logger.warning(
                 "user preset %s overrides bundled preset (user=%s, bundled=%s)",
                 preset,
-                winner,
+                user,
                 bundled,
             )
-        return winner
+        return user
     if bundled.is_file():
         return bundled
     return None
@@ -326,11 +346,10 @@ def _find_preset_path(preset: str) -> Path | None:
 def preset_search_dirs() -> tuple[Path, ...]:
     """Every directory scanned for presets, in precedence order.
 
-    User layouts first (mirror, then legacy — see :func:`_user_preset_dirs`),
-    bundled package dir last. Exposed so CLI error messages can show the
-    operator the real resolved paths that were searched.
+    User dir first, bundled package dir last. Exposed so CLI error messages
+    can show the operator the real resolved paths that were searched.
     """
-    return (*_user_preset_dirs(), _bundled_manifest_dir() / "presets")
+    return (_user_preset_dir(), _bundled_manifest_dir() / "presets")
 
 
 def preset_summary(preset: str) -> dict[str, str]:
