@@ -220,3 +220,35 @@ def test_cli_discovers_user_added_engine(user_cfg: Path) -> None:
     driver = factory()
     assert driver.manifest.name == "llamacpp-aux-7"
     assert driver.manifest.network.port == 8096
+
+
+# ---------------------------------------------------------------------------
+# Mirror preset layout: <config>/engine_manifests/presets/ (issue #7)
+# ---------------------------------------------------------------------------
+
+
+def test_preset_in_mirror_layout_is_discovered(user_cfg: Path) -> None:
+    """Presets under <config>/engine_manifests/presets/ (mirroring the bundled
+    package layout) must be discoverable — operators create that path
+    spontaneously since user manifests already live in engine_manifests/."""
+    mirror = user_cfg / "engine_manifests" / "presets"
+    mirror.mkdir(parents=True, exist_ok=True)
+    (mirror / "mirror-preset.toml").write_text(
+        _make_preset_toml("mirror-preset", "llamacpp-aux-1", 8090)
+    )
+
+    assert "mirror-preset" in list_presets()
+    m = load_manifest("llamacpp-aux-1", preset="mirror-preset")
+    assert m.display == "user preset mirror-preset"
+
+
+def test_mirror_layout_wins_over_root_layout(user_cfg: Path) -> None:
+    mirror = user_cfg / "engine_manifests" / "presets"
+    mirror.mkdir(parents=True, exist_ok=True)
+    (mirror / "dup-preset.toml").write_text(_make_preset_toml("dup-preset", "llamacpp-aux-1", 8090))
+    (user_cfg / "presets" / "dup-preset.toml").write_text(
+        _make_preset_toml("dup-preset", "llamacpp-aux-1", 9999)
+    )
+
+    m = load_manifest("llamacpp-aux-1", preset="dup-preset")
+    assert m.network.port == 8090  # mirror layout wins

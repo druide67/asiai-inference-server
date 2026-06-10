@@ -157,7 +157,9 @@ def _resolve_manifest(name: str, preset: str | None = None) -> EngineManifest:
         raise SystemExit(f"unknown engine {name!r}; known: {', '.join(list_manifests())}")
     if preset is not None and preset not in list_presets():
         raise SystemExit(
-            f"unknown preset {preset!r}; available: {', '.join(list_presets()) or '(none)'}"
+            f"unknown preset {preset!r}; available: {', '.join(list_presets()) or '(none)'} "
+            f"(searched user presets in <config>/engine_manifests/presets/ and "
+            f"<config>/presets/, then bundled)"
         )
     return load_manifest(name, preset=preset)
 

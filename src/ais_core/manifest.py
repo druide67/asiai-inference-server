@@ -21,7 +21,8 @@ the bundled tuning of a preset drop their TOML into the XDG user config
 directory:
 
     $XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/<name>.toml
-    $XDG_CONFIG_HOME/asiai-inference-server/presets/<preset>.toml
+    $XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/presets/<preset>.toml
+    $XDG_CONFIG_HOME/asiai-inference-server/presets/<preset>.toml  (legacy)
 
 The override path is ``~/.config/asiai-inference-server/`` by default and
 can be relocated wholesale via the ``ASIAI_USER_CONFIG_DIR`` environment
@@ -222,8 +223,16 @@ def _user_manifest_dir() -> Path:
     return _user_config_dir() / "engine_manifests"
 
 
-def _user_preset_dir() -> Path:
-    return _user_config_dir() / "presets"
+def _user_preset_dirs() -> tuple[Path, ...]:
+    """Both supported user preset layouts, in precedence order.
+
+    ``engine_manifests/presets/`` mirrors the bundled package layout (presets
+    live next to the manifests they tune) and is what operators create
+    spontaneously; ``presets/`` at the config root is the original documented
+    location. Both are scanned; the mirror layout wins on name collision.
+    """
+    base = _user_config_dir()
+    return (base / "engine_manifests" / "presets", base / "presets")
 
 
 def list_manifests() -> list[str]:
@@ -256,9 +265,9 @@ def list_presets() -> list[str]:
     names = set()
     if bundled.is_dir():
         names |= {p.stem for p in bundled.glob("*.toml")}
-    user_dir = _user_preset_dir()
-    if user_dir.is_dir():
-        names |= {p.stem for p in user_dir.glob("*.toml")}
+    for user_dir in _user_preset_dirs():
+        if user_dir.is_dir():
+            names |= {p.stem for p in user_dir.glob("*.toml")}
     return sorted(names)
 
 
@@ -282,19 +291,19 @@ def _find_manifest_path(name: str) -> Path | None:
 
 
 def _find_preset_path(preset: str) -> Path | None:
-    """User dir first (override semantics), bundled dir second."""
-    user = _user_preset_dir() / f"{preset}.toml"
-    if user.is_file():
-        bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
-        if bundled.is_file():
-            logger.warning(
-                "user preset %s overrides bundled preset (user=%s, bundled=%s)",
-                preset,
-                user,
-                bundled,
-            )
-        return user
+    """User dirs first (override semantics), bundled dir second."""
     bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
+    for user_dir in _user_preset_dirs():
+        user = user_dir / f"{preset}.toml"
+        if user.is_file():
+            if bundled.is_file():
+                logger.warning(
+                    "user preset %s overrides bundled preset (user=%s, bundled=%s)",
+                    preset,
+                    user,
+                    bundled,
+                )
+            return user
     if bundled.is_file():
         return bundled
     return None
