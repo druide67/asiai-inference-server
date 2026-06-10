@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import multiprocessing
 import os
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -200,24 +199,36 @@ def test_operations_lock_released_after_context_exit(tmp_path: Path) -> None:
     OperationsLock(path=lock_path).acquire()
 
 
-def _hold_lock_then_exit(lock_path: str, hold_s: float) -> None:
+def _hold_lock_until_released(lock_path: str, acquired_evt, release_evt) -> None:
     lock = OperationsLock(path=Path(lock_path))
     lock.acquire()
-    time.sleep(hold_s)
+    acquired_evt.set()
+    release_evt.wait(timeout=30.0)
     lock.release()
 
 
 def test_operations_lock_cross_process(tmp_path: Path) -> None:
-    """Real subprocess holding the lock blocks the parent's acquisition."""
+    """Real subprocess holding the lock blocks the parent's acquisition.
+
+    Synchronized with Events, not sleeps: macOS multiprocessing uses spawn,
+    and the child re-imports the whole module tree before acquiring — on a
+    slow CI runner that takes longer than any fixed sleep, letting the
+    parent acquire first and turning the expected raise into a flake.
+    """
     lock_path = tmp_path / "cross.lock"
-    proc = multiprocessing.Process(target=_hold_lock_then_exit, args=(str(lock_path), 1.5))
+    acquired = multiprocessing.Event()
+    release = multiprocessing.Event()
+    proc = multiprocessing.Process(
+        target=_hold_lock_until_released, args=(str(lock_path), acquired, release)
+    )
     proc.start()
-    time.sleep(0.3)  # let the child acquire first
     try:
+        assert acquired.wait(timeout=30.0), "child never acquired the lock"
         with pytest.raises(memory.MemoryError_):
             OperationsLock(path=lock_path).acquire()
     finally:
-        proc.join()
+        release.set()
+        proc.join(timeout=30.0)
 
 
 # ---------------------------------------------------------------------------
