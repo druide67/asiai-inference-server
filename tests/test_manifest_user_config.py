@@ -105,8 +105,7 @@ def user_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect the user-config root to ``tmp_path`` and create the
     standard subtree."""
     monkeypatch.setenv("ASIAI_USER_CONFIG_DIR", str(tmp_path))
-    (tmp_path / "engine_manifests").mkdir()
-    (tmp_path / "presets").mkdir()
+    (tmp_path / "engine_manifests" / "presets").mkdir(parents=True)
     return tmp_path
 
 
@@ -150,7 +149,7 @@ def test_user_manifest_overrides_bundled(user_cfg: Path, caplog) -> None:
 
 
 def test_list_presets_includes_user_added_preset(user_cfg: Path) -> None:
-    (user_cfg / "presets" / "my-custom-preset.toml").write_text(
+    (user_cfg / "engine_manifests" / "presets" / "my-custom-preset.toml").write_text(
         _make_preset_toml("my-custom-preset", "llamacpp-aux-1", 8090)
     )
     presets = list_presets()
@@ -158,7 +157,7 @@ def test_list_presets_includes_user_added_preset(user_cfg: Path) -> None:
 
 
 def test_load_user_added_preset(user_cfg: Path) -> None:
-    (user_cfg / "presets" / "my-custom-preset.toml").write_text(
+    (user_cfg / "engine_manifests" / "presets" / "my-custom-preset.toml").write_text(
         _make_preset_toml("my-custom-preset", "llamacpp-aux-1", 8090)
     )
     m = load_manifest("llamacpp-aux-1", preset="my-custom-preset")
@@ -169,7 +168,7 @@ def test_load_user_added_preset(user_cfg: Path) -> None:
 def test_user_preset_overrides_bundled(user_cfg: Path, caplog) -> None:
     """A user preset sharing the stem with a bundled one wins, with a warning."""
     # Override the bundled aux-1 preset with a user version using a different port.
-    (user_cfg / "presets" / "qwen3-4b-instruct-hermes-aux-1.toml").write_text(
+    (user_cfg / "engine_manifests" / "presets" / "qwen3-4b-instruct-hermes-aux-1.toml").write_text(
         _make_preset_toml("qwen3-4b-instruct-hermes-aux-1", "llamacpp-aux-1", 9090)
     )
     import logging
@@ -220,3 +219,28 @@ def test_cli_discovers_user_added_engine(user_cfg: Path) -> None:
     driver = factory()
     assert driver.manifest.name == "llamacpp-aux-7"
     assert driver.manifest.network.port == 8096
+
+
+# ---------------------------------------------------------------------------
+# Pre-v0.3 preset location: <config>/presets/ is dead, loudly (issue #7)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_dir_presets_are_ignored_with_warning(user_cfg: Path, caplog) -> None:
+    """TOMLs in the pre-v0.3 root-level presets/ are not resolved anymore,
+    and the operator is told exactly which files moved out of resolution
+    and where to put them — a preset silently dropping out after an
+    upgrade is the same failure class issue #6 exists for."""
+    legacy = user_cfg / "presets"
+    legacy.mkdir()
+    (legacy / "old-preset.toml").write_text(_make_preset_toml("old-preset", "llamacpp-aux-1", 8090))
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="ais_core.manifest")
+    assert "old-preset" not in list_presets()
+    with pytest.raises(FileNotFoundError):
+        load_manifest("llamacpp-aux-1", preset="old-preset")
+    assert any(
+        "deprecated location" in rec.message and "old-preset.toml" in rec.getMessage()
+        for rec in caplog.records
+    )

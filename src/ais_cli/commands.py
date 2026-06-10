@@ -33,6 +33,7 @@ from ais_core.manifest import (
     list_presets,
     load_manifest,
     manifest_source_path,
+    preset_search_dirs,
     preset_summary,
 )
 from ais_core.upgrade import upgrade_argv
@@ -157,9 +158,14 @@ def _resolve_manifest(name: str, preset: str | None = None) -> EngineManifest:
     if name not in list_manifests():
         raise SystemExit(f"unknown engine {name!r}; known: {', '.join(list_manifests())}")
     if preset is not None and preset not in list_presets():
-        raise SystemExit(
-            f"unknown preset {preset!r}; available: {', '.join(list_presets()) or '(none)'}"
-        )
+        lines = [f"unknown preset {preset!r}; searched (in precedence order):"]
+        for d in preset_search_dirs():
+            if d.is_dir():
+                found = sorted(p.stem for p in d.glob("*.toml"))
+                lines.append(f"  {d}: {', '.join(found) or '(empty)'}")
+            else:
+                lines.append(f"  {d}: (absent)")
+        raise SystemExit("\n".join(lines))
     return load_manifest(name, preset=preset)
 
 
@@ -220,31 +226,40 @@ def cmd_list_presets(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    deep = getattr(args, "deep", False)
     targets = [args.engine] if args.engine else list_manifests()
     rows = []
     for name in targets:
         m = _resolve_manifest(name)
-        state = lifecycle.current_state(m)
+        # probe_state probes generation at most once per engine (deep mode)
+        # and returns the verdict alongside the state. ZOMBIE downgrades the
+        # state to DEGRADED; BUSY/UNSUPPORTED/ERROR are surfaced as-is so the
+        # operator sees why certification was inconclusive — they are normal
+        # conditions, not alarms.
+        state, verdict = lifecycle.probe_state(m, deep=deep)
         record = install_state.read_install(name)
-        rows.append(
-            {
-                "engine": name,
-                "state": state.value,
-                "port": m.network.port,
-                "plist": m.plist.name,
-                # Recorded at install time — what the service was generated
-                # from, not a live introspection of the running process.
-                "preset": record.preset if record else None,
-            }
-        )
+        row = {
+            "engine": name,
+            "state": state.value,
+            "port": m.network.port,
+            "plist": m.plist.name,
+            # Recorded at install time — what the service was generated
+            # from, not a live introspection of the running process.
+            "preset": record.preset if record else None,
+        }
+        if deep:
+            row["gen"] = verdict.value if verdict is not None else None
+        rows.append(row)
 
     if args.json:
         _emit({"engines": rows}, as_json=True)
         return 0
-    print(f"{'engine':<12} {'state':<22} {'port':<6} plist preset")
+    gen_header = " gen" if deep else ""
+    print(f"{'engine':<12} {'state':<22} {'port':<6} plist preset{gen_header}")
     for r in rows:
         preset = r["preset"] or "-"
-        print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']} {preset}")
+        gen = f" {r['gen'] or '-'}" if deep else ""
+        print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']} {preset}{gen}")
     return 0
 
 

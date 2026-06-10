@@ -21,7 +21,12 @@ the bundled tuning of a preset drop their TOML into the XDG user config
 directory:
 
     $XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/<name>.toml
-    $XDG_CONFIG_HOME/asiai-inference-server/presets/<preset>.toml
+    $XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/presets/<preset>.toml
+
+(User presets mirror the bundled package layout: presets live next to the
+manifests they tune. Up to v0.2 they were read from ``presets/`` at the
+config root instead — that location is no longer scanned, and any TOML
+left there triggers a loud warning naming the file and the new path.)
 
 The override path is ``~/.config/asiai-inference-server/`` by default and
 can be relocated wholesale via the ``ASIAI_USER_CONFIG_DIR`` environment
@@ -121,11 +126,21 @@ class NetworkSpec:
     bind: str
     health_endpoint: str
     health_timeout: int
+    gen_check: bool = False
 
     @property
     def health_url(self) -> str:
         host = self.bind or "127.0.0.1"
         return f"http://{host}:{self.port}{self.health_endpoint}"
+
+    @property
+    def gen_url(self) -> str:
+        """OpenAI-compatible chat endpoint used by the generation probe.
+
+        Always targets loopback: the probe runs on the host itself and must
+        not depend on the bind address (0.0.0.0 binds answer on 127.0.0.1).
+        """
+        return f"http://127.0.0.1:{self.port}/v1/chat/completions"
 
 
 @dataclass(frozen=True)
@@ -223,7 +238,43 @@ def _user_manifest_dir() -> Path:
 
 
 def _user_preset_dir() -> Path:
+    """The single user preset location: ``engine_manifests/presets/``.
+
+    Mirrors the bundled package layout (presets live next to the manifests
+    they tune) and is what operators create spontaneously.
+    """
+    return _user_manifest_dir() / "presets"
+
+
+def _legacy_preset_dir() -> Path:
+    """Pre-v0.3 user preset location (``presets/`` at the config root).
+
+    No longer scanned — kept only so :func:`_warn_legacy_presets` can tell
+    operators their files moved out of resolution.
+    """
     return _user_config_dir() / "presets"
+
+
+def _warn_legacy_presets() -> None:
+    """Shout if preset TOMLs linger in the dead pre-v0.3 location.
+
+    Without this, an operator upgrading from v0.2 would get 'unknown preset'
+    (or worse, silently fall back to a bundled preset of the same name) with
+    no hint that their files simply stopped being read.
+    """
+    legacy = _legacy_preset_dir()
+    if not legacy.is_dir():
+        return
+    stale = sorted(p.name for p in legacy.glob("*.toml"))
+    if stale:
+        logger.warning(
+            "ignoring %d preset(s) in deprecated location %s (%s); "
+            "user presets are read from %s — move the files there",
+            len(stale),
+            legacy,
+            ", ".join(stale),
+            _user_preset_dir(),
+        )
 
 
 def list_manifests() -> list[str]:
@@ -248,10 +299,12 @@ def list_presets() -> list[str]:
     Presets are full self-contained manifests tuned for a specific model
     plus use case. Bundled presets live under ``data/engine_manifests/presets/``
     in the package and serve as documented examples (see the ``README.md``
-    next to them). Users add their own presets under
-    ``$XDG_CONFIG_HOME/asiai-inference-server/presets/`` — these are picked
-    up automatically and override any bundled preset of the same name.
+    next to them). Users add their own under
+    ``$XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/presets/`` —
+    these are picked up automatically and override any bundled preset of
+    the same name.
     """
+    _warn_legacy_presets()
     bundled = _bundled_manifest_dir() / "presets"
     names = set()
     if bundled.is_dir():
@@ -283,9 +336,10 @@ def _find_manifest_path(name: str) -> Path | None:
 
 def _find_preset_path(preset: str) -> Path | None:
     """User dir first (override semantics), bundled dir second."""
+    _warn_legacy_presets()
+    bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
     user = _user_preset_dir() / f"{preset}.toml"
     if user.is_file():
-        bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
         if bundled.is_file():
             logger.warning(
                 "user preset %s overrides bundled preset (user=%s, bundled=%s)",
@@ -294,7 +348,6 @@ def _find_preset_path(preset: str) -> Path | None:
                 bundled,
             )
         return user
-    bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
     if bundled.is_file():
         return bundled
     return None
@@ -309,6 +362,15 @@ def manifest_source_path(name: str, preset: str | None = None) -> Path | None:
     if preset is not None:
         return _find_preset_path(preset)
     return _find_manifest_path(name)
+
+
+def preset_search_dirs() -> tuple[Path, ...]:
+    """Every directory scanned for presets, in precedence order.
+
+    User dir first, bundled package dir last. Exposed so CLI error messages
+    can show the operator the real resolved paths that were searched.
+    """
+    return (_user_preset_dir(), _bundled_manifest_dir() / "presets")
 
 
 def preset_summary(preset: str) -> dict[str, str]:
@@ -400,6 +462,7 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
                 bind=str(net_raw.get("bind", "")),
                 health_endpoint=net_raw["health_endpoint"],
                 health_timeout=int(net_raw["health_timeout"]),
+                gen_check=bool(net_raw.get("gen_check", False)),
             ),
             firewall=FirewallSpec(
                 supported=bool(fw_raw["supported"]),

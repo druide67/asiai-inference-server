@@ -34,6 +34,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="Show engine state.")
     p_status.add_argument("engine", nargs="?", help="Engine name (default: all)")
     p_status.add_argument("--json", action="store_true")
+    p_status.add_argument(
+        "--deep",
+        action="store_true",
+        help=(
+            "Generation-probe running engines (1 token). Detects GPU-OOM "
+            "zombies that /health cannot see (state becomes 'degraded')."
+        ),
+    )
     p_status.set_defaults(func=commands.cmd_status)
 
     # install
