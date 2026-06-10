@@ -110,7 +110,7 @@ def test_status_unknown_engine_exits_with_message() -> None:
 def test_status_single_engine_json(capsys: pytest.CaptureFixture[str]) -> None:
     fake_state = MagicMock()
     fake_state.value = "stopped"
-    with patch("ais_cli.commands.lifecycle.current_state", return_value=fake_state):
+    with patch("ais_cli.commands.lifecycle.probe_state", return_value=(fake_state, None)):
         rc = main(["status", "ollama", "--json"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -125,7 +125,7 @@ def test_status_single_engine_json(capsys: pytest.CaptureFixture[str]) -> None:
 def test_status_all_engines_when_no_arg(capsys: pytest.CaptureFixture[str]) -> None:
     fake_state = MagicMock()
     fake_state.value = "not_installed"
-    with patch("ais_cli.commands.lifecycle.current_state", return_value=fake_state):
+    with patch("ais_cli.commands.lifecycle.probe_state", return_value=(fake_state, None)):
         rc = main(["status", "--json"])
     out = capsys.readouterr().out
     payload = json.loads(out)
