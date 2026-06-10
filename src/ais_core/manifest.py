@@ -121,11 +121,21 @@ class NetworkSpec:
     bind: str
     health_endpoint: str
     health_timeout: int
+    gen_check: bool = False
 
     @property
     def health_url(self) -> str:
         host = self.bind or "127.0.0.1"
         return f"http://{host}:{self.port}{self.health_endpoint}"
+
+    @property
+    def gen_url(self) -> str:
+        """OpenAI-compatible chat endpoint used by the generation probe.
+
+        Always targets loopback: the probe runs on the host itself and must
+        not depend on the bind address (0.0.0.0 binds answer on 127.0.0.1).
+        """
+        return f"http://127.0.0.1:{self.port}/v1/chat/completions"
 
 
 @dataclass(frozen=True)
@@ -389,6 +399,7 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
                 bind=str(net_raw.get("bind", "")),
                 health_endpoint=net_raw["health_endpoint"],
                 health_timeout=int(net_raw["health_timeout"]),
+                gen_check=bool(net_raw.get("gen_check", False)),
             ),
             firewall=FirewallSpec(
                 supported=bool(fw_raw["supported"]),
