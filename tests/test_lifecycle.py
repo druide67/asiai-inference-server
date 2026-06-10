@@ -306,6 +306,7 @@ class _GenHandler(BaseHTTPRequestHandler):
       ok         → 200 with a choices payload
       zombie     → 500 {"error": {"message": "Compute error."}} (post-OOM Metal)
       zombie200  → 200 body carrying "Compute error" (belt and braces)
+      zombie200choices → 200 body with BOTH a choices array and the marker
       notfound   → 404 (no OpenAI-compatible endpoint)
       hang       → sleep beyond the client timeout (slots busy)
     """
@@ -325,6 +326,9 @@ class _GenHandler(BaseHTTPRequestHandler):
             self.send_response(500)
         elif self.mode == "zombie200":
             body = b'{"error":"Compute error."}'
+            self.send_response(200)
+        elif self.mode == "zombie200choices":
+            body = b'{"choices":[],"error":"Compute error."}'
             self.send_response(200)
         elif self.mode == "notfound":
             body = b'{"error":"file not found"}'
@@ -375,6 +379,13 @@ class TestGenProbe:
         m = _manifest_pointing_to_port(gen_server)
         assert lifecycle.gen_probe(m) is lifecycle.GenVerdict.ZOMBIE
 
+    def test_zombie_marker_wins_over_choices_in_200_body(self, gen_server: int) -> None:
+        """A 2xx body carrying both a choices array and the compute-error
+        marker is a broken backend — the marker takes precedence."""
+        _GenHandler.mode = "zombie200choices"
+        m = _manifest_pointing_to_port(gen_server)
+        assert lifecycle.gen_probe(m) is lifecycle.GenVerdict.ZOMBIE
+
     def test_unsupported_on_404(self, gen_server: int) -> None:
         _GenHandler.mode = "notfound"
         m = _manifest_pointing_to_port(gen_server)
@@ -410,6 +421,19 @@ class TestDeepState:
             mock_path.return_value.exists.return_value = True
             assert lifecycle.current_state(m, deep=True) is EngineState.RUNNING
 
+    def test_probe_state_returns_verdict_with_state(self, gen_server: int) -> None:
+        """probe_state exposes the single gen probe's verdict so display
+        callers (aisctl status --deep) never have to probe twice."""
+        _GenHandler.mode = "zombie"
+        m = _manifest_pointing_to_port(gen_server)
+        with patch("ais_core.lifecycle.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            state, verdict = lifecycle.probe_state(m, deep=True)
+            assert state is EngineState.DEGRADED
+            assert verdict is lifecycle.GenVerdict.ZOMBIE
+            # shallow: no probe, no verdict
+            assert lifecycle.probe_state(m) == (EngineState.RUNNING, None)
+
 
 class TestWaitForHealthGenCheck:
     def test_gen_check_optin_requires_generation(self, gen_server: int) -> None:
@@ -422,6 +446,19 @@ class TestWaitForHealthGenCheck:
 
         _GenHandler.mode = "ok"
         assert wait_for_health(m, timeout=3) is True
+
+    def test_hung_generation_cannot_overshoot_deadline(self, gen_server: int) -> None:
+        """The gen probe's timeout is clamped to the remaining budget: a hung
+        server (answers after 2s) must NOT turn a timeout=1 wait into a
+        2s+ success — the wait fails within its deadline."""
+        from dataclasses import replace
+
+        _GenHandler.mode = "hang"
+        m = _manifest_pointing_to_port(gen_server)
+        m = replace(m, network=replace(m.network, gen_check=True, health_timeout=1))
+        started = time.monotonic()
+        assert wait_for_health(m, timeout=1) is False
+        assert time.monotonic() - started < 1.9  # hang answers at 2.0s
 
     def test_without_optin_health_2xx_suffices(self, gen_server: int) -> None:
         _GenHandler.mode = "zombie"  # gen broken, but gen_check is off

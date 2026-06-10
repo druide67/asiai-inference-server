@@ -270,7 +270,11 @@ def wait_for_health(
             return True
         # Opt-in ([network] gen_check = true): certify SERVING health, not
         # just HTTP health — a fresh start should answer a 1-token request.
-        return gen_probe(manifest, request_timeout=10.0) is GenVerdict.OK
+        # The probe timeout is clamped to the remaining deadline budget so
+        # a hung generation cannot overshoot the caller's timeout.
+        remaining = deadline - time.monotonic()
+        probe_timeout = min(10.0, max(0.5, remaining))
+        return gen_probe(manifest, request_timeout=probe_timeout) is GenVerdict.OK
 
     while time.monotonic() < deadline:
         if _healthy():
@@ -322,10 +326,13 @@ def gen_probe(manifest: EngineManifest, *, request_timeout: float = 45.0) -> Gen
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             body = resp.read(65536)
-            if b'"choices"' in body:
-                return GenVerdict.OK
+            # Marker first: a 2xx body carrying both "choices" and the
+            # compute-error marker (e.g. an error field next to an empty
+            # choices array) means a broken backend, not a healthy one.
             if _COMPUTE_ERROR_MARKER in body:
                 return GenVerdict.ZOMBIE
+            if b'"choices"' in body:
+                return GenVerdict.OK
             return GenVerdict.ERROR
     except urllib.error.HTTPError as exc:
         try:
@@ -366,8 +373,10 @@ def is_loaded(manifest: EngineManifest) -> bool:
     return proc.returncode == 0
 
 
-def current_state(manifest: EngineManifest, *, deep: bool = False) -> EngineState:
-    """Best-effort state machine answer.
+def probe_state(
+    manifest: EngineManifest, *, deep: bool = False
+) -> tuple[EngineState, GenVerdict | None]:
+    """Best-effort state machine answer, plus the generation verdict behind it.
 
     Order rationale: ``launchctl list`` for system daemons (in
     ``/Library/LaunchDaemons/``) requires sudo from a non-root caller — without
@@ -378,23 +387,34 @@ def current_state(manifest: EngineManifest, *, deep: bool = False) -> EngineStat
     via ``process_alive`` and ``is_loaded`` to distinguish UNHEALTHY /
     LOADED_NOT_RUNNING / STOPPED.
 
-    With ``deep=True``, a RUNNING engine is additionally generation-probed:
-    a confirmed "Compute error" answer (Metal backend zombie — /health lies
-    after a GPU OOM) downgrades it to DEGRADED. BUSY/UNSUPPORTED/ERROR keep
-    RUNNING — only the unambiguous zombie marker may raise the alarm.
+    With ``deep=True``, a RUNNING engine is additionally generation-probed —
+    exactly once, and the verdict is returned alongside the state so callers
+    that display it (``aisctl status --deep``) don't have to probe again.
+    A confirmed "Compute error" answer (Metal backend zombie — /health lies
+    after a GPU OOM) downgrades the state to DEGRADED. BUSY/UNSUPPORTED/ERROR
+    keep RUNNING — only the unambiguous zombie marker may raise the alarm.
+    The verdict is ``None`` when ``deep`` is False or the engine isn't RUNNING.
     """
     if not Path(plist.plist_path(manifest)).exists():
-        return EngineState.NOT_INSTALLED
+        return EngineState.NOT_INSTALLED, None
 
     if probe_health(manifest):
-        if deep and gen_probe(manifest) is GenVerdict.ZOMBIE:
-            return EngineState.DEGRADED
-        return EngineState.RUNNING
+        if deep:
+            verdict = gen_probe(manifest)
+            if verdict is GenVerdict.ZOMBIE:
+                return EngineState.DEGRADED, verdict
+            return EngineState.RUNNING, verdict
+        return EngineState.RUNNING, None
 
     if process_alive(manifest):
-        return EngineState.UNHEALTHY
+        return EngineState.UNHEALTHY, None
 
     if is_loaded(manifest):
-        return EngineState.LOADED_NOT_RUNNING
+        return EngineState.LOADED_NOT_RUNNING, None
 
-    return EngineState.STOPPED
+    return EngineState.STOPPED, None
+
+
+def current_state(manifest: EngineManifest, *, deep: bool = False) -> EngineState:
+    """State-only convenience over :func:`probe_state` (same single probe)."""
+    return probe_state(manifest, deep=deep)[0]

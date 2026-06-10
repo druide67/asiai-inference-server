@@ -224,7 +224,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     rows = []
     for name in targets:
         m = _resolve_manifest(name)
-        state = lifecycle.current_state(m)
+        # probe_state probes generation at most once per engine (deep mode)
+        # and returns the verdict alongside the state. ZOMBIE downgrades the
+        # state to DEGRADED; BUSY/UNSUPPORTED/ERROR are surfaced as-is so the
+        # operator sees why certification was inconclusive — they are normal
+        # conditions, not alarms.
+        state, verdict = lifecycle.probe_state(m, deep=deep)
         row = {
             "engine": name,
             "state": state.value,
@@ -232,17 +237,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "plist": m.plist.name,
         }
         if deep:
-            # Single generation probe per running engine. ZOMBIE downgrades
-            # the state; BUSY/UNSUPPORTED/ERROR are surfaced as-is so the
-            # operator sees why certification was inconclusive — they are
-            # normal conditions, not alarms.
-            if state is lifecycle.EngineState.RUNNING:
-                verdict = lifecycle.gen_probe(m)
-                if verdict is lifecycle.GenVerdict.ZOMBIE:
-                    row["state"] = lifecycle.EngineState.DEGRADED.value
-                row["gen"] = verdict.value
-            else:
-                row["gen"] = None
+            row["gen"] = verdict.value if verdict is not None else None
         rows.append(row)
 
     if args.json:
@@ -251,7 +246,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     gen_header = " gen" if deep else ""
     print(f"{'engine':<12} {'state':<22} {'port':<6} plist{gen_header}")
     for r in rows:
-        gen = f" {r['gen']}" if deep and r.get("gen") else ""
+        gen = f" {r['gen'] or '-'}" if deep else ""
         print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']}{gen}")
     return 0
 
