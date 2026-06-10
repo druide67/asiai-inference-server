@@ -219,26 +219,40 @@ def cmd_list_presets(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    deep = getattr(args, "deep", False)
     targets = [args.engine] if args.engine else list_manifests()
     rows = []
     for name in targets:
         m = _resolve_manifest(name)
         state = lifecycle.current_state(m)
-        rows.append(
-            {
-                "engine": name,
-                "state": state.value,
-                "port": m.network.port,
-                "plist": m.plist.name,
-            }
-        )
+        row = {
+            "engine": name,
+            "state": state.value,
+            "port": m.network.port,
+            "plist": m.plist.name,
+        }
+        if deep:
+            # Single generation probe per running engine. ZOMBIE downgrades
+            # the state; BUSY/UNSUPPORTED/ERROR are surfaced as-is so the
+            # operator sees why certification was inconclusive — they are
+            # normal conditions, not alarms.
+            if state is lifecycle.EngineState.RUNNING:
+                verdict = lifecycle.gen_probe(m)
+                if verdict is lifecycle.GenVerdict.ZOMBIE:
+                    row["state"] = lifecycle.EngineState.DEGRADED.value
+                row["gen"] = verdict.value
+            else:
+                row["gen"] = None
+        rows.append(row)
 
     if args.json:
         _emit({"engines": rows}, as_json=True)
         return 0
-    print(f"{'engine':<12} {'state':<22} {'port':<6} plist")
+    gen_header = " gen" if deep else ""
+    print(f"{'engine':<12} {'state':<22} {'port':<6} plist{gen_header}")
     for r in rows:
-        print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']}")
+        gen = f" {r['gen']}" if deep and r.get("gen") else ""
+        print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']}{gen}")
     return 0
 
 

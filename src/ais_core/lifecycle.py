@@ -42,6 +42,24 @@ class EngineState(enum.StrEnum):
     LOADED_NOT_RUNNING = "loaded"  # launchctl knows it, no PID
     UNHEALTHY = "unhealthy"  # PID alive but health endpoint silent
     RUNNING = "running"  # PID alive AND health endpoint 2xx
+    DEGRADED = "degraded"  # health 2xx BUT generation fails (GPU backend zombie)
+
+
+class GenVerdict(enum.StrEnum):
+    """Outcome of a 1-token generation probe (``gen_probe``).
+
+    Only ZOMBIE is alarming. BUSY (request timed out — slots saturated by a
+    long prefill) and UNSUPPORTED (engine has no OpenAI-compatible chat
+    endpoint, or requires fields we don't send) are normal conditions and
+    must never trigger a restart.
+    """
+
+    OK = "ok"
+    ZOMBIE = "zombie"  # HTTP answer carrying "Compute error" — Metal backend dead
+    BUSY = "busy"  # request timeout: instance alive but slots occupied
+    DOWN = "down"  # connection refused / unreachable
+    UNSUPPORTED = "unsupported"  # 4xx without compute error (no compat endpoint)
+    ERROR = "error"  # anything else (5xx without the known marker, bad JSON…)
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +263,17 @@ def wait_for_health(
     deadline = time.monotonic() + timeout
     delay = initial_delay
 
+    def _healthy() -> bool:
+        if not probe_health(manifest):
+            return False
+        if not manifest.network.gen_check:
+            return True
+        # Opt-in ([network] gen_check = true): certify SERVING health, not
+        # just HTTP health — a fresh start should answer a 1-token request.
+        return gen_probe(manifest, request_timeout=10.0) is GenVerdict.OK
+
     while time.monotonic() < deadline:
-        if probe_health(manifest):
+        if _healthy():
             return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -264,6 +291,59 @@ def probe_health(manifest: EngineManifest, *, request_timeout: float = 2.0) -> b
             return 200 <= resp.status < 300
     except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
         return False
+
+
+_GEN_PROBE_PAYLOAD = (
+    b'{"messages":[{"role":"user","content":"ping"}],"max_tokens":1,"temperature":0}'
+)
+_COMPUTE_ERROR_MARKER = b"Compute error"
+
+
+def gen_probe(manifest: EngineManifest, *, request_timeout: float = 45.0) -> GenVerdict:
+    """1-token generation probe — the only health signal that survives a GPU OOM.
+
+    On Apple Silicon, a Metal out-of-memory during compute leaves llama-server
+    in a permanent backend-error state: the process stays up, ``/health``
+    keeps answering 2xx, but every generation returns HTTP 500 "Compute
+    error" until the process is restarted. This probe detects that zombie
+    state by actually generating one token.
+
+    Verdict mapping is deliberately conservative: only an HTTP *answer*
+    carrying the "Compute error" marker is a ZOMBIE. A timeout means the
+    instance is busy (e.g. a long prefill holds every slot) — restarting it
+    would kill legitimate work.
+    """
+    req = urllib.request.Request(
+        manifest.network.gen_url,
+        data=_GEN_PROBE_PAYLOAD,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+            body = resp.read(65536)
+            if b'"choices"' in body:
+                return GenVerdict.OK
+            if _COMPUTE_ERROR_MARKER in body:
+                return GenVerdict.ZOMBIE
+            return GenVerdict.ERROR
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read(65536)
+        except OSError:
+            body = b""
+        if _COMPUTE_ERROR_MARKER in body:
+            return GenVerdict.ZOMBIE
+        if 400 <= exc.code < 500:
+            return GenVerdict.UNSUPPORTED
+        return GenVerdict.ERROR
+    except TimeoutError:
+        return GenVerdict.BUSY
+    except (urllib.error.URLError, ConnectionError, OSError) as exc:
+        # urllib wraps socket timeouts in URLError(reason=TimeoutError).
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            return GenVerdict.BUSY
+        return GenVerdict.DOWN
 
 
 def process_alive(manifest: EngineManifest) -> bool:
@@ -286,7 +366,7 @@ def is_loaded(manifest: EngineManifest) -> bool:
     return proc.returncode == 0
 
 
-def current_state(manifest: EngineManifest) -> EngineState:
+def current_state(manifest: EngineManifest, *, deep: bool = False) -> EngineState:
     """Best-effort state machine answer.
 
     Order rationale: ``launchctl list`` for system daemons (in
@@ -297,11 +377,18 @@ def current_state(manifest: EngineManifest) -> EngineState:
     ``launchctl list`` says. Only when the daemon is silent do we drill down
     via ``process_alive`` and ``is_loaded`` to distinguish UNHEALTHY /
     LOADED_NOT_RUNNING / STOPPED.
+
+    With ``deep=True``, a RUNNING engine is additionally generation-probed:
+    a confirmed "Compute error" answer (Metal backend zombie — /health lies
+    after a GPU OOM) downgrades it to DEGRADED. BUSY/UNSUPPORTED/ERROR keep
+    RUNNING — only the unambiguous zombie marker may raise the alarm.
     """
     if not Path(plist.plist_path(manifest)).exists():
         return EngineState.NOT_INSTALLED
 
     if probe_health(manifest):
+        if deep and gen_probe(manifest) is GenVerdict.ZOMBIE:
+            return EngineState.DEGRADED
         return EngineState.RUNNING
 
     if process_alive(manifest):

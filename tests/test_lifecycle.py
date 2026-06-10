@@ -292,3 +292,138 @@ def test_current_state_stopped_when_plist_present_but_silent() -> None:
     ):
         state = lifecycle.current_state(m)
     assert state == EngineState.STOPPED
+
+
+# ---------------------------------------------------------------------------
+# gen_probe / DEGRADED state — real HTTP server, POST /v1/chat/completions
+# ---------------------------------------------------------------------------
+
+
+class _GenHandler(BaseHTTPRequestHandler):
+    """POST handler whose behaviour is driven by the ``mode`` class attribute.
+
+    Modes mirror what llama-server actually does:
+      ok         → 200 with a choices payload
+      zombie     → 500 {"error": {"message": "Compute error."}} (post-OOM Metal)
+      zombie200  → 200 body carrying "Compute error" (belt and braces)
+      notfound   → 404 (no OpenAI-compatible endpoint)
+      hang       → sleep beyond the client timeout (slots busy)
+    """
+
+    mode: str = "ok"
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        if self.mode == "hang":
+            time.sleep(2.0)
+        if self.mode == "ok":
+            body = b'{"choices":[{"message":{"role":"assistant","content":"!"}}]}'
+            self.send_response(200)
+        elif self.mode == "zombie":
+            body = b'{"error":{"code":500,"message":"Compute error.","type":"server_error"}}'
+            self.send_response(500)
+        elif self.mode == "zombie200":
+            body = b'{"error":"Compute error."}'
+            self.send_response(200)
+        elif self.mode == "notfound":
+            body = b'{"error":"file not found"}'
+            self.send_response(404)
+        else:  # hang fell through after sleeping
+            body = b'{"choices":[]}'
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # health endpoint stays green — that's the point
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok"}')
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def gen_server():
+    port = _free_port()
+    server = HTTPServer(("127.0.0.1", port), _GenHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        _GenHandler.mode = "ok"
+        server.shutdown()
+
+
+class TestGenProbe:
+    def test_ok(self, gen_server: int) -> None:
+        _GenHandler.mode = "ok"
+        m = _manifest_pointing_to_port(gen_server)
+        assert lifecycle.gen_probe(m) is lifecycle.GenVerdict.OK
+
+    def test_zombie_on_http_500_compute_error(self, gen_server: int) -> None:
+        _GenHandler.mode = "zombie"
+        m = _manifest_pointing_to_port(gen_server)
+        assert lifecycle.gen_probe(m) is lifecycle.GenVerdict.ZOMBIE
+
+    def test_zombie_marker_in_200_body(self, gen_server: int) -> None:
+        _GenHandler.mode = "zombie200"
+        m = _manifest_pointing_to_port(gen_server)
+        assert lifecycle.gen_probe(m) is lifecycle.GenVerdict.ZOMBIE
+
+    def test_unsupported_on_404(self, gen_server: int) -> None:
+        _GenHandler.mode = "notfound"
+        m = _manifest_pointing_to_port(gen_server)
+        assert lifecycle.gen_probe(m) is lifecycle.GenVerdict.UNSUPPORTED
+
+    def test_busy_on_timeout(self, gen_server: int) -> None:
+        _GenHandler.mode = "hang"
+        m = _manifest_pointing_to_port(gen_server)
+        assert lifecycle.gen_probe(m, request_timeout=0.3) is lifecycle.GenVerdict.BUSY
+
+    def test_down_on_unreachable(self) -> None:
+        m = _manifest_pointing_to_port(_free_port())  # nobody listens
+        assert lifecycle.gen_probe(m, request_timeout=1.0) is lifecycle.GenVerdict.DOWN
+
+
+class TestDeepState:
+    def test_running_health_but_zombie_gen_is_degraded(self, gen_server: int) -> None:
+        _GenHandler.mode = "zombie"
+        m = _manifest_pointing_to_port(gen_server)
+        with patch("ais_core.lifecycle.Path") as mock_path:
+            mock_path.return_value.exists.return_value = True
+            assert lifecycle.current_state(m, deep=True) is EngineState.DEGRADED
+            # shallow check still says RUNNING — that's the lie --deep exists for
+            assert lifecycle.current_state(m) is EngineState.RUNNING
+
+    def test_busy_engine_stays_running(self, gen_server: int) -> None:
+        _GenHandler.mode = "ok"
+        m = _manifest_pointing_to_port(gen_server)
+        with (
+            patch("ais_core.lifecycle.Path") as mock_path,
+            patch("ais_core.lifecycle.gen_probe", return_value=lifecycle.GenVerdict.BUSY),
+        ):
+            mock_path.return_value.exists.return_value = True
+            assert lifecycle.current_state(m, deep=True) is EngineState.RUNNING
+
+
+class TestWaitForHealthGenCheck:
+    def test_gen_check_optin_requires_generation(self, gen_server: int) -> None:
+        from dataclasses import replace
+
+        _GenHandler.mode = "zombie"
+        m = _manifest_pointing_to_port(gen_server)
+        m = replace(m, network=replace(m.network, gen_check=True, health_timeout=1))
+        assert wait_for_health(m, timeout=1) is False
+
+        _GenHandler.mode = "ok"
+        assert wait_for_health(m, timeout=3) is True
+
+    def test_without_optin_health_2xx_suffices(self, gen_server: int) -> None:
+        _GenHandler.mode = "zombie"  # gen broken, but gen_check is off
+        m = _manifest_pointing_to_port(gen_server)
+        assert wait_for_health(m, timeout=3) is True
