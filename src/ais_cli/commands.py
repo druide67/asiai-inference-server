@@ -26,12 +26,13 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ais_core import lifecycle, memory, sudoers
+from ais_core import install_state, lifecycle, memory, sudoers
 from ais_core.manifest import (
     EngineManifest,
     list_manifests,
     list_presets,
     load_manifest,
+    manifest_source_path,
     preset_search_dirs,
     preset_summary,
 )
@@ -236,11 +237,15 @@ def cmd_status(args: argparse.Namespace) -> int:
         # operator sees why certification was inconclusive — they are normal
         # conditions, not alarms.
         state, verdict = lifecycle.probe_state(m, deep=deep)
+        record = install_state.read_install(name)
         row = {
             "engine": name,
             "state": state.value,
             "port": m.network.port,
             "plist": m.plist.name,
+            # Recorded at install time — what the service was generated
+            # from, not a live introspection of the running process.
+            "preset": record.preset if record else None,
         }
         if deep:
             row["gen"] = verdict.value if verdict is not None else None
@@ -250,10 +255,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         _emit({"engines": rows}, as_json=True)
         return 0
     gen_header = " gen" if deep else ""
-    print(f"{'engine':<12} {'state':<22} {'port':<6} plist{gen_header}")
+    print(f"{'engine':<12} {'state':<22} {'port':<6} plist preset{gen_header}")
     for r in rows:
+        preset = r["preset"] or "-"
         gen = f" {r['gen'] or '-'}" if deep else ""
-        print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']}{gen}")
+        print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']} {preset}{gen}")
     return 0
 
 
@@ -263,7 +269,19 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_install(args: argparse.Namespace) -> int:
-    m = _resolve_manifest(args.engine, preset=getattr(args, "preset", None))
+    preset = getattr(args, "preset", None)
+    record = install_state.read_install(args.engine)
+    if preset is None and record is not None and record.preset is not None and not args.force:
+        # The dangerous path issue #6 exists for: a plain install over a
+        # preset-based one regenerates the service from the base manifest
+        # and comes back *healthy* — the degradation is silent.
+        raise SystemExit(
+            f"{args.engine} was last installed with preset {record.preset!r}; a plain "
+            f"install would silently regenerate it from the base manifest.\n"
+            f"Use 'aisctl reinstall {args.engine}' to replay the preset, pass "
+            f"'--preset {record.preset}' explicitly, or --force to install the base manifest."
+        )
+    m = _resolve_manifest(args.engine, preset=preset)
     user = args.user or os.environ.get("USER") or "root"
     enable_fw = args.firewall == "lan-only"
 
@@ -274,6 +292,61 @@ def cmd_install(args: argparse.Namespace) -> int:
             binary_path=args.binary,
             enable_firewall=enable_fw,
             dry_run=args.dry_run,
+        )
+    if not args.dry_run:
+        src = manifest_source_path(args.engine, preset)
+        if src is not None:
+            install_state.record_install(
+                args.engine, preset=preset, manifest_path=src, firewall=args.firewall
+            )
+    result["preset"] = preset
+    _emit(result, as_json=args.json)
+    return 0 if (args.dry_run or result.get("health_ok")) else 2
+
+
+def cmd_reinstall(args: argparse.Namespace) -> int:
+    """``aisctl reinstall <engine>`` — uninstall + install replaying the record.
+
+    Exists because the manual sequence (``uninstall`` then plain ``install``)
+    silently degrades a preset-based install to the base manifest while coming
+    back healthy. ``reinstall`` replays what was actually installed: same
+    preset, same firewall mode (unless overridden on the command line).
+    """
+    record = install_state.read_install(args.engine)
+    if record is None:
+        raise SystemExit(
+            f"no install record for {args.engine!r} — nothing to replay.\n"
+            f"Records are written by 'aisctl install'; run "
+            f"'aisctl install {args.engine} [--preset <name>]' once to create one."
+        )
+    m = _resolve_manifest(args.engine, preset=record.preset)
+    user = args.user or os.environ.get("USER") or "root"
+    firewall_mode = args.firewall or record.firewall
+    enable_fw = firewall_mode == "lan-only"
+
+    src = manifest_source_path(args.engine, record.preset)
+    manifest_changed = (
+        src is not None
+        and record.manifest_sha256 != ""
+        and install_state.manifest_digest(src) != record.manifest_sha256
+    )
+
+    with memory.OperationsLock(force=args.force):
+        lifecycle.uninstall(m, dry_run=args.dry_run)
+        result = lifecycle.install(
+            m,
+            user=user,
+            binary_path=args.binary,
+            enable_firewall=enable_fw,
+            dry_run=args.dry_run,
+        )
+    result["preset"] = record.preset
+    # The reinstall picks up the manifest file as it is NOW; flag drift so
+    # the operator knows the regenerated service may differ from the original.
+    result["manifest_changed_since_install"] = manifest_changed
+    if not args.dry_run and src is not None:
+        install_state.record_install(
+            args.engine, preset=record.preset, manifest_path=src, firewall=firewall_mode
         )
     _emit(result, as_json=args.json)
     return 0 if (args.dry_run or result.get("health_ok")) else 2

@@ -62,9 +62,33 @@ def build_parser() -> argparse.ArgumentParser:
         "'aisctl list-presets' to see what's available.",
     )
     p_install.add_argument("--dry-run", action="store_true")
-    p_install.add_argument("--force", action="store_true", help="Bypass operations lock.")
+    p_install.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass operations lock; also confirms replacing a preset-based "
+        "install with the base manifest.",
+    )
     p_install.add_argument("--json", action="store_true")
     p_install.set_defaults(func=commands.cmd_install)
+
+    # reinstall
+    p_reinstall = sub.add_parser(
+        "reinstall",
+        help="Uninstall + install replaying the recorded preset (see install).",
+    )
+    p_reinstall.add_argument("engine")
+    p_reinstall.add_argument("--binary", help="Override binary path resolution.")
+    p_reinstall.add_argument("--user", help="macOS user the daemon runs as.")
+    p_reinstall.add_argument(
+        "--firewall",
+        choices=["lan-only", "none"],
+        default=None,
+        help="Override the recorded firewall mode (default: reuse it).",
+    )
+    p_reinstall.add_argument("--dry-run", action="store_true")
+    p_reinstall.add_argument("--force", action="store_true", help="Bypass operations lock.")
+    p_reinstall.add_argument("--json", action="store_true")
+    p_reinstall.set_defaults(func=commands.cmd_reinstall)
 
     # list-presets
     p_presets = sub.add_parser(

@@ -353,6 +353,17 @@ def _find_preset_path(preset: str) -> Path | None:
     return None
 
 
+def manifest_source_path(name: str, preset: str | None = None) -> Path | None:
+    """The TOML file that ``load_manifest(name, preset=preset)`` would read.
+
+    None when nothing resolves. Exposed for callers that need to fingerprint
+    the installed configuration (install records, drift detection).
+    """
+    if preset is not None:
+        return _find_preset_path(preset)
+    return _find_manifest_path(name)
+
+
 def preset_search_dirs() -> tuple[Path, ...]:
     """Every directory scanned for presets, in precedence order.
 
