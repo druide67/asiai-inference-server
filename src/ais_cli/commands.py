@@ -32,6 +32,7 @@ from ais_core.manifest import (
     list_manifests,
     list_presets,
     load_manifest,
+    preset_search_dirs,
     preset_summary,
 )
 from ais_core.upgrade import upgrade_argv
@@ -156,11 +157,14 @@ def _resolve_manifest(name: str, preset: str | None = None) -> EngineManifest:
     if name not in list_manifests():
         raise SystemExit(f"unknown engine {name!r}; known: {', '.join(list_manifests())}")
     if preset is not None and preset not in list_presets():
-        raise SystemExit(
-            f"unknown preset {preset!r}; available: {', '.join(list_presets()) or '(none)'} "
-            f"(searched user presets in <config>/engine_manifests/presets/ and "
-            f"<config>/presets/, then bundled)"
-        )
+        lines = [f"unknown preset {preset!r}; searched (in precedence order):"]
+        for d in preset_search_dirs():
+            if d.is_dir():
+                found = sorted(p.stem for p in d.glob("*.toml"))
+                lines.append(f"  {d}: {', '.join(found) or '(empty)'}")
+            else:
+                lines.append(f"  {d}: (absent)")
+        raise SystemExit("\n".join(lines))
     return load_manifest(name, preset=preset)
 
 

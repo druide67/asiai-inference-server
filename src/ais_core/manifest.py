@@ -257,9 +257,11 @@ def list_presets() -> list[str]:
     Presets are full self-contained manifests tuned for a specific model
     plus use case. Bundled presets live under ``data/engine_manifests/presets/``
     in the package and serve as documented examples (see the ``README.md``
-    next to them). Users add their own presets under
-    ``$XDG_CONFIG_HOME/asiai-inference-server/presets/`` — these are picked
-    up automatically and override any bundled preset of the same name.
+    next to them). Users add their own presets in either user layout
+    (canonical ``engine_manifests/presets/`` or legacy ``presets/``, see
+    :func:`_user_preset_dirs`) — these are picked up automatically and
+    override any bundled preset of the same name. A name present in
+    several locations is returned once.
     """
     bundled = _bundled_manifest_dir() / "presets"
     names = set()
@@ -291,22 +293,44 @@ def _find_manifest_path(name: str) -> Path | None:
 
 
 def _find_preset_path(preset: str) -> Path | None:
-    """User dirs first (override semantics), bundled dir second."""
+    """User dirs first (override semantics), bundled dir second.
+
+    Every shadowing is surfaced with a warning so operators see which file
+    actually wins: a user preset masking another user preset (mirror layout
+    over legacy layout), and a user preset overriding a bundled one.
+    """
     bundled = _bundled_manifest_dir() / "presets" / f"{preset}.toml"
-    for user_dir in _user_preset_dirs():
-        user = user_dir / f"{preset}.toml"
-        if user.is_file():
-            if bundled.is_file():
-                logger.warning(
-                    "user preset %s overrides bundled preset (user=%s, bundled=%s)",
-                    preset,
-                    user,
-                    bundled,
-                )
-            return user
+    user_hits = [p for d in _user_preset_dirs() if (p := d / f"{preset}.toml").is_file()]
+    if user_hits:
+        winner = user_hits[0]
+        for shadowed in user_hits[1:]:
+            logger.warning(
+                "user preset %s exists in both user layouts; %s wins, %s is ignored",
+                preset,
+                winner,
+                shadowed,
+            )
+        if bundled.is_file():
+            logger.warning(
+                "user preset %s overrides bundled preset (user=%s, bundled=%s)",
+                preset,
+                winner,
+                bundled,
+            )
+        return winner
     if bundled.is_file():
         return bundled
     return None
+
+
+def preset_search_dirs() -> tuple[Path, ...]:
+    """Every directory scanned for presets, in precedence order.
+
+    User layouts first (mirror, then legacy — see :func:`_user_preset_dirs`),
+    bundled package dir last. Exposed so CLI error messages can show the
+    operator the real resolved paths that were searched.
+    """
+    return (*_user_preset_dirs(), _bundled_manifest_dir() / "presets")
 
 
 def preset_summary(preset: str) -> dict[str, str]:
