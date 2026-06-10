@@ -41,21 +41,28 @@ preset if you want to ship tuning along with it.
 ## Writing your own presets without committing them upstream
 
 If you want to add or override presets without modifying the package,
-drop your TOMLs in the XDG user-config directory:
+drop your TOMLs in the XDG user-config directory, mirroring the bundled
+package tree (presets live next to the manifests they tune):
 
 ```
-$XDG_CONFIG_HOME/asiai-inference-server/presets/<name>.toml
+$XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/presets/<name>.toml
 ```
 
-The default path on macOS is `~/.config/asiai-inference-server/presets/`.
-You can override the whole user-config tree with the `ASIAI_USER_CONFIG_DIR`
-environment variable.
+The default base path on macOS is `~/.config/asiai-inference-server/`.
+You can override the whole user-config tree with the
+`ASIAI_USER_CONFIG_DIR` environment variable.
 
 Files there are discovered automatically by `list_presets()` and
 `aisctl install --preset <name>` resolves them just like bundled
-presets. A user preset whose stem matches a bundled one silently wins
-the lookup (with a warning logged at load time so the override is
-visible to operators).
+presets. A user preset whose stem matches a bundled one wins the lookup
+(with a warning logged at load time so the override is visible to
+operators).
+
+> **Upgrading from ≤ v0.2:** user presets used to be read from
+> `presets/` at the config root. That location is no longer scanned —
+> move your TOMLs to `engine_manifests/presets/`. Any file left behind
+> triggers a warning naming it and the new path, so the relocation
+> cannot fail silently.
 
 The same XDG mechanism applies to engine manifests themselves: drop
 `engine_manifests/<name>.toml` under the user-config directory and
