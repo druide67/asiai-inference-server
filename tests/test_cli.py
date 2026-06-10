@@ -34,6 +34,8 @@ def test_parser_accepts_each_subcommand() -> None:
         "start",
         "stop",
         "restart",
+        "disable",
+        "enable",
         "upgrade",
         "unload",
         "purge",
@@ -50,6 +52,8 @@ def test_parser_accepts_each_subcommand() -> None:
             "start",
             "stop",
             "restart",
+            "disable",
+            "enable",
             "upgrade",
             "unload",
         }:
@@ -234,6 +238,63 @@ def test_uninstall_no_keep_logs_flag() -> None:
     """--keep-logs was removed in v0.1; ensure argparse rejects it."""
     with patch("ais_cli.commands.memory.OperationsLock"), pytest.raises(SystemExit):
         main(["uninstall", "ollama", "--keep-logs"])
+
+
+# ---------------------------------------------------------------------------
+# disable / enable (issue #8)
+# ---------------------------------------------------------------------------
+
+
+def test_disable_dispatches_to_lifecycle() -> None:
+    with (
+        patch(
+            "ais_cli.commands.lifecycle.disable",
+            return_value={"engine": "ollama", "disabled": True, "dry_run": False},
+        ) as m,
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        rc = main(["disable", "ollama", "--json"])
+    assert rc == 0
+    assert m.call_args.kwargs["dry_run"] is False
+
+
+def test_enable_without_start_returns_zero_without_health_wait() -> None:
+    with (
+        patch(
+            "ais_cli.commands.lifecycle.enable",
+            return_value={"engine": "ollama", "enabled": True, "started": False},
+        ) as m,
+        patch("ais_cli.commands.lifecycle.wait_for_health") as m_health,
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        rc = main(["enable", "ollama"])
+    assert rc == 0
+    assert m.call_args.kwargs["start_now"] is False
+    m_health.assert_not_called()
+
+
+def test_enable_with_start_waits_for_health() -> None:
+    with (
+        patch(
+            "ais_cli.commands.lifecycle.enable",
+            return_value={"engine": "ollama", "enabled": True, "started": True},
+        ),
+        patch("ais_cli.commands.lifecycle.wait_for_health", return_value=True),
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        assert main(["enable", "ollama", "--start"]) == 0
+
+
+def test_enable_with_start_unhealthy_returns_2() -> None:
+    with (
+        patch(
+            "ais_cli.commands.lifecycle.enable",
+            return_value={"engine": "ollama", "enabled": True, "started": True},
+        ),
+        patch("ais_cli.commands.lifecycle.wait_for_health", return_value=False),
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        assert main(["enable", "ollama", "--start"]) == 2
 
 
 # ---------------------------------------------------------------------------

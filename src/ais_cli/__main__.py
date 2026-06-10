@@ -119,6 +119,32 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--json", action="store_true")
         sp.set_defaults(func=getattr(commands, f"cmd_{name}"))
 
+    # disable / enable — durable cold standby (issue #8)
+    p_disable = sub.add_parser(
+        "disable",
+        help="Stop the engine AND keep it off across reboots (cold standby).",
+    )
+    p_disable.add_argument("engine")
+    p_disable.add_argument("--dry-run", action="store_true")
+    p_disable.add_argument("--force", action="store_true")
+    p_disable.add_argument("--json", action="store_true")
+    p_disable.set_defaults(func=commands.cmd_disable)
+
+    p_enable = sub.add_parser(
+        "enable",
+        help="Re-enable a disabled engine (rejoins the boot sequence).",
+    )
+    p_enable.add_argument("engine")
+    p_enable.add_argument(
+        "--start",
+        action="store_true",
+        help="Also start it now and wait for health.",
+    )
+    p_enable.add_argument("--dry-run", action="store_true")
+    p_enable.add_argument("--force", action="store_true")
+    p_enable.add_argument("--json", action="store_true")
+    p_enable.set_defaults(func=commands.cmd_enable)
+
     # upgrade
     p_upgrade = sub.add_parser(
         "upgrade",

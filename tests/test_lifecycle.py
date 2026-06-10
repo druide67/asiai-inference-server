@@ -289,6 +289,7 @@ def test_current_state_stopped_when_plist_present_but_silent() -> None:
         patch("ais_core.lifecycle.probe_health", return_value=False),
         patch("ais_core.lifecycle.process_alive", return_value=False),
         patch("ais_core.lifecycle.is_loaded", return_value=False),
+        patch("ais_core.lifecycle.is_disabled", return_value=False),
     ):
         state = lifecycle.current_state(m)
     assert state == EngineState.STOPPED
@@ -433,6 +434,99 @@ class TestDeepState:
             assert verdict is lifecycle.GenVerdict.ZOMBIE
             # shallow: no probe, no verdict
             assert lifecycle.probe_state(m) == (EngineState.RUNNING, None)
+
+
+class TestDisableEnable:
+    def test_disable_writes_override_then_stops(self) -> None:
+        m = load_manifest("ollama")
+        with (
+            patch("ais_core.lifecycle.subprocess.run") as mock_run,
+            patch("ais_core.lifecycle.stop") as mock_stop,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            result = lifecycle.disable(m)
+        argv = mock_run.call_args_list[0].args[0]
+        assert argv == ["sudo", "/bin/launchctl", "disable", f"system/{m.plist.name}"]
+        mock_stop.assert_called_once_with(m)
+        assert result["disabled"] is True
+
+    def test_disable_dry_run_touches_nothing(self) -> None:
+        m = load_manifest("ollama")
+        with (
+            patch("ais_core.lifecycle.subprocess.run") as mock_run,
+            patch("ais_core.lifecycle.stop") as mock_stop,
+        ):
+            result = lifecycle.disable(m, dry_run=True)
+        mock_run.assert_not_called()
+        mock_stop.assert_not_called()
+        assert result["dry_run"] is True
+
+    def test_enable_without_start_does_not_start(self) -> None:
+        m = load_manifest("ollama")
+        with (
+            patch("ais_core.lifecycle.subprocess.run") as mock_run,
+            patch("ais_core.lifecycle.start") as mock_start,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            result = lifecycle.enable(m)
+        argv = mock_run.call_args_list[0].args[0]
+        assert argv == ["sudo", "/bin/launchctl", "enable", f"system/{m.plist.name}"]
+        mock_start.assert_not_called()
+        assert result["enabled"] is True
+        assert result["started"] is False
+
+    def test_enable_with_start_starts(self) -> None:
+        m = load_manifest("ollama")
+        with (
+            patch("ais_core.lifecycle.subprocess.run") as mock_run,
+            patch("ais_core.lifecycle.start") as mock_start,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            result = lifecycle.enable(m, start_now=True)
+        mock_start.assert_called_once_with(m)
+        assert result["started"] is True
+
+
+class TestIsDisabled:
+    def _run_result(self, stdout: str, returncode: int = 0) -> MagicMock:
+        return MagicMock(returncode=returncode, stdout=stdout)
+
+    def test_modern_output_disabled(self) -> None:
+        m = load_manifest("ollama")
+        out = f'disabled services = {{\n\t"{m.plist.name}" => disabled\n}}\n'
+        with patch("ais_core.lifecycle.subprocess.run", return_value=self._run_result(out)):
+            assert lifecycle.is_disabled(m) is True
+
+    def test_legacy_output_true(self) -> None:
+        m = load_manifest("ollama")
+        out = f'disabled services = {{\n\t"{m.plist.name}" => true\n}}\n'
+        with patch("ais_core.lifecycle.subprocess.run", return_value=self._run_result(out)):
+            assert lifecycle.is_disabled(m) is True
+
+    def test_absent_label_is_not_disabled(self) -> None:
+        m = load_manifest("ollama")
+        out = 'disabled services = {\n\t"com.other.svc" => disabled\n}\n'
+        with patch("ais_core.lifecycle.subprocess.run", return_value=self._run_result(out)):
+            assert lifecycle.is_disabled(m) is False
+
+    def test_command_failure_degrades_to_false(self) -> None:
+        m = load_manifest("ollama")
+        with patch(
+            "ais_core.lifecycle.subprocess.run", return_value=self._run_result("", returncode=1)
+        ):
+            assert lifecycle.is_disabled(m) is False
+
+    def test_probe_state_reports_disabled(self) -> None:
+        m = load_manifest("ollama")
+        with (
+            patch("ais_core.lifecycle.Path") as mock_path,
+            patch("ais_core.lifecycle.probe_health", return_value=False),
+            patch("ais_core.lifecycle.process_alive", return_value=False),
+            patch("ais_core.lifecycle.is_loaded", return_value=False),
+            patch("ais_core.lifecycle.is_disabled", return_value=True),
+        ):
+            mock_path.return_value.exists.return_value = True
+            assert lifecycle.probe_state(m) == (EngineState.DISABLED, None)
 
 
 class TestWaitForHealthGenCheck:

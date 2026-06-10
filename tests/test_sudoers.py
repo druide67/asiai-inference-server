@@ -28,6 +28,13 @@ def test_content_includes_purge_rule() -> None:
     assert "NOPASSWD: /usr/sbin/purge" in content
 
 
+def test_content_includes_disable_enable_rules() -> None:
+    """aisctl disable/enable (cold standby) need their launchctl verbs."""
+    content = generate_sudoers_content()
+    assert "NOPASSWD: /bin/launchctl disable system/com.asiai.*" in content
+    assert "NOPASSWD: /bin/launchctl enable system/com.asiai.*" in content
+
+
 def test_content_scope_is_strict_com_asiai_only() -> None:
     """Every line containing a wildcard ``*`` must scope it to com.asiai.*."""
     content = generate_sudoers_content()
