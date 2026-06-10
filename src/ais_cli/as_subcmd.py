@@ -177,6 +177,20 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
             "cmd_install",
         ),
         (
+            "reinstall",
+            "Uninstall + install replaying the recorded preset.",
+            [
+                (("engine",), {}),
+                (("--binary",), {}),
+                (("--user",), {}),
+                (("--firewall",), {"choices": ["lan-only", "none"], "default": None}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_reinstall",
+        ),
+        (
             "uninstall",
             "Remove an engine.",
             [

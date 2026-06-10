@@ -9,6 +9,8 @@ import pytest
 
 from ais_cli import commands
 from ais_cli.__main__ import build_parser, main
+from ais_core import install_state
+from ais_core.manifest import load_manifest, manifest_source_path
 
 # ---------------------------------------------------------------------------
 # parser shape
@@ -27,6 +29,7 @@ def test_parser_accepts_each_subcommand() -> None:
         "list",
         "status",
         "install",
+        "reinstall",
         "uninstall",
         "start",
         "stop",
@@ -40,7 +43,16 @@ def test_parser_accepts_each_subcommand() -> None:
     for cmd in expected_subcommands:
         # Subcommands that take an engine name need one to parse cleanly.
         argv = [cmd]
-        if cmd in {"install", "uninstall", "start", "stop", "restart", "upgrade", "unload"}:
+        if cmd in {
+            "install",
+            "reinstall",
+            "uninstall",
+            "start",
+            "stop",
+            "restart",
+            "upgrade",
+            "unload",
+        }:
             argv.append("ollama")
         parser.parse_args(argv)
 
@@ -117,7 +129,13 @@ def test_status_single_engine_json(capsys: pytest.CaptureFixture[str]) -> None:
     payload = json.loads(out)
     assert payload == {
         "engines": [
-            {"engine": "ollama", "state": "stopped", "port": 11434, "plist": "com.asiai.ollama"},
+            {
+                "engine": "ollama",
+                "state": "stopped",
+                "port": 11434,
+                "plist": "com.asiai.ollama",
+                "preset": None,
+            },
         ]
     }
 
@@ -216,6 +234,118 @@ def test_uninstall_no_keep_logs_flag() -> None:
     """--keep-logs was removed in v0.1; ensure argparse rejects it."""
     with patch("ais_cli.commands.memory.OperationsLock"), pytest.raises(SystemExit):
         main(["uninstall", "ollama", "--keep-logs"])
+
+
+# ---------------------------------------------------------------------------
+# install records / reinstall (issue #6)
+# ---------------------------------------------------------------------------
+
+_PRESET = "qwen3-4b-instruct-hermes-aux-1"
+_ENGINE = "llamacpp-aux-1"
+
+
+def _fake_install_result(engine: str, health: bool = True) -> dict:
+    return {
+        "engine": engine,
+        "binary": "/x",
+        "plist": "/y",
+        "anchor": None,
+        "health_ok": health,
+        "dry_run": False,
+    }
+
+
+def _install_with_preset() -> None:
+    with (
+        patch("ais_cli.commands.lifecycle.install", return_value=_fake_install_result(_ENGINE)),
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        assert main(["install", _ENGINE, "--preset", _PRESET, "--user", "jmn", "--json"]) == 0
+
+
+def test_install_preset_is_recorded_and_survives_uninstall() -> None:
+    _install_with_preset()
+    rec = install_state.read_install(_ENGINE)
+    assert rec is not None
+    assert rec.preset == _PRESET
+
+    with (
+        patch("ais_cli.commands.lifecycle.uninstall", return_value={}),
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        assert main(["uninstall", _ENGINE]) == 0
+    # The record outlives uninstall — that's what powers the plain-install guard.
+    assert install_state.read_install(_ENGINE) is not None
+
+
+def test_plain_install_over_preset_install_is_refused() -> None:
+    _install_with_preset()
+    with patch("ais_cli.commands.memory.OperationsLock"), pytest.raises(SystemExit) as ei:
+        main(["install", _ENGINE, "--user", "jmn"])
+    assert "reinstall" in str(ei.value)
+
+
+def test_plain_install_with_force_overrides_and_rerecords() -> None:
+    _install_with_preset()
+    with (
+        patch("ais_cli.commands.lifecycle.install", return_value=_fake_install_result(_ENGINE)),
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        assert main(["install", _ENGINE, "--user", "jmn", "--force"]) == 0
+    rec = install_state.read_install(_ENGINE)
+    assert rec is not None
+    assert rec.preset is None
+
+
+def test_reinstall_replays_recorded_preset() -> None:
+    _install_with_preset()
+    with (
+        patch("ais_cli.commands.lifecycle.uninstall", return_value={}) as m_un,
+        patch(
+            "ais_cli.commands.lifecycle.install", return_value=_fake_install_result(_ENGINE)
+        ) as m_in,
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        rc = main(["reinstall", _ENGINE, "--user", "jmn", "--json"])
+    assert rc == 0
+    # Acceptance (issue #6): reinstall regenerates from the SAME preset
+    # manifest the original install used — hence an identical plist.
+    expected = load_manifest(_ENGINE, preset=_PRESET)
+    assert m_in.call_args.args[0] == expected
+    assert m_un.call_args.args[0] == expected
+
+
+def test_reinstall_without_record_refuses() -> None:
+    with pytest.raises(SystemExit) as ei:
+        main(["reinstall", _ENGINE])
+    assert "no install record" in str(ei.value)
+
+
+def test_reinstall_reuses_recorded_firewall_mode() -> None:
+    src = manifest_source_path(_ENGINE, _PRESET)
+    assert src is not None
+    install_state.record_install(_ENGINE, preset=_PRESET, manifest_path=src, firewall="lan-only")
+    with (
+        patch("ais_cli.commands.lifecycle.uninstall", return_value={}),
+        patch(
+            "ais_cli.commands.lifecycle.install", return_value=_fake_install_result(_ENGINE)
+        ) as m_in,
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        assert main(["reinstall", _ENGINE, "--user", "jmn"]) == 0
+    assert m_in.call_args.kwargs["enable_firewall"] is True
+
+
+def test_status_json_shows_recorded_preset(capsys: pytest.CaptureFixture[str]) -> None:
+    _install_with_preset()
+    capsys.readouterr()  # drop the install output
+    with patch(
+        "ais_cli.commands.lifecycle.current_state",
+        return_value=commands.lifecycle.EngineState.STOPPED,
+    ):
+        assert main(["status", _ENGINE, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["engines"][0]["preset"] == _PRESET
 
 
 # ---------------------------------------------------------------------------
