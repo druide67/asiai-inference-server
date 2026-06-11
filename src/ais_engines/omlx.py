@@ -18,7 +18,5 @@ class OmlxDriver(RestartOnlyDriver):
     @classmethod
     def from_manifest(cls, manifest: EngineManifest | None = None) -> OmlxDriver:
         m = manifest if manifest is not None else load_manifest("omlx")
-        engine = make_asiai_engine_proxy(
-            m, module="asiai.engines.omlx", class_name="OmlxEngine"
-        )
+        engine = make_asiai_engine_proxy(m, module="asiai.engines.omlx", class_name="OmlxEngine")
         return cls(m, engine)

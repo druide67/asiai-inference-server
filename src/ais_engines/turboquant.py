@@ -14,9 +14,7 @@ from ais_engines.base import RestartOnlyDriver
 
 class TurboquantDriver(RestartOnlyDriver):
     @classmethod
-    def from_manifest(
-        cls, manifest: EngineManifest | None = None
-    ) -> TurboquantDriver:
+    def from_manifest(cls, manifest: EngineManifest | None = None) -> TurboquantDriver:
         m = manifest if manifest is not None else load_manifest("turboquant")
         # No asiai engine wrapper for turboquant yet; the read-side path goes
         # through the generic OpenAI-compatible probe in lifecycle.probe_health.
