@@ -17,7 +17,7 @@ Every driver implements ``unload_with_fallback(model)`` which:
 
 The result is reported with ``method`` so the CLI/MCP can show the user
 exactly what happened: ``"api"`` (clean), ``"restart"`` (full bounce),
-``"no_op"`` (model wasn't loaded), or ``"error"``.
+or ``"error"``.
 """
 
 from __future__ import annotations
@@ -51,10 +51,19 @@ def make_asiai_engine_proxy(
     """
     try:
         engine_module = importlib.import_module(module)
-        cls = getattr(engine_module, class_name)
-    except (ImportError, AttributeError):
+    except ImportError:
         # asiai not installed at all — silent is fine, this is the documented
         # "dev environment without asiai" path.
+        return None
+    try:
+        cls = getattr(engine_module, class_name)
+    except AttributeError:
+        logger.warning(
+            "asiai module %s imported but class %s not found — driver will "
+            "use restart-only fallback for unload",
+            module,
+            class_name,
+        )
         return None
 
     base_url = f"http://127.0.0.1:{manifest.network.port}"
@@ -67,13 +76,18 @@ def make_asiai_engine_proxy(
         except Exception as exc:
             logger.warning(
                 "asiai %s.%s instantiation failed: %s — driver will use "
-                "restart-only fallback for unload", module, class_name, exc,
+                "restart-only fallback for unload",
+                module,
+                class_name,
+                exc,
             )
             return None
     except Exception as exc:
         logger.warning(
             "asiai %s.%s base_url constructor failed: %s — falling back to no-arg",
-            module, class_name, exc,
+            module,
+            class_name,
+            exc,
         )
         try:
             return cls()
@@ -81,7 +95,9 @@ def make_asiai_engine_proxy(
             logger.warning(
                 "asiai %s.%s no-arg constructor also failed: %s — driver "
                 "will use restart-only fallback for unload",
-                module, class_name, exc2,
+                module,
+                class_name,
+                exc2,
             )
             return None
 
@@ -90,7 +106,7 @@ def make_asiai_engine_proxy(
 class UnloadOutcome:
     engine: str
     model: str | None
-    method: str  # "api" | "restart" | "no_op" | "error"
+    method: str  # "api" | "restart" | "error"
     success: bool
     detail: str = ""
 
@@ -165,7 +181,8 @@ class EngineDriver:
             return []
         try:
             return [m.name for m in self.asiai_engine.list_running()]
-        except Exception:
+        except Exception as exc:
+            logger.debug("list_running failed for %s: %s", self.name, exc)
             return []
 
     # -- override hooks ------------------------------------------------------
