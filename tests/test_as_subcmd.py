@@ -143,11 +143,11 @@ def test_every_subcommand_parses(argv: list[str]) -> None:
 
 def test_engine_subcommand_surface_matches_aisctl() -> None:
     """Parity guard: every verb `aisctl` exposes must be reachable through
-    `asiai engine <verb>` too (serve/fleet/install-service stay
+    `asiai engine <verb>` too (serve/fleet/install-service/bundle stay
     aisctl-only — they are host-level daemon plumbing, not engine ops)."""
     from ais_cli.__main__ import build_parser
 
-    aisctl_only = {"serve", "fleet", "install-service", "uninstall-service"}
+    aisctl_only = {"serve", "fleet", "install-service", "uninstall-service", "bundle"}
     aisctl_actions = next(
         a for a in build_parser()._actions if isinstance(a, argparse._SubParsersAction)
     )
