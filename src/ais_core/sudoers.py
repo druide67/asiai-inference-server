@@ -67,6 +67,9 @@ def generate_sudoers_content(manifests: list[EngineManifest] | None = None) -> s
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl bootstrap system "
         "/Library/LaunchDaemons/com.asiai.*.plist",
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl bootout system/com.asiai.*",
+        # Cold standby (aisctl disable/enable): durable off across reboots.
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl disable system/com.asiai.*",
+        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl enable system/com.asiai.*",
         # Phase 2 install-service uses /usr/bin/install for atomic plist drop.
         f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/bin/install -m 0644 -o root -g wheel "
         "/tmp/asiai-* /Library/LaunchDaemons/com.asiai.*.plist",

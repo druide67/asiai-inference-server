@@ -39,6 +39,7 @@ class LifecycleError(RuntimeError):
 class EngineState(enum.StrEnum):
     NOT_INSTALLED = "not_installed"  # no plist file
     STOPPED = "stopped"  # plist exists, daemon not loaded
+    DISABLED = "disabled"  # plist exists, durably off (survives reboot)
     LOADED_NOT_RUNNING = "loaded"  # launchctl knows it, no PID
     UNHEALTHY = "unhealthy"  # PID alive but health endpoint silent
     RUNNING = "running"  # PID alive AND health endpoint 2xx
@@ -208,6 +209,78 @@ def restart(manifest: EngineManifest) -> None:
     """Stop then start. Health check is the caller's responsibility."""
     stop(manifest)
     start(manifest)
+
+
+def disable(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
+    """Durable cold standby: stop now AND stay off across reboots.
+
+    Writes the launchd disabled override for the label, then stops the
+    daemon. The plist (and therefore the tuned preset configuration) is
+    left untouched — this is the middle state between ``stop`` (back at
+    next boot via RunAtLoad) and ``uninstall`` (gone entirely).
+
+    The override is written *before* stopping so a KeepAlive daemon can't
+    respawn in the gap. ``aisctl start`` re-enables (``load -w`` clears
+    the override) — starting a disabled engine is an explicit operator
+    action, not an accident.
+    """
+    if dry_run:
+        print(f"[dry-run] would disable {manifest.plist.name}")
+        return {"engine": manifest.name, "disabled": True, "dry_run": True}
+
+    subprocess.run(
+        ["sudo", "/bin/launchctl", "disable", f"system/{manifest.plist.name}"],
+        check=True,
+    )
+    stop(manifest)
+    return {"engine": manifest.name, "disabled": True, "dry_run": False}
+
+
+def enable(manifest: EngineManifest, *, start_now: bool = False, dry_run: bool = False) -> dict:
+    """Clear the launchd disabled override; optionally start right away.
+
+    Without ``start_now`` the engine simply rejoins the boot sequence at
+    the next reboot — that's the cold-standby contract: enabling is not
+    the same decision as paying the model-load memory spike now.
+    """
+    if dry_run:
+        return {
+            "engine": manifest.name,
+            "enabled": True,
+            "started": start_now,
+            "dry_run": True,
+        }
+
+    subprocess.run(
+        ["sudo", "/bin/launchctl", "enable", f"system/{manifest.plist.name}"],
+        check=True,
+    )
+    if start_now:
+        start(manifest)
+    return {"engine": manifest.name, "enabled": True, "started": start_now, "dry_run": False}
+
+
+def is_disabled(manifest: EngineManifest) -> bool:
+    """True iff the label carries a launchd disabled override.
+
+    Reads ``launchctl print-disabled system`` (no sudo needed). Output
+    lines look like ``"com.asiai.llamacpp-aux-4" => disabled`` (older
+    launchd prints ``=> true``). Any failure degrades to False — the
+    state machine then reports STOPPED, which is the safe default.
+    """
+    proc = subprocess.run(
+        ["/bin/launchctl", "print-disabled", "system"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    needle = f'"{manifest.plist.name}"'
+    for line in proc.stdout.splitlines():
+        if needle in line:
+            return "=> disabled" in line or "=> true" in line
+    return False
 
 
 def stop_existing(manifest: EngineManifest, *, dry_run: bool = False) -> None:
@@ -384,8 +457,8 @@ def probe_state(
     To avoid that false negative, we trust the network probe first: if the
     health endpoint answers 2xx, the daemon is RUNNING regardless of what
     ``launchctl list`` says. Only when the daemon is silent do we drill down
-    via ``process_alive`` and ``is_loaded`` to distinguish UNHEALTHY /
-    LOADED_NOT_RUNNING / STOPPED.
+    via ``process_alive``, ``is_loaded`` and ``is_disabled`` to distinguish
+    UNHEALTHY / LOADED_NOT_RUNNING / DISABLED / STOPPED.
 
     With ``deep=True``, a RUNNING engine is additionally generation-probed —
     exactly once, and the verdict is returned alongside the state so callers
@@ -411,6 +484,9 @@ def probe_state(
 
     if is_loaded(manifest):
         return EngineState.LOADED_NOT_RUNNING, None
+
+    if is_disabled(manifest):
+        return EngineState.DISABLED, None
 
     return EngineState.STOPPED, None
 

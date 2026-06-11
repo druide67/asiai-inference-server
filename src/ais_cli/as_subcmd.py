@@ -235,6 +235,29 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
             "cmd_restart",
         ),
         (
+            "disable",
+            "Stop an engine AND keep it off across reboots (cold standby).",
+            [
+                (("engine",), {}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_disable",
+        ),
+        (
+            "enable",
+            "Re-enable a disabled engine (rejoins the boot sequence).",
+            [
+                (("engine",), {}),
+                (("--start",), {"action": "store_true"}),
+                (("--dry-run",), {"action": "store_true"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_enable",
+        ),
+        (
             "upgrade",
             "brew-upgrade a whitelisted engine (--restart to reconcile).",
             [

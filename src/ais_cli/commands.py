@@ -389,6 +389,34 @@ def cmd_restart(args: argparse.Namespace) -> int:
     return 0 if healthy else 2
 
 
+def cmd_disable(args: argparse.Namespace) -> int:
+    """``aisctl disable <engine>`` — durable cold standby (survives reboot).
+
+    Fills the gap between ``stop`` (RunAtLoad brings the engine back at
+    next boot) and ``uninstall`` (loses the install): the engine stays
+    installed with its tuned configuration but is excluded from the boot
+    sequence — and from its model-load memory spike.
+    """
+    m = _resolve_manifest(args.engine)
+    with memory.OperationsLock(force=args.force):
+        result = lifecycle.disable(m, dry_run=args.dry_run)
+    _emit(result, as_json=args.json)
+    return 0
+
+
+def cmd_enable(args: argparse.Namespace) -> int:
+    m = _resolve_manifest(args.engine)
+    with memory.OperationsLock(force=args.force):
+        result = lifecycle.enable(m, start_now=args.start, dry_run=args.dry_run)
+    if args.start and not args.dry_run:
+        healthy = lifecycle.wait_for_health(m, timeout=m.network.health_timeout)
+        result["healthy"] = healthy
+        _emit(result, as_json=args.json)
+        return 0 if healthy else 2
+    _emit(result, as_json=args.json)
+    return 0
+
+
 def cmd_upgrade(args: argparse.Namespace) -> int:
     """``aisctl upgrade <engine>`` — brew-upgrade a whitelisted engine.
 
