@@ -122,13 +122,10 @@ class TestBroadcastPush:
         assert mock.call_count == 2  # laptop + spare
 
     def test_partial_failure_returns_3(self, tmp_fleet, monkeypatch):
-        # First call succeeds, second raises. ThreadPool semantics mean
-        # the order isn't deterministic but at least one fails → rc=3.
-        call_state = {"n": 0}
-
-        def flaky(*args, **kwargs):
-            call_state["n"] += 1
-            if call_state["n"] == 2:
+        # One specific node fails, the others succeed → rc=3. Keyed on the
+        # target URL so the outcome doesn't depend on ThreadPool ordering.
+        def flaky(req, *args, **kwargs):
+            if "192.0.2.11" in req.full_url:
                 raise urllib.error.URLError("connection refused")
             return _mock_urlopen(200, {"ok": True, "exit_code": 0}).return_value
 

@@ -112,12 +112,19 @@ def test_register_with_unknown_signature_raises_typeerror() -> None:
         ["engine", "list", "--json"],
         ["engine", "status"],
         ["engine", "status", "ollama", "--json"],
+        ["engine", "status", "ollama", "--deep", "--json"],
         ["engine", "install", "ollama", "--firewall", "lan-only", "--user", "jmn"],
         ["engine", "install", "ollama", "--dry-run", "--force"],
+        ["engine", "install", "llamacpp-aux-1", "--preset", "qwen3-4b-instruct-hermes-aux-1"],
+        ["engine", "list-presets", "--json"],
+        ["engine", "reinstall", "ollama"],
         ["engine", "uninstall", "ollama", "--dry-run"],
         ["engine", "start", "ollama"],
         ["engine", "stop", "ollama", "--dry-run"],
         ["engine", "restart", "ollama"],
+        ["engine", "disable", "ollama"],
+        ["engine", "enable", "ollama", "--start"],
+        ["engine", "upgrade", "ollama", "--dry-run"],
         ["engine", "unload", "ollama"],
         ["engine", "unload", "ollama", "llama3.2"],
         ["engine", "purge"],
@@ -132,6 +139,28 @@ def test_every_subcommand_parses(argv: list[str]) -> None:
         RegistrationContext(api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={})
     )
     parser.parse_args(argv)  # raises SystemExit if invalid
+
+
+def test_engine_subcommand_surface_matches_aisctl() -> None:
+    """Parity guard: every verb `aisctl` exposes must be reachable through
+    `asiai engine <verb>` too (serve/fleet/install-service stay
+    aisctl-only — they are host-level daemon plumbing, not engine ops)."""
+    from ais_cli.__main__ import build_parser
+
+    aisctl_only = {"serve", "fleet", "install-service", "uninstall-service"}
+    aisctl_actions = next(
+        a for a in build_parser()._actions if isinstance(a, argparse._SubParsersAction)
+    )
+    _parser, subparsers = _fresh_parser()
+    register(
+        RegistrationContext(api_version=PLUGIN_API_VERSION, subparsers=subparsers, commands={})
+    )
+    engine_parser = subparsers.choices["engine"]
+    engine_actions = next(
+        a for a in engine_parser._actions if isinstance(a, argparse._SubParsersAction)
+    )
+    missing = set(aisctl_actions.choices) - set(engine_actions.choices) - aisctl_only
+    assert not missing, f"aisctl verbs missing from `asiai engine`: {sorted(missing)}"
 
 
 def test_engine_without_subcommand_is_rejected() -> None:

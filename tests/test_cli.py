@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -156,6 +157,38 @@ def test_status_all_engines_when_no_arg(capsys: pytest.CaptureFixture[str]) -> N
     # llamacpp-aux-1, vmlx, mlx-lm, rapidmlx) + 4 extra aux-N siblings
     # (aux-2/3/4/5) = 13
     assert len(payload["engines"]) == 13
+
+
+def test_status_deep_surfaces_degraded_state_and_gen_verdict(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`status --deep` exposes the gen probe: a GPU-OOM zombie shows up as
+    state=degraded + gen=zombie in the JSON payload."""
+    from ais_core.lifecycle import EngineState, GenVerdict
+
+    with patch(
+        "ais_cli.commands.lifecycle.probe_state",
+        return_value=(EngineState.DEGRADED, GenVerdict.ZOMBIE),
+    ) as mock_probe:
+        rc = main(["status", "ollama", "--deep", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    row = payload["engines"][0]
+    assert row["state"] == "degraded"
+    assert row["gen"] == "zombie"
+    assert mock_probe.call_args.kwargs == {"deep": True}
+
+
+def test_status_shallow_has_no_gen_key(capsys: pytest.CaptureFixture[str]) -> None:
+    fake_state = MagicMock()
+    fake_state.value = "running"
+    with patch("ais_cli.commands.lifecycle.probe_state", return_value=(fake_state, None)):
+        rc = main(["status", "ollama", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    row = json.loads(out)["engines"][0]
+    assert "gen" not in row
 
 
 # ---------------------------------------------------------------------------
@@ -358,8 +391,9 @@ def test_plain_install_with_force_overrides_and_rerecords() -> None:
     assert rec.preset is None
 
 
-def test_reinstall_replays_recorded_preset() -> None:
+def test_reinstall_replays_recorded_preset(capsys: pytest.CaptureFixture[str]) -> None:
     _install_with_preset()
+    capsys.readouterr()  # drop the install output
     with (
         patch("ais_cli.commands.lifecycle.uninstall", return_value={}) as m_un,
         patch(
@@ -374,6 +408,25 @@ def test_reinstall_replays_recorded_preset() -> None:
     expected = load_manifest(_ENGINE, preset=_PRESET)
     assert m_in.call_args.args[0] == expected
     assert m_un.call_args.args[0] == expected
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["manifest_changed_since_install"] is False
+
+
+def test_reinstall_flags_manifest_drift(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A record whose digest no longer matches the manifest file on disk
+    must surface manifest_changed_since_install=true."""
+    stale = tmp_path / "stale-manifest.toml"
+    stale.write_text("# content that does not match the bundled preset\n")
+    install_state.record_install(_ENGINE, preset=_PRESET, manifest_path=stale, firewall="none")
+    with (
+        patch("ais_cli.commands.lifecycle.uninstall", return_value={}),
+        patch("ais_cli.commands.lifecycle.install", return_value=_fake_install_result(_ENGINE)),
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        rc = main(["reinstall", _ENGINE, "--user", "jmn", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["manifest_changed_since_install"] is True
 
 
 def test_reinstall_without_record_refuses() -> None:

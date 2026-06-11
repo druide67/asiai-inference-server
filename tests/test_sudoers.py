@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -140,17 +141,25 @@ def test_remove_sudoers_when_present_calls_sudo_rm() -> None:
     assert cmd == ["sudo", "/bin/rm", "-f", "/etc/sudoers.d/asiai-inference"]
 
 
-def test_no_temp_files_left_after_validate(tmp_path: Path, monkeypatch) -> None:
-    """validate_content must clean up its tempfile even on success."""
-    monkeypatch.setenv("TMPDIR", str(tmp_path))
+def test_no_temp_files_left_after_validate(monkeypatch) -> None:
+    """validate_content must clean up its staging dir even on success."""
+    import ais_core.sudoers as sudoers_mod
+
+    captured: list[Path] = []
+    real_staging = sudoers_mod.secure_staging_dir
+
+    @contextmanager
+    def spying_staging():
+        with real_staging() as staging:
+            captured.append(staging)
+            yield staging
+
+    monkeypatch.setattr(sudoers_mod, "secure_staging_dir", spying_staging)
     fake = MagicMock(returncode=0, stdout="", stderr="")
     with patch("ais_core.sudoers.subprocess.run", return_value=fake):
         validate_content("# fake\n")
-    leftover = list(tmp_path.glob("asiai-inference.*"))
-    # Note: tempfile picks /tmp regardless of TMPDIR for our explicit dir=,
-    # so this assertion is best-effort. Skip if no files appeared in tmp_path.
-    if leftover:
-        pytest.fail(f"tempfile left behind: {leftover}")
+    assert len(captured) == 1
+    assert not captured[0].exists(), f"staging dir left behind: {captured[0]}"
 
 
 # ---------------------------------------------------------------------------

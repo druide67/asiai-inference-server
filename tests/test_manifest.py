@@ -301,8 +301,10 @@ def test_health_url_property() -> None:
     # ollama leaves bind="" so health_url falls back to localhost.
     assert m.network.health_url == "http://127.0.0.1:11434/api/version"
 
+    # A 0.0.0.0 bind is not a connectable address: the probe targets
+    # loopback, same as gen_url.
     m2 = load_manifest("lmstudio")
-    assert m2.network.health_url == "http://0.0.0.0:1234/v1/models"
+    assert m2.network.health_url == "http://127.0.0.1:1234/v1/models"
 
 
 def test_log_path_properties() -> None:
