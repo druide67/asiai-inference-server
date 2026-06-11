@@ -44,6 +44,7 @@ dev = ["pytest>=8.0", "ruff>=0.6", "pytest-cov>=5.0"]
 
 [project.scripts]
 aisctl = "ais_cli.__main__:main"
+asiai-launch = "ais_core.launch:main"
 
 [project.entry-points."asiai.subcommands"]
 engine = "ais_cli.as_subcmd:register"
