@@ -2,8 +2,10 @@
 
 Fleet manager for local LLM inference engines on Apple Silicon.
 
-> **Status: v0.0.1 pre-alpha — skeleton only.** Not yet functional. See the
-> roadmap below.
+> **Status: v0.3.0 — released on
+> [PyPI](https://pypi.org/project/asiai-inference-server/).** Lifecycle,
+> memory reclaim, presets, upgrades, fleet push and health probing are
+> functional. See the roadmap below for what each version shipped.
 
 `asiai-inference-server` is the **control plane** companion to
 [`asiai`](https://asiai.dev) (the observability/benchmark CLI). Where `asiai`
@@ -41,30 +43,26 @@ became obvious:
 
 | Version | Scope | Status |
 |---------|-------|--------|
-| v0.0 | Repo skeleton + packaging | in progress |
-| v0.1 | Install/uninstall/start/stop + **unload + purge memory** | next |
-| v0.2 | Profile switching (TOML profiles, apply/rollback) | planned |
-| v0.3 | Fleet manager (multi-Mac inventory, SSH dispatch) | planned |
-| v0.4 | Web cockpit + optional HTTP agent | planned |
-| v1.0 | MCP write tools + PyPI/Homebrew release | planned |
+| v0.1 | Install/uninstall/start/stop/restart + **unload + purge memory**, pf firewall anchor, sudoers bootstrap | shipped |
+| v0.2 | `aisctl upgrade` (brew, whitelisted), `asiai versions` provider, fleet Phase 2 (loopback `serve` + orchestrator `fleet` push) | shipped |
+| v0.3 | `status --deep` (generation probe, catches GPU-OOM zombies), install records + `reinstall`, single preset location, `disable`/`enable` (cold standby) | shipped |
+| v0.4 | SMAppService app bundle + `asiai-launch` (named entry with custom icon in Background Items) | in review |
+| later | Profile switching (apply/rollback), fleet inventory, web cockpit, MCP write tools | planned |
 
 ## Architecture (high level)
 
 - **CLI**: `aisctl <command>` (standalone) or `asiai engine <command>`
   (auto-injected sub-CLI when `asiai-inference-server` is installed
   alongside `asiai`).
-- **Python stdlib only** for the core (cohérent avec asiai). Optional
-  extras: `mcp` (for v1.0 write tools).
+- **Python stdlib only** for the core (consistent with `asiai`). The
+  package depends on `asiai>=1.8.0` (`auth.loopback` for fleet Phase 2).
+  Optional extras: `mcp` (for future write tools).
 - **macOS Apple Silicon only**. We rely on `launchctl`, `vm_stat`,
   `sudo purge`, `pfctl`, `iogpu.wired_limit_mb`.
 - **SSH-first** for fleet operations. Optional HTTP agent in v0.4 for
   agent-to-agent orchestration.
 - **TOML** for human-edited files (engine manifests, profiles, fleet
   inventory). JSON for runtime state.
-
-The full design rationale (architecture diagram, sequencing, file map,
-risk mitigations) lives in the validated plan at
-`~/.claude/plans/iterative-wiggling-crystal.md`.
 
 ## License
 

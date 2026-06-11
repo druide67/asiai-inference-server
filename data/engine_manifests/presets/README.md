@@ -22,7 +22,7 @@ required**: the engine baselines work as-is for an out-of-the-box
 install.
 
 Presets named with `hermes` in their stem are concrete tuning examples
-adapted for the [Hermes Agent](https://) class of orchestrator —
+adapted for the Hermes Agent class of orchestrator —
 multi-turn agentic workloads with a system prefix that recurs across
 turns and short user payloads that change every turn. They are example
 references, not a product configuration: an asiai user adopting a
@@ -32,11 +32,15 @@ tuning. Read the header comments — each preset explains *why* the
 chosen flags exist for that scenario, which is the part worth reusing.
 
 The `llamacpp-aux-N` presets demonstrate the multi-instance pattern:
-four `llama-server` instances running side-by-side on dedicated ports
-8090-8093 with distinct model symlinks. Add a fifth instance by
-dropping `llamacpp-aux-5.toml` next to the others (see the user-config
-section below for the recommended location), then create a matching
-preset if you want to ship tuning along with it.
+five `llama-server` instances running side-by-side on dedicated ports
+8090-8094 with distinct model symlinks. The first four split the
+general-purpose roles (multi-role, medium, small, vision); `aux-5` is
+the worked example of extending the family — a dedicated long-context
+single-flow slot (256K, compression workloads) added next to the
+existing four. To add a sixth instance, drop `llamacpp-aux-6.toml`
+next to the others (see the user-config section below for the
+recommended location), then create a matching preset if you want to
+ship tuning along with it.
 
 ## Writing your own presets without committing them upstream
 
@@ -87,6 +91,11 @@ rejects the mismatch before touching the system.
 | `qwen3-1.7b-instruct-hermes-aux-2.toml` | `llamacpp-aux-2` | Example medium auxiliary, dense 1.7B on 8091. |
 | `qwen3-0.6b-instruct-hermes-aux-3.toml` | `llamacpp-aux-3` | Example small auxiliary (e.g. title generation), dense 0.6B on 8092. |
 | `qwen2.5-vl-7b-instruct-hermes-aux-4.toml` | `llamacpp-aux-4` | Example vision auxiliary with mmproj on 8093. |
+| `qwen3-4b-instruct-hermes-aux-5-compression.toml` | `llamacpp-aux-5` | Example dedicated long-context slot (256K single flow, compression workloads) on 8094. |
+| `qwen3.6-27b-ud-rapidmlx-hermes.toml` | `rapidmlx` | Example primary-agent tuning, dense 27B UD served by Rapid-MLX. |
+| `qwen3.6-35b-a3b-rapidmlx-hermes.toml` | `rapidmlx` | Example primary-agent tuning, MoE 35B-A3B served by Rapid-MLX. |
+| `qwopus-27b-v2-rapidmlx-hermes.toml` | `rapidmlx` | Example primary-agent tuning, Qwopus 27B v2 served by Rapid-MLX. |
+| `qwopus-35b-a3b-rapidmlx-hermes.toml` | `rapidmlx` | Example primary-agent tuning, Qwopus 35B-A3B served by Rapid-MLX. |
 
 To use one of these, the operator must have the matching GGUF available
 and the conventional `~/llms/gguf/aux<N>/active.gguf` symlink in place

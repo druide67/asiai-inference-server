@@ -22,7 +22,7 @@ keywords = [
     "mcp",
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Environment :: MacOS X",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
@@ -55,7 +55,7 @@ inference_server = "ais_mcp.tools:register"
 
 [project.urls]
 Homepage = "https://asiai.dev"
-Documentation = "https://asiai.dev/inference-server/"
+Documentation = "https://github.com/druide67/asiai-inference-server#readme"
 Repository = "https://github.com/druide67/asiai-inference-server"
 Issues = "https://github.com/druide67/asiai-inference-server/issues"
 

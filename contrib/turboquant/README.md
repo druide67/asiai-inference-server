@@ -1,61 +1,82 @@
-# TurboQuant — llama.cpp fork avec KV cache turbo
+# TurboQuant — llama.cpp fork with turbo KV cache
 
-Fork de llama.cpp par [TheTom](https://github.com/TheTom/llama-cpp-turboquant) qui compresse le KV cache via quantization asymetrique.
+Fork of llama.cpp by [TheTom](https://github.com/TheTom/llama-cpp-turboquant)
+that compresses the KV cache with asymmetric quantization.
 
-## Principe
+## How it works
 
-Le KV cache standard consomme beaucoup de VRAM. TurboQuant applique une quantization differenciee :
-- **Keys** : `q8_0` (haute precision, les keys sont sensibles)
-- **Values** : `turbo3` (compression 5x, les values sont plus tolerantes)
+The standard KV cache is a major VRAM consumer at long context.
+TurboQuant applies differentiated quantization:
 
-Resultat : modeles 70B a context 32k qui tiennent dans 64 Go de RAM unifiee.
+- **Keys**: `q8_0` (high precision — keys are sensitive)
+- **Values**: `turbo3` (5x compression — values tolerate it better),
+  or `turbo2` for a more conservative trade-off
 
-## Installation
+Result: 70B models at 32K context fit in 64 GB of unified memory.
 
-```bash
-# Depuis le MacBook (via admin CLI)
-./admin/oc engine setup turboquant --firewall --yes
+## Installation with aisctl
 
-# Avec telechargement d'un modele
-./admin/oc engine setup turboquant --firewall --yes \
-  --model https://huggingface.co/bartowski/Meta-Llama-3.1-70B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-70B-Instruct-Q4_K_M.gguf
-
-# Avec symlink depuis Ollama
-./admin/oc engine setup turboquant --firewall --yes \
-  --model-from-ollama qwen3.5:35b-a3b
-```
-
-## Profils modele
-
-Les configs sont dans `configs/` :
-
-| Fichier | Modele | VRAM | Status |
-|---------|--------|------|--------|
-| `llama-70b-turbo3.conf` | Llama 3.1 70B Q4_K_M | ~42 Go | OK |
-| `qwen35-turbo3.conf` | Qwen 3.5 35B-A3B | ~30 Go | NON FONCTIONNEL (rope bug) |
-
-Pour changer de profil : editer `TURBOQUANT_CONFIG` dans le plist ou passer `--config <file>` au setup.
-
-## Gestion
+TurboQuant is **built from source** (the fork is not distributed via
+brew). Build it once, then let `aisctl` manage the daemon:
 
 ```bash
-./admin/oc engine status                   # Etat de tous les engines
-./admin/oc engine health turboquant        # Health check HTTP
-./admin/oc engine start turboquant         # Demarrer
-./admin/oc engine stop turboquant          # Arreter
-./admin/oc engine logs turboquant          # Logs stdout
-./admin/oc engine logs turboquant --err    # Logs stderr
+# 1. Build the fork (cmake + Metal required)
+git clone -b feature/turboquant-kv-cache \
+  https://github.com/TheTom/llama-cpp-turboquant.git
+cmake -B build -DGGML_METAL=ON && cmake --build build -j
+cp build/bin/llama-server /usr/local/bin/llama-server-turboquant
+
+# 2. Provision the LaunchDaemon (wrapper script + plist + optional pf anchor)
+aisctl install turboquant
 ```
 
-## Problemes connus
+The bundled `turboquant` manifest expects the binary at
+`/usr/local/bin/llama-server-turboquant` (a distinct name, so it never
+conflicts with a brew-installed llama.cpp). The install renders the
+multi-step wrapper from `wrapper-start.sh.tpl` — it raises
+`sysctl iogpu.wired_limit_mb` before starting the server, which models
+above ~50 GB of VRAM need.
 
-- **Qwen 3.5 MoE** : erreur `rope.dimension_sections` (attend 4, recoit 3). Le fork ne gere pas les architectures MoE.
-- **Template llama3** : produit du texte aleatoire. Utiliser `chatml` a la place.
-- **PATH Homebrew SSH** : `/opt/homebrew/bin` n'est pas dans le PATH SSH par defaut. Le setup utilise le chemin complet.
+## Management
 
-## Pre-requis systeme
+```bash
+aisctl status turboquant          # state (+ --deep for a generation probe)
+aisctl start turboquant
+aisctl stop turboquant
+aisctl restart turboquant
+aisctl uninstall turboquant
+```
 
-- macOS avec Apple Silicon (Metal obligatoire)
+Logs land in `~/Library/Logs/asiai/turboquant/`.
+
+## Model profiles
+
+Example profiles live in `configs/`:
+
+| File | Model | VRAM | Status |
+|------|-------|------|--------|
+| `llama-70b-turbo3.conf` | Llama 3.1 70B Q4_K_M | ~42 GB | OK |
+| `qwen35-turbo3.conf` | Qwen 3.5 35B-A3B | ~30 GB | NOT WORKING (rope bug) |
+
+## Known issues
+
+- **Qwen 3.5 MoE**: `rope.dimension_sections` error (expects 4, gets 3).
+  The fork does not handle MoE architectures on this branch.
+- **llama3 chat template**: produces garbled output. Use `chatml` instead.
+- **Homebrew PATH over SSH**: `/opt/homebrew/bin` is not in the default
+  SSH PATH; use full paths in remote commands.
+
+## Legacy scripts
+
+`setup.sh`, `uninstall.sh` and `engine.conf` in this directory are the
+original bash tooling this engine was ported from. They depend on a
+`lib-engine.sh` library that is **not** part of this repository and are
+kept for reference only — use the `aisctl` flow above.
+
+## System prerequisites
+
+- macOS on Apple Silicon (Metal required)
 - cmake (`brew install cmake`)
-- `sysctl iogpu.wired_limit_mb` pour les modeles > 50 Go VRAM
-- Suffisamment de RAM unifiee (64 Go recommande pour le 70B)
+- `sysctl iogpu.wired_limit_mb` for models above ~50 GB of VRAM
+  (handled by the wrapper)
+- Enough unified memory (64 GB recommended for the 70B)

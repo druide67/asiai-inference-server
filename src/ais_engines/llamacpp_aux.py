@@ -21,10 +21,11 @@ No Python code change is required: the CLI discovers the manifest by
 name and dispatches to this driver via the family pattern registered in
 ``ais_cli.commands``.
 
-The bundled package ships ``llamacpp-aux-1`` through ``llamacpp-aux-4``
-as a complete example stack on dedicated ports 8090-8093, paired with
+The bundled package ships ``llamacpp-aux-1`` through ``llamacpp-aux-5``
+as a complete example stack on dedicated ports 8090-8094, paired with
 example presets for representative model sizes (sub-1B title generation
-through a vision-enabled 7B). The example presets target an external
+through a vision-enabled 7B, plus a dedicated long-context slot). The
+example presets target an external
 orchestrator use case (see ``data/engine_manifests/presets/README.md``)
 and exist as starting points to copy or override, not as a fixed product
 configuration.
