@@ -20,10 +20,12 @@ import dataclasses
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from ais_core import bootstrap, firewall, install_state, lifecycle, memory, sudoers
@@ -779,3 +781,99 @@ def _bootstrap_rollback(*, dry_run: bool) -> int:
         "re-apply the helper model."
     )
     return 0
+
+
+# ---------------------------------------------------------------------------
+# bundle (SMAppService — Background Items panel identity)
+# ---------------------------------------------------------------------------
+
+
+def cmd_bundle_build(args: argparse.Namespace) -> int:
+    """``aisctl bundle build`` — produce <App>.app from the engine manifests."""
+    from ais_core import __version__ as core_version
+    from ais_core import bundle
+
+    launcher = args.launcher or shutil.which("asiai-launch")
+    if not launcher:
+        print(
+            "asiai-launch not found on PATH; install asiai-inference-server or pass --launcher",
+            file=sys.stderr,
+        )
+        return 2
+    spec = bundle.BundleSpec(
+        services=tuple(s.strip() for s in args.services.split(",") if s.strip()),
+        user=args.user or os.environ.get("USER") or "root",
+        launcher_path=launcher,
+        bundle_id=args.bundle_id,
+        app_name=args.app_name,
+        display_name=args.display_name,
+        version=core_version,
+    )
+    try:
+        result = bundle.build_bundle(spec, Path(args.output).expanduser(), sign_identity=args.sign)
+    except bundle.BundleError as e:
+        print(f"bundle build failed: {e}", file=sys.stderr)
+        return 2
+    if not args.sign:
+        result["hint"] = (
+            "unsigned bundle: functional, but macOS 26+ shows the generic icon "
+            "in Background Items unless signed with a locally-trusted "
+            "code-signing identity (--sign)"
+        )
+    _emit(result, as_json=args.json)
+    return 0
+
+
+def cmd_bundle_activate(args: argparse.Namespace) -> int:
+    """``aisctl bundle activate <engine>`` — publish the active manifest.
+
+    This is what ``asiai-launch`` reads at daemon start. Defaults to the
+    preset recorded at install time, so a bundle-launched engine keeps the
+    exact tuning of its last install.
+    """
+    from ais_core import bundle
+
+    try:
+        result = bundle.write_active_manifest(args.engine, preset=getattr(args, "preset", None))
+    except (bundle.BundleError, FileNotFoundError) as e:
+        print(f"activate failed: {e}", file=sys.stderr)
+        return 2
+    _emit(result, as_json=args.json)
+    return 0
+
+
+def cmd_bundle_ctl(args: argparse.Namespace) -> int:
+    """register / unregister / status — thin wrapper over <App>Register.
+
+    The Swift helper inside the bundle owns the SMAppService calls; this
+    wrapper just locates it and forwards the action. On register, warns if a
+    legacy /Library/LaunchDaemons plist still exists for a selected service
+    (same label registered twice confuses launchd — uninstall first).
+    """
+    app = Path(args.app).expanduser()
+    register_bin = app / "Contents" / "MacOS" / f"{app.stem}Register"
+    if not register_bin.is_file():
+        print(f"register helper not found: {register_bin}", file=sys.stderr)
+        return 2
+
+    if args.action == "register":
+        targets = [args.service] if args.service and args.service != "all" else None
+        for name in targets or list_manifests():
+            try:
+                m = load_manifest(name)
+            except Exception:
+                continue
+            legacy = Path(f"/Library/LaunchDaemons/{m.plist.name}.plist")
+            if legacy.exists():
+                print(
+                    f"warning: legacy plist {legacy} still installed; "
+                    f"run 'aisctl uninstall {name}' before registering the bundle "
+                    "(same label loaded twice)",
+                    file=sys.stderr,
+                )
+
+    argv = [str(register_bin), args.action]
+    if args.service:
+        argv.append(args.service)
+    proc = subprocess.run(argv, check=False)
+    return proc.returncode
