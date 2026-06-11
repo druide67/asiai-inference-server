@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import dataclasses
 import fcntl
+import logging
 import os
 import re
 import subprocess
@@ -46,6 +47,8 @@ from pathlib import Path
 
 from ais_core import lifecycle, plist
 from ais_core.manifest import EngineManifest, list_manifests, load_manifest
+
+logger = logging.getLogger(__name__)
 
 OPERATIONS_LOCK_PATH = Path.home() / ".local" / "share" / "asiai" / "operations.lock"
 LAUNCH_DAEMONS_DIR = Path("/Library/LaunchDaemons")
@@ -242,12 +245,17 @@ def unload_via_restart(manifest: EngineManifest) -> UnloadStep:
             success=True,
             detail=f"restarted {manifest.plist.name}",
         )
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, lifecycle.LifecycleError) as e:
+        detail = (
+            f"launchctl returned {e.returncode}"
+            if isinstance(e, subprocess.CalledProcessError)
+            else str(e)
+        )
         return UnloadStep(
             engine=manifest.name,
             method="restart",
             success=False,
-            detail=f"launchctl returned {e.returncode}",
+            detail=detail,
         )
 
 
@@ -340,23 +348,46 @@ def repair(*, dry_run: bool = False) -> RepairReport:
     """
     stale_cleared = False
     if OPERATIONS_LOCK_PATH.exists():
-        holder_text = OPERATIONS_LOCK_PATH.read_text().strip()
+        # Take the flock non-blocking first: a holder that acquired the lock
+        # but hasn't written its PID yet would otherwise look stale (empty
+        # file) and get deleted under it. If the flock fails, someone holds
+        # it — alive by definition, content irrelevant.
         try:
-            holder = int(holder_text)
-            os.kill(holder, 0)  # signal 0 = "is the process alive?"
-        except (ValueError, ProcessLookupError):
-            if dry_run:
-                print(f"[dry-run] would remove stale lock {OPERATIONS_LOCK_PATH}")
-            else:
-                OPERATIONS_LOCK_PATH.unlink()
-            stale_cleared = True
-        except PermissionError:
-            # PID exists, just owned by another user — leave it alone.
-            pass
+            probe_fd = os.open(OPERATIONS_LOCK_PATH, os.O_RDONLY)
+        except FileNotFoundError:
+            probe_fd = None  # released between exists() and open() — nothing to clean
+        if probe_fd is not None:
+            try:
+                try:
+                    fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    pass  # live holder — leave the lock alone
+                else:
+                    holder_text = OPERATIONS_LOCK_PATH.read_text().strip()
+                    try:
+                        holder = int(holder_text)
+                        os.kill(holder, 0)  # signal 0 = "is the process alive?"
+                    except (ValueError, ProcessLookupError):
+                        if dry_run:
+                            print(f"[dry-run] would remove stale lock {OPERATIONS_LOCK_PATH}")
+                        else:
+                            OPERATIONS_LOCK_PATH.unlink()
+                        stale_cleared = True
+                    except PermissionError:
+                        # PID exists, just owned by another user — leave it alone.
+                        pass
+            except FileNotFoundError:
+                pass  # unlinked by the holder while we probed
+            finally:
+                os.close(probe_fd)
 
     known_plist_names = set()
     for name in list_manifests():
-        m = load_manifest(name)
+        try:
+            m = load_manifest(name)
+        except Exception as e:  # one bad user TOML must not kill repair
+            logger.warning("repair: skipping unreadable manifest %s: %s", name, e)
+            continue
         known_plist_names.add(Path(plist.plist_path(m)).name)
 
     orphans: list[str] = []

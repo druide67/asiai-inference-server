@@ -518,6 +518,36 @@ def test_unload_failure_returns_nonzero() -> None:
     assert rc == 2
 
 
+def test_family_factory_uses_manifest_when_given() -> None:
+    """`aisctl unload llamacpp-aux-N` used to crash in FileNotFoundError:
+    the family factory bound the manifest positional to its *name*
+    parameter. The factory must honor the standard contract."""
+    m = load_manifest("llamacpp-aux-1")
+    driver = commands._driver_for(m)
+    assert driver.manifest is m
+
+
+def test_start_dry_run_does_not_touch_launchctl(capsys: pytest.CaptureFixture[str]) -> None:
+    with patch("ais_core.lifecycle.subprocess.run") as mock_run:
+        rc = main(["start", "ollama", "--dry-run", "--json"])
+    mock_run.assert_not_called()
+    assert rc == 0
+    out = capsys.readouterr().out  # "[dry-run] would start ..." line, then the JSON
+    assert json.loads(out[out.index("{") :])["dry_run"] is True
+
+
+def test_restart_dry_run_does_not_touch_launchctl(capsys: pytest.CaptureFixture[str]) -> None:
+    with (
+        patch("ais_core.lifecycle.subprocess.run") as mock_run,
+        patch("ais_cli.commands.memory.OperationsLock"),
+    ):
+        rc = main(["restart", "ollama", "--dry-run", "--json"])
+    mock_run.assert_not_called()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert json.loads(out[out.index("{") :])["dry_run"] is True
+
+
 # ---------------------------------------------------------------------------
 # purge / repair
 # ---------------------------------------------------------------------------

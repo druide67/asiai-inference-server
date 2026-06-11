@@ -206,10 +206,20 @@ def _atomic_write_pf_conf(new_text: str) -> None:
 
 
 def _reload_pf() -> None:
-    """Reload pf rules. Best-effort: pf may already be enabled."""
-    subprocess.run(
+    """Reload pf rules, then make sure pf is enabled.
+
+    The ruleset load must NOT be best-effort: a silent failure here means
+    install_anchor reports success while nothing was actually loaded.
+    Only ``pfctl -e`` stays best-effort (it fails when pf is already on).
+    """
+    proc = subprocess.run(
         ["sudo", "/sbin/pfctl", "-f", PF_CONF_PATH],
         check=False,
         capture_output=True,
+        text=True,
     )
+    if proc.returncode != 0:
+        raise FirewallError(
+            f"pfctl -f {PF_CONF_PATH} failed: {proc.stderr.strip() or proc.stdout.strip()}"
+        )
     subprocess.run(["sudo", "/sbin/pfctl", "-e"], check=False, capture_output=True)

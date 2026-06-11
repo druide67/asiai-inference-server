@@ -208,9 +208,12 @@ def test_stop_calls_stop_then_unload_then_pkill_only_if_alive() -> None:
     ):
         lifecycle.stop(m)
 
-    unload_prefix = ["sudo", "/bin/launchctl", "unload", "-w"]
+    unload_prefix = ["sudo", "/bin/launchctl", "unload"]
     idx_stop = calls.index(["sudo", "/bin/launchctl", "stop", "com.asiai.ollama"])
-    idx_unload = next(i for i, c in enumerate(calls) if c[:4] == unload_prefix)
+    idx_unload = next(i for i, c in enumerate(calls) if c[:3] == unload_prefix)
+    # No -w on stop's unload: that flag writes the durable disabled
+    # override, which is disable()'s contract, not stop's.
+    assert "-w" not in calls[idx_unload]
     idx_pgrep = next(i for i, c in enumerate(calls) if c[0] == "pgrep")
     idx_pkill = next(i for i, c in enumerate(calls) if c[0] == "pkill")
     assert idx_stop < idx_unload < idx_pgrep < idx_pkill

@@ -104,10 +104,13 @@ class TestBuildArgv:
         with pytest.raises(ValueError, match="unknown command"):
             serve._build_argv("drop_db", {})
 
-    def test_upgrade_uses_whitelisted_formula(self):
+    def test_upgrade_routes_through_aisctl(self):
+        # Routed via `aisctl upgrade` so the OperationsLock + JSON envelope
+        # apply (a direct brew argv used to skip both).
         argv = serve._build_argv("upgrade", {"engine": "ollama"})
-        # brew upgrade ollama
-        assert argv[-2:] == ["upgrade", "ollama"]
+        assert argv[0].endswith("aisctl")
+        assert argv[1:3] == ["upgrade", "ollama"]
+        assert "--json" in argv
 
     def test_upgrade_rejects_unknown_engine(self):
         with pytest.raises(ValueError, match="not whitelisted"):

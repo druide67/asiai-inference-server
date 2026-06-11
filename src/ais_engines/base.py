@@ -107,6 +107,9 @@ class UnloadOutcome:
     engine: str
     model: str | None
     method: str  # "api" | "restart" | "error"
+    # For method="restart", success means the daemon bounce was issued —
+    # NOT that the engine came back healthy (no health wait here; callers
+    # that need certainty run `aisctl status --deep` or wait_for_health).
     success: bool
     detail: str = ""
 

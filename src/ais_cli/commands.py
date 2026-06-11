@@ -88,7 +88,9 @@ def get_driver_factory(name: str) -> Callable[[], Any]:
         return snapshot
     for pattern, driver_cls in _FAMILY_PATTERNS:
         if pattern.match(name):
-            return lambda n=name, cls=driver_cls: cls.from_manifest_name(n)
+            return lambda manifest=None, n=name, cls=driver_cls: (
+                cls.from_manifest(manifest) if manifest is not None else cls.from_manifest_name(n)
+            )
     raise KeyError(name)
 
 
@@ -128,7 +130,15 @@ def _build_driver_factories() -> dict[str, Callable[[], Any]]:
             continue
         for pattern, driver_cls in _FAMILY_PATTERNS:
             if pattern.match(n):
-                factories[n] = lambda name=n, cls=driver_cls: cls.from_manifest_name(name)
+                # Same contract as the static factories: an optional manifest
+                # positional. Binding it to a keyword-only-by-convention slot
+                # used to swallow the manifest into the *name* parameter and
+                # crash from_manifest_name with a FileNotFoundError.
+                factories[n] = lambda manifest=None, name=n, cls=driver_cls: (
+                    cls.from_manifest(manifest)
+                    if manifest is not None
+                    else cls.from_manifest_name(name)
+                )
                 break
     return factories
 
@@ -174,12 +184,9 @@ def _driver_for(manifest: EngineManifest):
         factory = get_driver_factory(manifest.name)
     except KeyError as e:
         raise SystemExit(f"no driver registered for engine {manifest.name!r}") from e
-    # The static-registry factories accept an optional manifest argument;
-    # the family-pattern factories ignore it (they re-load by name).
-    # Calling with the manifest passes through cleanly in both shapes:
-    # the static ones use it, the family ones drop it silently. This
-    # keeps the call site uniform and lets tests inject a fake factory
-    # that asserts on the manifest if they want to.
+    # Every factory (static registry and family dispatch) accepts an
+    # optional manifest positional and uses it when given. The TypeError
+    # fallback keeps zero-arg fakes injected by tests working.
     try:
         return factory(manifest)
     except TypeError:
@@ -362,7 +369,11 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 def cmd_start(args: argparse.Namespace) -> int:
     m = _resolve_manifest(args.engine)
-    lifecycle.start(m)
+    dry_run = getattr(args, "dry_run", False)
+    lifecycle.start(m, dry_run=dry_run)
+    if dry_run:
+        _emit({"engine": m.name, "started": False, "dry_run": True}, as_json=args.json)
+        return 0
     healthy = lifecycle.wait_for_health(m, timeout=m.network.health_timeout)
     payload = {"engine": m.name, "started": True, "healthy": healthy}
     _emit(payload, as_json=args.json)
@@ -379,8 +390,12 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 def cmd_restart(args: argparse.Namespace) -> int:
     m = _resolve_manifest(args.engine)
+    dry_run = getattr(args, "dry_run", False)
     with memory.OperationsLock(force=args.force):
-        lifecycle.restart(m)
+        lifecycle.restart(m, dry_run=dry_run)
+    if dry_run:
+        _emit({"engine": m.name, "restarted": False, "dry_run": True}, as_json=args.json)
+        return 0
     healthy = lifecycle.wait_for_health(m, timeout=m.network.health_timeout)
     _emit(
         {"engine": m.name, "restarted": True, "healthy": healthy},
