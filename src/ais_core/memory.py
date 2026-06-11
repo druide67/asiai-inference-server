@@ -29,9 +29,9 @@ considered overkill at this stage.
 Repair mode
 -----------
 ``--force-repair`` (Gemini Q5) cleans up residue from a crashed daemon:
-stale operations lock files (PID dead), orphan
+stale operations lock files (PID dead) and orphan
 ``/Library/LaunchDaemons/com.asiai.*.plist`` not registered in any known
-manifest, and stuck pgrep matches that ``stop`` couldn't kill.
+manifest.
 """
 
 from __future__ import annotations
@@ -198,7 +198,13 @@ def purge_memory(*, dry_run: bool = False) -> PurgeReport:
     if dry_run:
         print("[dry-run] sudo /usr/sbin/purge")
     else:
-        subprocess.run(["sudo", "/usr/sbin/purge"], check=True, timeout=30)
+        try:
+            subprocess.run(["sudo", "/usr/sbin/purge"], check=True, timeout=30)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            raise MemoryError_(
+                f"sudo purge failed: {e} — check the sudoers fragment "
+                "(aisctl bootstrap --install-sudoers) and system load"
+            ) from e
 
     after = vm_stat_parse()
     return PurgeReport(

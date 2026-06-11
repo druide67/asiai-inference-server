@@ -178,6 +178,13 @@ def _read_pf_conf() -> str:
 
 def _ensure_anchor_in_pf_conf(name: str) -> None:
     """Append ``anchor "<name>" all`` to /etc/pf.conf if not already present."""
+    if not Path(PF_CONF_PATH).exists():
+        # A macOS host always ships /etc/pf.conf. Recreating it from scratch
+        # would replace the system ruleset with our single anchor line.
+        raise FirewallError(
+            f"{PF_CONF_PATH} is missing — host in unexpected state, refusing "
+            "to create it from scratch"
+        )
     text = _read_pf_conf()
     expected = f'anchor "{name}" all'
     if any(line.strip() == expected for line in text.splitlines()):

@@ -16,7 +16,7 @@ Bundled defaults + user overrides
 ---------------------------------
 Manifests describe the engine itself (Ollama is Ollama everywhere), so the
 baseline ships with the package. Users who want to add their own engine
-instances (e.g. ``llamacpp-aux-5`` for a fifth auxiliary slot) or override
+instances (e.g. ``llamacpp-aux-6`` for a sixth auxiliary slot) or override
 the bundled tuning of a preset drop their TOML into the XDG user config
 directory:
 
@@ -130,7 +130,9 @@ class NetworkSpec:
 
     @property
     def health_url(self) -> str:
-        host = self.bind or "127.0.0.1"
+        # Like gen_url, the probe runs on the host itself: a 0.0.0.0 bind
+        # answers on loopback, and 0.0.0.0 is not a connectable address.
+        host = "127.0.0.1" if self.bind in ("", "0.0.0.0") else self.bind
         return f"http://{host}:{self.port}{self.health_endpoint}"
 
     @property
@@ -483,6 +485,10 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
         )
     except KeyError as e:
         raise ManifestError(f"{source}: missing required key {e}") from e
+    except (TypeError, ValueError) as e:
+        if isinstance(e, ManifestError):
+            raise
+        raise ManifestError(f"{source}: invalid field value ({e})") from e
 
     _validate(manifest, source=source)
     return manifest

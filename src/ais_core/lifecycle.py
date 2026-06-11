@@ -95,6 +95,14 @@ def install(
     where the engine isn't installed yet). A placeholder path is recorded
     in the dict so the caller still sees the resolved candidate slot.
     """
+    # Check every precondition before touching the system: install_anchor
+    # would reject an unsupported firewall anyway, but only after the
+    # existing daemon was stopped and the plist rewritten.
+    if enable_firewall and not manifest.firewall.supported:
+        raise firewall.FirewallError(
+            f"{manifest.name}: firewall.supported=false — refusing to install anchor"
+        )
+
     if binary_path is None:
         resolved = manifest.binary.resolve()
         if resolved is None:
