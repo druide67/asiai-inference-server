@@ -111,7 +111,7 @@ class TestBuildArgv:
             port=8090,
         )
         mdir, _ = _write_manifest(tmp_path, "aux1", body)
-        argv = resolve_launch("aux1", manifest_dir=mdir)
+        argv, _env = resolve_launch("aux1", manifest_dir=mdir)
         assert argv == [
             binary,
             "--flash-attn",
@@ -131,16 +131,32 @@ class TestBuildArgv:
     def test_empty_bind_omits_host_port(self, tmp_path):
         binary = _make_bin(tmp_path, "llama-server")
         mdir, _ = _write_manifest(tmp_path, "aux1", _manifest_toml(binary_path=binary, bind=""))
-        argv = resolve_launch("aux1", manifest_dir=mdir)
+        argv, _env = resolve_launch("aux1", manifest_dir=mdir)
         assert "--host" not in argv and "--port" not in argv
 
     def test_template_included(self, tmp_path):
         binary = _make_bin(tmp_path, "llama-server")
         body = _manifest_toml(binary_path=binary, template_path="/t/active.jinja")
         mdir, _ = _write_manifest(tmp_path, "aux1", body)
-        argv = resolve_launch("aux1", manifest_dir=mdir)
+        argv, _env = resolve_launch("aux1", manifest_dir=mdir)
         assert "--chat-template-file" in argv
         assert argv[argv.index("--chat-template-file") + 1] == "/t/active.jinja"
+
+
+class TestBuildEnv:
+    def test_manifest_env_vars_applied_over_inherited(self, tmp_path, monkeypatch):
+        """[environment] vars are applied at exec time — the sealed bundle plist
+        cannot carry per-machine tuning env, the launcher must."""
+        monkeypatch.setenv("INHERITED", "yes")
+        monkeypatch.setenv("TURBO_KV", "stale")
+        binary = _make_bin(tmp_path, "llama-server")
+        body = _manifest_toml(binary_path=binary)
+        body += '\n[environment]\nvars = ["TURBO_KV=turbo2", "GGML_METAL=1"]\n'
+        mdir, _ = _write_manifest(tmp_path, "aux1", body)
+        _argv, env = resolve_launch("aux1", manifest_dir=mdir)
+        assert env["INHERITED"] == "yes"  # inherited env preserved
+        assert env["TURBO_KV"] == "turbo2"  # manifest overrides inherited
+        assert env["GGML_METAL"] == "1"
 
 
 # --- allowlist (binary path never trusted from the manifest) ------------------
@@ -150,7 +166,7 @@ class TestBinaryAllowlist:
     def test_allowlisted_binary_ok(self, tmp_path):
         binary = _make_bin(tmp_path, "llama-server-turboquant")
         mdir, _ = _write_manifest(tmp_path, "aux5", _manifest_toml(binary_path=binary))
-        argv = resolve_launch("aux5", manifest_dir=mdir)
+        argv, _env = resolve_launch("aux5", manifest_dir=mdir)
         assert argv[0] == binary
 
     def test_non_allowlisted_binary_rejected(self, tmp_path):
@@ -197,7 +213,7 @@ class TestManifestPerms:
         binary = _make_bin(tmp_path, "llama-server")
         mdir, path = _write_manifest(tmp_path, "aux1", _manifest_toml(binary_path=binary))
         os.chmod(path, 0o600)
-        argv = resolve_launch("aux1", manifest_dir=mdir)  # no raise
+        argv, _env = resolve_launch("aux1", manifest_dir=mdir)  # no raise
         assert argv[0] == binary
 
 
@@ -233,18 +249,19 @@ class TestMain:
         assert launch.main(["asiai-launch", "aux1"]) == 1
 
     def test_execs_resolved_command(self, monkeypatch):
-        monkeypatch.setattr(launch, "resolve_launch", lambda _s: ["/bin/echo", "hi"])
+        monkeypatch.setattr(launch, "resolve_launch", lambda _s: (["/bin/echo", "hi"], {"X": "1"}))
         recorded = {}
 
-        def fake_execv(path, args):
+        def fake_execve(path, args, env):
             recorded["path"] = path
             recorded["args"] = args
-            # real execv replaces the process; the fake returns so we can assert
+            recorded["env"] = env
+            # real execve replaces the process; the fake returns so we can assert
 
-        monkeypatch.setattr(os, "execv", fake_execv)
+        monkeypatch.setattr(os, "execve", fake_execve)
         rc = launch.main(["asiai-launch", "aux1"])
-        assert recorded == {"path": "/bin/echo", "args": ["/bin/echo", "hi"]}
-        assert rc == 127  # only reached because the fake execv returned
+        assert recorded == {"path": "/bin/echo", "args": ["/bin/echo", "hi"], "env": {"X": "1"}}
+        assert rc == 127  # only reached because the fake execve returned
 
 
 def test_assert_safe_manifest_perms_on_missing_file(tmp_path):

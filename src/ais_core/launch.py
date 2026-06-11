@@ -137,6 +137,21 @@ def build_argv(manifest: EngineManifest) -> list[str]:
     return argv
 
 
+def build_env(manifest: EngineManifest) -> dict[str, str]:
+    """Process environment for the engine: inherited env + manifest [environment] vars.
+
+    The embedded SMAppService plist is sealed inside a signed bundle, so it can
+    only carry static env (HOME/PATH). Per-machine tuning env lives in the
+    active manifest and is applied here at exec time — mirroring what
+    :func:`ais_core.plist.build_plist_dict` does on the legacy plist path.
+    """
+    env = dict(os.environ)
+    for entry in manifest.env_vars:
+        key, _, value = entry.partition("=")
+        env[key] = value
+    return env
+
+
 def load_active_manifest(path: Path) -> EngineManifest:
     """Perms-check then parse a per-service active manifest into an EngineManifest."""
     assert_safe_manifest_perms(path)
@@ -145,12 +160,15 @@ def load_active_manifest(path: Path) -> EngineManifest:
     return _from_dict(raw, source=str(path))
 
 
-def resolve_launch(service: str, *, manifest_dir: Path | None = None) -> list[str]:
-    """Full pipeline: validate service name → load active manifest → build argv."""
+def resolve_launch(
+    service: str, *, manifest_dir: Path | None = None
+) -> tuple[list[str], dict[str, str]]:
+    """Full pipeline: validate service name → load active manifest → (argv, env)."""
     if not service or "/" in service or service.startswith("."):
         raise LaunchSecurityError(f"invalid service name {service!r}")
     base = manifest_dir if manifest_dir is not None else _active_manifest_dir()
-    return build_argv(load_active_manifest(base / f"{service}.toml"))
+    manifest = load_active_manifest(base / f"{service}.toml")
+    return build_argv(manifest), build_env(manifest)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -160,12 +178,12 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: asiai-launch <service>", file=sys.stderr)
         return 2
     try:
-        cmd = resolve_launch(argv[1])
+        cmd, env = resolve_launch(argv[1])
     except LaunchError as exc:
         print(f"asiai-launch: {exc}", file=sys.stderr)
         return 1
-    os.execv(cmd[0], cmd)  # on success this never returns
-    return 127  # pragma: no cover — only reached if execv itself fails
+    os.execve(cmd[0], cmd, env)  # on success this never returns
+    return 127  # pragma: no cover — only reached if execve itself fails
 
 
 if __name__ == "__main__":  # pragma: no cover
