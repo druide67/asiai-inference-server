@@ -73,6 +73,10 @@ def build_anchor_content(
         f"pass in quick inet proto tcp from {{ {subnet_list} }} "
         f"to any port {port} flags S/SA keep state\n"
         f"block in quick inet proto tcp to any port {port}\n"
+        # No private-v6 allowlist is configured, so everything that is not
+        # loopback (lo0 passes above) is blocked — an inet-only block left
+        # the port wide open to any IPv6 peer on the LAN.
+        f"block in quick inet6 proto tcp to any port {port}\n"
     )
 
 
@@ -154,13 +158,16 @@ def remove_anchor(manifest: EngineManifest, *, dry_run: bool = False) -> bool:
         changed = True
 
     pf_conf_text = _read_pf_conf()
-    line_re = re.compile(rf'^anchor\s+"{re.escape(name)}"\s+all\s*$', re.MULTILINE)
+    line_re = re.compile(
+        rf'^(?:anchor\s+"{re.escape(name)}"\s+all|load\s+anchor\s+"{re.escape(name)}"\s+from\s+"[^"]*")\s*$',
+        re.MULTILINE,
+    )
     if line_re.search(pf_conf_text):
         new_text = line_re.sub("", pf_conf_text)
-        # Collapse the blank line that the substitution leaves behind.
+        # Collapse the blank lines the substitutions leave behind.
         new_text = re.sub(r"\n{3,}", "\n\n", new_text)
         if dry_run:
-            print(f"[dry-run] would rewrite {PF_CONF_PATH} (1 anchor line removed)")
+            print(f"[dry-run] would rewrite {PF_CONF_PATH} (anchor + load lines removed)")
         else:
             _atomic_write_pf_conf(new_text)
             _reload_pf()
@@ -176,8 +183,22 @@ def _read_pf_conf() -> str:
         return ""
 
 
+def _anchor_conf_lines(name: str) -> tuple[str, str]:
+    """The pf.conf line PAIR that makes an anchor effective.
+
+    The ``anchor`` line alone only DECLARES an attachment point — without
+    the ``load anchor`` directive the rules file is never read and the
+    firewall silently enforces nothing (the original bash had the same
+    bug, inherited by the port and caught by the 2026-06-11 audit).
+    """
+    return (
+        f'anchor "{name}" all',
+        f'load anchor "{name}" from "{PF_ANCHORS_DIR}/{name}"',
+    )
+
+
 def _ensure_anchor_in_pf_conf(name: str) -> None:
-    """Append ``anchor "<name>" all`` to /etc/pf.conf if not already present."""
+    """Ensure both the anchor declaration and its load directive are in pf.conf."""
     if not Path(PF_CONF_PATH).exists():
         # A macOS host always ships /etc/pf.conf. Recreating it from scratch
         # would replace the system ruleset with our single anchor line.
@@ -186,10 +207,11 @@ def _ensure_anchor_in_pf_conf(name: str) -> None:
             "to create it from scratch"
         )
     text = _read_pf_conf()
-    expected = f'anchor "{name}" all'
-    if any(line.strip() == expected for line in text.splitlines()):
+    stripped = {line.strip() for line in text.splitlines()}
+    missing = [line for line in _anchor_conf_lines(name) if line not in stripped]
+    if not missing:
         return
-    new_text = text.rstrip() + f"\n{expected}\n"
+    new_text = text.rstrip() + "\n" + "\n".join(missing) + "\n"
     _atomic_write_pf_conf(new_text)
 
 
