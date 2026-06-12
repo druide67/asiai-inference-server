@@ -423,11 +423,36 @@ def load_manifest(name: str, preset: str | None = None) -> EngineManifest:
         raw = tomllib.load(f)
 
     manifest = _from_dict(raw, source=str(path))
-    if preset is not None and manifest.name != name:
-        raise ManifestError(
-            f"{path}: preset declares engine {manifest.name!r} but was requested for {name!r}; "
-            "preset .name field must match the engine baseline name."
-        )
+    if preset is not None:
+        if manifest.name != name:
+            raise ManifestError(
+                f"{path}: preset declares engine {manifest.name!r} but was requested for "
+                f"{name!r}; preset .name field must match the engine baseline name."
+            )
+        # The plist label and pf anchor are the supervision IDENTITY: install
+        # writes them from the preset, but stop/uninstall/status resolve the
+        # baseline. If a preset drifts them, the service is installed under one
+        # label and torn down under another — an orphan daemon. Pin both to the
+        # baseline. (The port is NOT pinned: a user preset legitimately runs an
+        # engine on a different port, and teardown keys on label + anchor.)
+        baseline_path = _find_manifest_path(name)
+        if baseline_path is not None:
+            with baseline_path.open("rb") as f:
+                baseline = _from_dict(tomllib.load(f), source=str(baseline_path))
+            for field, got, want in (
+                ("plist.name", manifest.plist.name, baseline.plist.name),
+                (
+                    "firewall.anchor_name",
+                    manifest.firewall.anchor_name,
+                    baseline.firewall.anchor_name,
+                ),
+            ):
+                if got != want:
+                    raise ManifestError(
+                        f"{path}: preset {field}={got!r} differs from the {name!r} baseline "
+                        f"({want!r}); a preset may tune behaviour but not the supervision "
+                        "identity (label / anchor), or install and uninstall desync."
+                    )
     return manifest
 
 
