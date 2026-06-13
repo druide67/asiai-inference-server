@@ -28,9 +28,13 @@ import dataclasses
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+# Same charset as the engine segment of com.asiai.<engine> plist labels.
+_ENGINE_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,10 @@ def _state_dir() -> Path:
 
 
 def _record_path(engine: str) -> Path:
+    # Engine names follow the com.asiai.<engine> label charset; rejecting
+    # anything else keeps path traversal out of the state tree.
+    if not _ENGINE_NAME_RE.match(engine):
+        raise ValueError(f"invalid engine name {engine!r}")
     return _state_dir() / "installs" / f"{engine}.json"
 
 

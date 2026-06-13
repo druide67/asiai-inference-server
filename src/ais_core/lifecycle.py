@@ -95,6 +95,14 @@ def install(
     where the engine isn't installed yet). A placeholder path is recorded
     in the dict so the caller still sees the resolved candidate slot.
     """
+    # Check every precondition before touching the system: install_anchor
+    # would reject an unsupported firewall anyway, but only after the
+    # existing daemon was stopped and the plist rewritten.
+    if enable_firewall and not manifest.firewall.supported:
+        raise firewall.FirewallError(
+            f"{manifest.name}: firewall.supported=false — refusing to install anchor"
+        )
+
     if binary_path is None:
         resolved = manifest.binary.resolve()
         if resolved is None:
@@ -172,16 +180,27 @@ def uninstall(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def start(manifest: EngineManifest) -> None:
+def start(manifest: EngineManifest, *, dry_run: bool = False) -> None:
     """Load the LaunchDaemon. ``-w`` overrides any prior 'disabled' state."""
-    subprocess.run(
-        ["sudo", "/bin/launchctl", "load", "-w", plist.plist_path(manifest)],
-        check=True,
-    )
+    if dry_run:
+        print(f"[dry-run] would start {manifest.plist.name}")
+        return
+    try:
+        subprocess.run(
+            ["sudo", "/bin/launchctl", "load", "-w", plist.plist_path(manifest)],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise LifecycleError(f"{manifest.name}: launchctl load failed: {e}") from e
 
 
 def stop(manifest: EngineManifest, *, dry_run: bool = False) -> None:
-    """Stop the daemon, unload it, kill any straggler process."""
+    """Stop the daemon, unload it, kill any straggler process.
+
+    The unload deliberately has no ``-w``: that flag writes the durable
+    disabled override, which is ``disable()``'s job. ``stop`` is the
+    temporary state — the engine rejoins the boot sequence via RunAtLoad.
+    """
     if dry_run:
         print(f"[dry-run] would stop {manifest.plist.name}")
         return
@@ -192,7 +211,7 @@ def stop(manifest: EngineManifest, *, dry_run: bool = False) -> None:
         capture_output=True,
     )
     subprocess.run(
-        ["sudo", "/bin/launchctl", "unload", "-w", plist.plist_path(manifest)],
+        ["sudo", "/bin/launchctl", "unload", plist.plist_path(manifest)],
         check=False,
         capture_output=True,
     )
@@ -205,8 +224,11 @@ def stop(manifest: EngineManifest, *, dry_run: bool = False) -> None:
         time.sleep(2)
 
 
-def restart(manifest: EngineManifest) -> None:
+def restart(manifest: EngineManifest, *, dry_run: bool = False) -> None:
     """Stop then start. Health check is the caller's responsibility."""
+    if dry_run:
+        print(f"[dry-run] would restart {manifest.plist.name}")
+        return
     stop(manifest)
     start(manifest)
 
@@ -228,10 +250,13 @@ def disable(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
         print(f"[dry-run] would disable {manifest.plist.name}")
         return {"engine": manifest.name, "disabled": True, "dry_run": True}
 
-    subprocess.run(
-        ["sudo", "/bin/launchctl", "disable", f"system/{manifest.plist.name}"],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["sudo", "/bin/launchctl", "disable", f"system/{manifest.plist.name}"],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise LifecycleError(f"{manifest.name}: launchctl disable failed: {e}") from e
     stop(manifest)
     return {"engine": manifest.name, "disabled": True, "dry_run": False}
 
@@ -251,10 +276,13 @@ def enable(manifest: EngineManifest, *, start_now: bool = False, dry_run: bool =
             "dry_run": True,
         }
 
-    subprocess.run(
-        ["sudo", "/bin/launchctl", "enable", f"system/{manifest.plist.name}"],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ["sudo", "/bin/launchctl", "enable", f"system/{manifest.plist.name}"],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise LifecycleError(f"{manifest.name}: launchctl enable failed: {e}") from e
     if start_now:
         start(manifest)
     return {"engine": manifest.name, "enabled": True, "started": start_now, "dry_run": False}

@@ -102,8 +102,13 @@ def test_upgrade_brew_failure_returns_2(capsys):
 
 
 def test_serve_upgrade_uses_shared_whitelist():
-    # The loopback command server must build the same argv as the native CLI.
+    # The loopback command server validates against the same whitelist as
+    # the native CLI (400 before any subprocess), then routes through
+    # `aisctl upgrade` so the OperationsLock + JSON envelope apply.
     from ais_cli.serve import _build_argv
 
     argv = _build_argv("upgrade", {"engine": "llamacpp"})
-    assert argv == upgrade_argv("llamacpp")
+    assert argv[0].endswith("aisctl")
+    assert argv[1:3] == ["upgrade", "llamacpp"]
+    with pytest.raises(ValueError, match="not whitelisted"):
+        _build_argv("upgrade", {"engine": "evil-engine"})

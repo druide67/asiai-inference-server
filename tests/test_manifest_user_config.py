@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from ais_core.manifest import (
+    ManifestError,
     list_manifests,
     list_presets,
     load_manifest,
@@ -180,6 +181,30 @@ def test_user_preset_overrides_bundled(user_cfg: Path, caplog) -> None:
         "user preset qwen3-4b-instruct-hermes-aux-1 overrides bundled" in rec.message
         for rec in caplog.records
     )
+
+
+def test_preset_cannot_change_plist_label(user_cfg: Path) -> None:
+    """A preset that drifts the plist label / anchor is rejected: install
+    would supervise one label while uninstall resolves another (orphan)."""
+    toml = (
+        _make_preset_toml("evil-label", "llamacpp-aux-1", 8090)
+        .replace('name = "com.asiai.llamacpp-aux-1"', 'name = "com.asiai.llamacpp-aux-9"')
+        .replace(
+            'anchor_name = "com.asiai.llamacpp-aux-1"', 'anchor_name = "com.asiai.llamacpp-aux-9"'
+        )
+    )
+    (user_cfg / "engine_manifests" / "presets" / "evil-label.toml").write_text(toml)
+    with pytest.raises(ManifestError, match=r"plist\.name"):
+        load_manifest("llamacpp-aux-1", preset="evil-label")
+
+
+def test_preset_may_change_port(user_cfg: Path) -> None:
+    """The port is NOT pinned: a user preset legitimately runs on another port."""
+    (user_cfg / "engine_manifests" / "presets" / "alt-port.toml").write_text(
+        _make_preset_toml("alt-port", "llamacpp-aux-1", 9099)
+    )
+    m = load_manifest("llamacpp-aux-1", preset="alt-port")
+    assert m.network.port == 9099
 
 
 def test_user_dir_absent_falls_back_to_bundled(

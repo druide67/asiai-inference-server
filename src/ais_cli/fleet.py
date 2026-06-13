@@ -323,6 +323,9 @@ def add_fleet_subparser(subparsers: argparse._SubParsersAction) -> None:
         "fleet",
         help="Push write commands to remote nodes (Phase 2).",
     )
+    # Bare `aisctl fleet` lands in cmd_fleet with fleet_action=None, which
+    # prints usage and returns 2 instead of crashing on a missing args.func.
+    fleet_parser.set_defaults(func=cmd_fleet)
     fleet_sub = fleet_parser.add_subparsers(dest="fleet_action", metavar="<action>")
 
     p_push = fleet_sub.add_parser(

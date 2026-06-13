@@ -47,8 +47,6 @@ from typing import Any
 
 from asiai.auth import loopback as asiai_loopback
 
-from ais_core.upgrade import upgrade_argv
-
 logger = logging.getLogger("aisctl.serve")
 
 LOOPBACK_HOST = "127.0.0.1"
@@ -122,12 +120,19 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
                 raise ValueError("args.keep_alive must match [0-9]+[smh]?")
             argv.extend(["--keep-alive", keep_alive])
     if command == "upgrade":
-        # Routes to the same brew-upgrade argv the native ``aisctl upgrade``
-        # uses. The formula whitelist (ais_core.upgrade) is the single
-        # source of truth that prevents argv injection.
+        # Routed through ``aisctl upgrade`` like every other command, so the
+        # OperationsLock and the JSON envelope apply (calling brew directly
+        # used to skip both). The whitelist check still runs HERE so a
+        # non-whitelisted engine is a 400, not a failed subprocess; it is
+        # enforced again inside cmd_upgrade. The inner timeout stays under
+        # this server's 600s envelope so aisctl reports its own failure
+        # instead of being killed mid-write.
         if not isinstance(engine, str) or not engine:
             raise ValueError("upgrade requires args.engine")
-        argv = upgrade_argv(engine)
+        from ais_core.upgrade import upgrade_argv
+
+        upgrade_argv(engine)  # validation only — raises ValueError if not whitelisted
+        argv = [_aisctl_binary(), "upgrade", engine, "--json", "--timeout", "540"]
     return argv
 
 

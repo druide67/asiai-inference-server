@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import socket
 import threading
-import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -51,8 +50,7 @@ def server(free_port, monkeypatch):
     thread = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05})
     thread.daemon = True
     thread.start()
-    # Give the server a moment to bind.
-    time.sleep(0.05)
+    # No bind wait needed: _build_server binds synchronously before this point.
     yield {"port": free_port, "token": token, "server": srv}
     srv.shutdown()
     srv.server_close()
@@ -106,10 +104,13 @@ class TestBuildArgv:
         with pytest.raises(ValueError, match="unknown command"):
             serve._build_argv("drop_db", {})
 
-    def test_upgrade_uses_whitelisted_formula(self):
+    def test_upgrade_routes_through_aisctl(self):
+        # Routed via `aisctl upgrade` so the OperationsLock + JSON envelope
+        # apply (a direct brew argv used to skip both).
         argv = serve._build_argv("upgrade", {"engine": "ollama"})
-        # brew upgrade ollama
-        assert argv[-2:] == ["upgrade", "ollama"]
+        assert argv[0].endswith("aisctl")
+        assert argv[1:3] == ["upgrade", "ollama"]
+        assert "--json" in argv
 
     def test_upgrade_rejects_unknown_engine(self):
         with pytest.raises(ValueError, match="not whitelisted"):
@@ -253,8 +254,5 @@ class TestLoopbackOnly:
         # localhost works.
         s.connect(("127.0.0.1", server["port"]))
         s.close()
-        # An external interface (e.g. en0 IP if present) should NOT.
-        # We can't reliably enumerate interfaces here without going
-        # external; we just assert the socket family is INET (loopback
-        # binding is enforced in _build_server with LOOPBACK_HOST).
-        assert serve.LOOPBACK_HOST == "127.0.0.1"
+        # Assert the address the live server actually bound, not a constant.
+        assert server["server"].server_address[0] == "127.0.0.1"

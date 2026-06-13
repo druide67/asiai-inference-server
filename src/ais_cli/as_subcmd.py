@@ -158,6 +158,7 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
             "Show engine state.",
             [
                 (("engine",), {"nargs": "?"}),
+                (("--deep",), {"action": "store_true"}),
                 (("--json",), {"action": "store_true"}),
             ],
             "cmd_status",
@@ -170,11 +171,20 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
                 (("--binary",), {}),
                 (("--user",), {}),
                 (("--firewall",), {"choices": ["lan-only", "none"], "default": "none"}),
+                (("--preset",), {}),
                 (("--dry-run",), {"action": "store_true"}),
                 (("--force",), {"action": "store_true"}),
                 (("--json",), {"action": "store_true"}),
             ],
             "cmd_install",
+        ),
+        (
+            "list-presets",
+            "List bundled tuned-manifest presets for install --preset.",
+            [
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_list_presets",
         ),
         (
             "reinstall",
@@ -280,6 +290,18 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
                 (("--json",), {"action": "store_true"}),
             ],
             "cmd_unload",
+        ),
+        (
+            "load",
+            "Warm-load a model (Ollama / LM Studio).",
+            [
+                (("engine",), {}),
+                (("model",), {}),
+                (("--keep-alive",), {"default": "5m"}),
+                (("--force",), {"action": "store_true"}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_load",
         ),
         (
             "purge",

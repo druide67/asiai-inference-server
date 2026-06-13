@@ -76,6 +76,20 @@ def build_plist_dict(
             "manifest validation should have caught this"
         )
 
+    # Resolve ~ against the DAEMON's user, not whoever ran aisctl: the plist
+    # runs as ``user`` (UserName=), so ``~/llms/gguf/...`` must point at that
+    # account's home. os.path.expanduser keys on the caller's $HOME/passwd.
+    user_home = os.path.expanduser(f"~{user}")
+    if user_home == f"~{user}":
+        raise PlistError(f"cannot resolve home directory for user {user!r}")
+
+    def _for_user(path: str) -> str:
+        if path == "~":
+            return user_home
+        if path.startswith("~/"):
+            return f"{user_home}/{path[2:]}"
+        return path
+
     program_args: list[str] = [program_path]
     if not manifest.wrapper.needed:
         # Order: manifest.binary.program_args (user-controlled flags) first,
@@ -86,13 +100,11 @@ def build_plist_dict(
         # before its flags, this order needs revisiting.
         program_args.extend(manifest.binary.program_args)
         if manifest.binary.model_path:
-            program_args.extend(["--model", os.path.expanduser(manifest.binary.model_path)])
+            program_args.extend(["--model", _for_user(manifest.binary.model_path)])
         if manifest.binary.template_path:
-            program_args.extend(
-                ["--chat-template-file", os.path.expanduser(manifest.binary.template_path)]
-            )
+            program_args.extend(["--chat-template-file", _for_user(manifest.binary.template_path)])
         if manifest.binary.mmproj_path:
-            program_args.extend(["--mmproj", os.path.expanduser(manifest.binary.mmproj_path)])
+            program_args.extend(["--mmproj", _for_user(manifest.binary.mmproj_path)])
         if manifest.network.bind:
             program_args.extend(
                 [
@@ -103,7 +115,6 @@ def build_plist_dict(
                 ]
             )
 
-    user_home = os.path.expanduser(f"~{user}")
     binary_dir = str(Path(binary_path).parent) if binary_path else "/usr/local/bin"
     # ``~/.local/bin`` is where ``uv tool install`` lands binaries by
     # default — put it ahead of system paths so a daemon launched by
@@ -130,8 +141,8 @@ def build_plist_dict(
         "RunAtLoad": True,
         "KeepAlive": {"Crashed": True, "SuccessfulExit": False},
         "ThrottleInterval": manifest.plist.throttle_interval,
-        "StandardOutPath": manifest.logs.stdout_path,
-        "StandardErrorPath": manifest.logs.stderr_path,
+        "StandardOutPath": f"{_for_user(manifest.logs.dir.rstrip('/'))}/{manifest.logs.stdout}",
+        "StandardErrorPath": f"{_for_user(manifest.logs.dir.rstrip('/'))}/{manifest.logs.stderr}",
         "TimeOut": manifest.plist.timeout,
         "Nice": 0,
     }

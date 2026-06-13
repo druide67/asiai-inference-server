@@ -10,6 +10,7 @@ from ais_core.firewall import (
     DEFAULT_SUBNETS,
     PF_ANCHORS_DIR,
     FirewallError,
+    _anchor_conf_lines,
     anchor_path,
     build_anchor_content,
 )
@@ -76,3 +77,19 @@ def test_anchor_content_block_rule_is_quick() -> None:
     content = build_anchor_content(m)
     block_lines = [ln for ln in content.splitlines() if ln.startswith("block")]
     assert all("quick" in ln for ln in block_lines)
+
+
+def test_anchor_content_blocks_ipv6_too() -> None:
+    """inet-only block left the port open to any IPv6 LAN peer."""
+    m = load_manifest("ollama")
+    content = build_anchor_content(m)
+    assert "block in quick inet6 proto tcp to any port 11434" in content
+
+
+def test_pf_conf_lines_include_load_directive() -> None:
+    """The bug the audit caught: an `anchor` line without `load anchor`
+    declares an attachment point but never reads the rules file — the
+    firewall silently enforces nothing."""
+    decl, load = _anchor_conf_lines("com.asiai.ollama")
+    assert decl == 'anchor "com.asiai.ollama" all'
+    assert load == f'load anchor "com.asiai.ollama" from "{PF_ANCHORS_DIR}/com.asiai.ollama"'
