@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import plistlib
 from dataclasses import replace
 
@@ -34,10 +35,10 @@ def test_plist_path_uses_launch_daemons_dir() -> None:
 def test_ollama_plist_no_wrapper_no_bind_args() -> None:
     """Ollama uses env vars, not --host/--port; no wrapper."""
     m = load_manifest("ollama")
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/ollama")
 
     assert d["Label"] == "com.asiai.ollama"
-    assert d["UserName"] == "jmn"
+    assert d["UserName"] == getpass.getuser()
     assert d["ProgramArguments"] == ["/opt/homebrew/bin/ollama", "serve"]
     assert "--host" not in d["ProgramArguments"]
     assert d["EnvironmentVariables"]["OLLAMA_HOST"] == "0.0.0.0:11434"
@@ -56,7 +57,7 @@ def test_ollama_plist_no_wrapper_no_bind_args() -> None:
 def test_lmstudio_plist_uses_wrapper_path_not_binary() -> None:
     """When wrapper.needed, ProgramArguments[0] is the wrapper, not lms."""
     m = load_manifest("lmstudio")
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/lms")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/lms")
 
     assert d["ProgramArguments"] == ["/usr/local/bin/lmstudio-server-start"]
     # Wrapper handles its own args; no --host/--port appended.
@@ -66,7 +67,7 @@ def test_lmstudio_plist_uses_wrapper_path_not_binary() -> None:
 def test_omlx_plist_appends_host_port_when_bind_set() -> None:
     """Engines with explicit bind get --host/--port appended."""
     m = load_manifest("omlx")
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/omlx")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/omlx")
 
     assert d["ProgramArguments"] == [
         "/opt/homebrew/bin/omlx",
@@ -88,7 +89,7 @@ def test_llamacpp_plist_injects_model_path_expanded() -> None:
     import os
 
     m = load_manifest("llamacpp")
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server")
     args = d["ProgramArguments"]
 
     # First element is the binary path
@@ -112,7 +113,7 @@ def test_llamacpp_plist_injects_model_path_expanded() -> None:
 def test_plist_no_model_arg_when_model_path_unset() -> None:
     """Engines that don't bind a model at launch must not get --model injected."""
     m = load_manifest("ollama")
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/ollama")
     assert "--model" not in d["ProgramArguments"]
 
 
@@ -128,7 +129,7 @@ def test_llamacpp_hermes_preset_plist_injects_template_path_expanded() -> None:
     import os
 
     m = load_manifest("llamacpp", preset="qwen3.6-35b-a3b-hermes-agent-64gb")
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server")
     args = d["ProgramArguments"]
 
     assert "--chat-template-file" in args
@@ -144,7 +145,7 @@ def test_llamacpp_hermes_preset_plist_injects_template_path_expanded() -> None:
 def test_plist_no_template_arg_when_template_path_unset() -> None:
     """Engines without template_path must not get --chat-template-file injected."""
     m = load_manifest("ollama")
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/ollama")
     assert "--chat-template-file" not in d["ProgramArguments"]
 
 
@@ -160,7 +161,7 @@ def test_vision_preset_mmproj_path_is_tilde_expanded() -> None:
 
     m = load_manifest("llamacpp-aux-4", preset="qwen2.5-vl-7b-instruct-hermes-aux-4")
     assert m.binary.mmproj_path is not None
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server")
     args = d["ProgramArguments"]
     assert args.count("--mmproj") == 1
     mmproj_value = args[args.index("--mmproj") + 1]
@@ -183,7 +184,7 @@ def test_llamacpp_aux_plist_uses_aux_model_path_and_no_template(name: str, port:
     import os
 
     m = load_manifest(name)
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/llama-server")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server")
     args = d["ProgramArguments"]
 
     assert "--model" in args
@@ -198,7 +199,7 @@ def test_llamacpp_aux_plist_uses_aux_model_path_and_no_template(name: str, port:
 
 def test_render_plist_xml_is_valid_plist() -> None:
     m = load_manifest("ollama")
-    xml_bytes = render_plist_xml(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+    xml_bytes = render_plist_xml(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/ollama")
     # Round-trip: parsing it back must yield the same dict.
     parsed = plistlib.loads(xml_bytes)
     assert parsed["Label"] == "com.asiai.ollama"
@@ -212,7 +213,9 @@ def test_render_plist_xml_escapes_ampersand_in_env_values() -> None:
         m,
         env_vars=tuple([*list(m.env_vars), "WITH_AMP=foo&bar"]),
     )
-    xml_bytes = render_plist_xml(m_with_amp, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+    xml_bytes = render_plist_xml(
+        m_with_amp, user=getpass.getuser(), binary_path="/opt/homebrew/bin/ollama"
+    )
     assert b"&amp;" in xml_bytes
     parsed = plistlib.loads(xml_bytes)
     assert parsed["EnvironmentVariables"]["WITH_AMP"] == "foo&bar"
@@ -224,21 +227,21 @@ def test_invalid_plist_label_refused_at_render() -> None:
     m = load_manifest("ollama")
     bad = replace(m, plist=replace(m.plist, name="com.evilcorp.ollama"))
     with pytest.raises(PlistError, match=r"com\.asiai"):
-        build_plist_dict(bad, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+        build_plist_dict(bad, user=getpass.getuser(), binary_path="/opt/homebrew/bin/ollama")
 
 
 def test_wrapper_needed_without_install_path_refused_at_render() -> None:
     m = load_manifest("ollama")
     bad = replace(m, wrapper=WrapperSpec(needed=True, install_path=None))
     with pytest.raises(PlistError, match="install_path"):
-        build_plist_dict(bad, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+        build_plist_dict(bad, user=getpass.getuser(), binary_path="/opt/homebrew/bin/ollama")
 
 
 def test_keepalive_keeps_unsuccessful_exits_alive() -> None:
     """Critical for prod headless: a healthy daemon must restart on crash but
     NOT loop on SuccessfulExit (otherwise an intentional shutdown bounces)."""
     m = load_manifest("ollama")
-    d = build_plist_dict(m, user="jmn", binary_path="/opt/homebrew/bin/ollama")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/ollama")
     assert d["KeepAlive"]["Crashed"] is True
     assert d["KeepAlive"]["SuccessfulExit"] is False
 
@@ -268,7 +271,7 @@ def _minimal_manifest() -> EngineManifest:
 
 def test_minimal_manifest_renders_cleanly() -> None:
     m = _minimal_manifest()
-    d = build_plist_dict(m, user="jmn", binary_path="/usr/local/bin/dummy")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/usr/local/bin/dummy")
     assert d["ProgramArguments"] == [
         "/usr/local/bin/dummy",
         "serve",

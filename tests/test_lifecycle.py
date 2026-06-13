@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import socket
 import threading
 import time
@@ -252,7 +253,7 @@ def test_install_dry_run_does_not_require_binary_present() -> None:
         patch("ais_core.lifecycle.stop_existing"),
         patch("ais_core.lifecycle.plist.write_plist", return_value="/fake/plist"),
     ):
-        result = lifecycle.install(m, user="jmn", dry_run=True)
+        result = lifecycle.install(m, user=getpass.getuser(), dry_run=True)
     assert result["dry_run"] is True
     assert result["binary"] in m.binary.candidates
     assert result["health_ok"] is None
@@ -274,7 +275,7 @@ def test_install_creates_log_dir_before_launchctl(tmp_path) -> None:
         patch("ais_core.lifecycle.start"),
         patch("ais_core.lifecycle.wait_for_health", return_value=True),
     ):
-        lifecycle.install(m, user="jmn", dry_run=False)
+        lifecycle.install(m, user=getpass.getuser(), dry_run=False)
     assert fake_logs_dir.is_dir()
 
 
