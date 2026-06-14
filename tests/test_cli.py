@@ -210,12 +210,12 @@ def test_install_invokes_lifecycle_install_with_firewall() -> None:
         patch("ais_cli.commands.memory.OperationsLock") as mock_lock,
     ):
         mock_lock.return_value.__enter__.return_value = mock_lock.return_value
-        rc = main(["install", "ollama", "--firewall", "lan-only", "--user", "jmn", "--json"])
+        rc = main(["install", "ollama", "--firewall", "lan-only", "--user", "testuser", "--json"])
 
     assert rc == 0
     kwargs = m.call_args.kwargs
     assert kwargs["enable_firewall"] is True
-    assert kwargs["user"] == "jmn"
+    assert kwargs["user"] == "testuser"
     assert kwargs["dry_run"] is False
 
 
@@ -233,7 +233,7 @@ def test_install_dry_run_returns_zero() -> None:
         patch("ais_cli.commands.memory.OperationsLock") as mock_lock,
     ):
         mock_lock.return_value.__enter__.return_value = mock_lock.return_value
-        rc = main(["install", "ollama", "--dry-run", "--user", "jmn"])
+        rc = main(["install", "ollama", "--dry-run", "--user", "testuser"])
     assert rc == 0
 
 
@@ -251,7 +251,7 @@ def test_install_unhealthy_returns_nonzero() -> None:
         patch("ais_cli.commands.memory.OperationsLock") as mock_lock,
     ):
         mock_lock.return_value.__enter__.return_value = mock_lock.return_value
-        rc = main(["install", "ollama", "--user", "jmn"])
+        rc = main(["install", "ollama", "--user", "testuser"])
     assert rc == 2
 
 
@@ -354,7 +354,7 @@ def _install_with_preset() -> None:
         patch("ais_cli.commands.lifecycle.install", return_value=_fake_install_result(_ENGINE)),
         patch("ais_cli.commands.memory.OperationsLock"),
     ):
-        assert main(["install", _ENGINE, "--preset", _PRESET, "--user", "jmn", "--json"]) == 0
+        assert main(["install", _ENGINE, "--preset", _PRESET, "--user", "testuser", "--json"]) == 0
 
 
 def test_install_preset_is_recorded_and_survives_uninstall() -> None:
@@ -375,7 +375,7 @@ def test_install_preset_is_recorded_and_survives_uninstall() -> None:
 def test_plain_install_over_preset_install_is_refused() -> None:
     _install_with_preset()
     with patch("ais_cli.commands.memory.OperationsLock"), pytest.raises(SystemExit) as ei:
-        main(["install", _ENGINE, "--user", "jmn"])
+        main(["install", _ENGINE, "--user", "testuser"])
     assert "reinstall" in str(ei.value)
 
 
@@ -385,7 +385,7 @@ def test_plain_install_with_force_overrides_and_rerecords() -> None:
         patch("ais_cli.commands.lifecycle.install", return_value=_fake_install_result(_ENGINE)),
         patch("ais_cli.commands.memory.OperationsLock"),
     ):
-        assert main(["install", _ENGINE, "--user", "jmn", "--force"]) == 0
+        assert main(["install", _ENGINE, "--user", "testuser", "--force"]) == 0
     rec = install_state.read_install(_ENGINE)
     assert rec is not None
     assert rec.preset is None
@@ -401,7 +401,7 @@ def test_reinstall_replays_recorded_preset(capsys: pytest.CaptureFixture[str]) -
         ) as m_in,
         patch("ais_cli.commands.memory.OperationsLock"),
     ):
-        rc = main(["reinstall", _ENGINE, "--user", "jmn", "--json"])
+        rc = main(["reinstall", _ENGINE, "--user", "testuser", "--json"])
     assert rc == 0
     # Acceptance (issue #6): reinstall regenerates from the SAME preset
     # manifest the original install used — hence an identical plist.
@@ -423,7 +423,7 @@ def test_reinstall_flags_manifest_drift(tmp_path: Path, capsys: pytest.CaptureFi
         patch("ais_cli.commands.lifecycle.install", return_value=_fake_install_result(_ENGINE)),
         patch("ais_cli.commands.memory.OperationsLock"),
     ):
-        rc = main(["reinstall", _ENGINE, "--user", "jmn", "--json"])
+        rc = main(["reinstall", _ENGINE, "--user", "testuser", "--json"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["manifest_changed_since_install"] is True
@@ -446,7 +446,7 @@ def test_reinstall_reuses_recorded_firewall_mode() -> None:
         ) as m_in,
         patch("ais_cli.commands.memory.OperationsLock"),
     ):
-        assert main(["reinstall", _ENGINE, "--user", "jmn"]) == 0
+        assert main(["reinstall", _ENGINE, "--user", "testuser"]) == 0
     assert m_in.call_args.kwargs["enable_firewall"] is True
 
 
