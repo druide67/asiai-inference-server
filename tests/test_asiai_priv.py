@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import pwd
 import stat
 from pathlib import Path
 
@@ -147,3 +148,359 @@ def test_run_never_uses_shell(helper, monkeypatch):
     mod._run(["echo", "x"], check=True)
     assert captured["argv"] == ["echo", "x"]
     assert captured["kwargs"].get("shell", False) is False
+
+
+# ---------------------------------------------------------------------------
+# Story 1.2 — strict parameter validation. Negative tests are first-class ACs.
+# ---------------------------------------------------------------------------
+
+
+def _fake_pw(name: str, uid: int) -> pwd.struct_passwd:
+    return pwd.struct_passwd((name, "*", uid, uid, name, f"/Users/{name}", "/bin/zsh"))
+
+
+# --- I2: identity derivation (the security-critical one) -------------------
+
+
+def test_resolve_user_refuses_literal_root(helper):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        mod._resolve_user("root")  # real getpwnam('root') -> pw_uid 0
+
+
+def test_resolve_user_decides_on_object_not_string(helper, monkeypatch):
+    """The refusal keys on the resolved pw_uid, never the literal string.
+
+    getpwnam is case-insensitive on macOS, so 'Root'/'ROOT' all resolve to uid 0.
+    Here getpwnam is mocked to return uid 0 for a name that is NOT 'root' — the
+    helper must still refuse, proving the decision is on the object.
+    """
+    mod, _ = helper
+    monkeypatch.setattr(mod.pwd, "getpwnam", lambda name: _fake_pw("not-literally-root", 0))
+    with pytest.raises(mod._Refused):
+        mod._resolve_user("not-literally-root")
+
+
+def test_resolve_user_derives_from_sudo_uid(helper, monkeypatch):
+    mod, _ = helper
+    fake = _fake_pw("alice", 1234)
+
+    def fake_getpwuid(uid):
+        if uid == 1234:
+            return fake
+        raise KeyError(uid)
+
+    monkeypatch.setattr(mod.pwd, "getpwuid", fake_getpwuid)
+    monkeypatch.setenv("SUDO_UID", "1234")
+    pw = mod._resolve_user(None)
+    assert pw.pw_uid == 1234 and pw.pw_name == "alice"
+
+
+def test_resolve_user_refuses_sudo_uid_zero(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setenv("SUDO_UID", "0")  # original invoker was root -> refuse
+    with pytest.raises(mod._Refused):
+        mod._resolve_user(None)
+
+
+def test_resolve_user_refuses_missing_sudo_uid(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    with pytest.raises(mod._Refused):
+        mod._resolve_user(None)
+
+
+def test_resolve_user_refuses_nonnumeric_sudo_uid(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setenv("SUDO_UID", "not-a-number")
+    with pytest.raises(mod._Refused):
+        mod._resolve_user(None)
+
+
+def test_resolve_user_refuses_nonascii_digit_sudo_uid(helper, monkeypatch):
+    """Arabic-Indic '5' passes str.isdigit() but is non-canonical -> refused (not crash)."""
+    mod, _ = helper
+    monkeypatch.setenv("SUDO_UID", "\u0665")  # Arabic-Indic 5: isdigit() True, isascii() False
+    with pytest.raises(mod._Refused):
+        mod._resolve_user(None)
+
+
+def test_resolve_user_refuses_unknown_name(helper):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        mod._resolve_user("nonexistent-user-zzz-9999")
+
+
+# --- I9: label ------------------------------------------------------------
+
+
+def test_validate_label_accepts_canonical(helper):
+    mod, _ = helper
+    assert mod._validate_label("com.asiai.web") == "com.asiai.web"
+    assert mod._validate_label("com.asiai.llamacpp-aux-1") == "com.asiai.llamacpp-aux-1"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "com.asiai.",
+        "com.asiai.WEB",  # uppercase
+        "com.evil.x",  # wrong prefix
+        "com.asiai.web\n",  # trailing control char
+        "com.asiai.a b",  # space
+        "com.asiai.x\x00",  # NUL
+        "prefixcom.asiai.web",  # not anchored at start
+    ],
+)
+def test_validate_label_rejects(helper, bad):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        mod._validate_label(bad)
+
+
+# --- I5: binary -----------------------------------------------------------
+
+
+def test_resolve_binary_accepts_under_prefix(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    target = bindir / "llama-server"
+    target.write_text("x")
+    real_prefix = os.path.realpath(str(bindir)) + os.sep
+    monkeypatch.setattr(mod, "_BINARY_PREFIXES", (real_prefix,))
+    assert mod._resolve_binary(str(target)) == os.path.realpath(str(target))
+
+
+def test_resolve_binary_rejects_outside_prefix(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    target = tmp_path / "rogue"
+    target.write_text("x")
+    monkeypatch.setattr(mod, "_BINARY_PREFIXES", (os.path.realpath(str(bindir)) + os.sep,))
+    with pytest.raises(mod._Refused):
+        mod._resolve_binary(str(target))
+
+
+def test_resolve_binary_rejects_symlink_final(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    real = bindir / "llama-server"
+    real.write_text("x")
+    link = bindir / "llama-link"
+    link.symlink_to(real)  # target is valid AND under prefix, but the leaf is a symlink
+    monkeypatch.setattr(mod, "_BINARY_PREFIXES", (os.path.realpath(str(bindir)) + os.sep,))
+    with pytest.raises(mod._Refused):
+        mod._resolve_binary(str(link))
+
+
+def test_resolve_binary_rejects_prefix_sibling(helper, monkeypatch, tmp_path):
+    """A path sharing the prefix string but not the directory boundary is refused."""
+    mod, _ = helper
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    evil = tmp_path / "binEVIL"
+    evil.mkdir()
+    target = evil / "llama-server"
+    target.write_text("x")
+    monkeypatch.setattr(mod, "_BINARY_PREFIXES", (os.path.realpath(str(bindir)) + os.sep,))
+    with pytest.raises(mod._Refused):
+        mod._resolve_binary(str(target))
+
+
+def test_resolve_binary_rejects_relative_and_missing(helper):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        mod._resolve_binary("bin/llama-server")  # relative
+    with pytest.raises(mod._Refused):
+        mod._resolve_binary("/opt/homebrew/bin/does-not-exist-zzz")
+
+
+def test_resolve_binary_rejects_nul(helper):
+    """A NUL byte makes os.lstat raise ValueError (not OSError) -> must still refuse."""
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        mod._resolve_binary("/opt/homebrew/bin/llama\x00server")
+
+
+# --- I3: environment ------------------------------------------------------
+
+
+def test_validate_env_accepts(helper):
+    mod, _ = helper
+    assert mod._validate_env(["FOO=bar", "PATH=/usr/bin"]) == {"FOO": "bar", "PATH": "/usr/bin"}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "DYLD_INSERT_LIBRARIES=/evil.dylib",
+        "DYLD_LIBRARY_PATH=/x",
+        "LD_PRELOAD=/x",
+        "1FOO=x",  # key starts with a digit
+        "FO O=x",  # space in key
+        "FOO",  # no '='
+        "FOO=a\nb",  # control char in value
+    ],
+)
+def test_validate_env_rejects(helper, bad):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        mod._validate_env([bad])
+
+
+# --- port -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ok", ["1024", "8080", "65535"])
+def test_validate_port_accepts(helper, ok):
+    mod, _ = helper
+    assert mod._validate_port(ok) == int(ok)
+
+
+@pytest.mark.parametrize("bad", ["80", "0", "1023", "65536", "70000", "abc", ""])
+def test_validate_port_rejects(helper, bad):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        mod._validate_port(bad)
+
+
+# --- user-home paths ------------------------------------------------------
+
+
+def test_resolve_user_path_accepts_under_home(helper, tmp_path):
+    mod, _ = helper
+    home = os.path.realpath(str(tmp_path))
+    models = tmp_path / "models"
+    models.mkdir()
+    gguf = models / "m.gguf"
+    gguf.write_text("x")
+    assert mod._resolve_user_path("~/models/m.gguf", home) == os.path.realpath(str(gguf))
+
+
+def test_resolve_user_path_rejects_outside_home(helper, tmp_path):
+    mod, _ = helper
+    home = os.path.realpath(str(tmp_path / "home"))
+    os.makedirs(home)
+    outside = tmp_path / "outside.gguf"
+    outside.write_text("x")
+    with pytest.raises(mod._Refused):
+        mod._resolve_user_path(str(outside), home)
+
+
+def test_resolve_user_path_rejects_parent_traversal(helper, tmp_path):
+    mod, _ = helper
+    sub = tmp_path / "home"
+    sub.mkdir()
+    home = os.path.realpath(str(sub))
+    secret = tmp_path / "secret.gguf"
+    secret.write_text("x")  # exists, but ~/../secret.gguf escapes home
+    with pytest.raises(mod._Refused):
+        mod._resolve_user_path("~/../secret.gguf", home)
+
+
+def test_resolve_user_path_rejects_symlink_final(helper, tmp_path):
+    mod, _ = helper
+    home = os.path.realpath(str(tmp_path))
+    real = tmp_path / "real.gguf"
+    real.write_text("x")
+    link = tmp_path / "link.gguf"
+    link.symlink_to(real)
+    with pytest.raises(mod._Refused):
+        mod._resolve_user_path(str(link), home)
+
+
+def test_resolve_user_path_rejects_nul(helper, tmp_path):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        mod._resolve_user_path("~/m\x00.gguf", os.path.realpath(str(tmp_path)))
+
+
+def test_resolve_user_path_rejects_degenerate_home(helper, tmp_path):
+    """home '/' must not void confinement (would otherwise accept any absolute path)."""
+    mod, _ = helper
+    target = tmp_path / "x.gguf"
+    target.write_text("x")
+    with pytest.raises(mod._Refused):
+        mod._resolve_user_path(str(target), "/")
+
+
+# --- root guard -----------------------------------------------------------
+
+
+def test_require_root_refuses_non_root(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 1000)
+    with pytest.raises(mod._Refused):
+        mod._require_root()
+
+
+def test_require_root_passes_as_root(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 0)
+    mod._require_root()  # must not raise
+
+
+# --- main: refusal & internal-error hardening -----------------------------
+
+
+def test_main_audits_refused_from_handler(helper, monkeypatch):
+    mod, audit = helper
+
+    def boom(_args):
+        raise mod._Refused("bad param")
+
+    monkeypatch.setitem(mod._DISPATCH, "purge", boom)
+    assert mod.main(["purge"]) == mod.EXIT_REFUSED
+    rows = _read_audit(audit)
+    assert any(r["verdict"] == "refused" and "bad param" in r["reason"] for r in rows)
+
+
+def test_main_internal_error_logs_type_not_message(helper, monkeypatch):
+    """A bug in a handler must not leak its message (paths/secrets) to the audit."""
+    mod, audit = helper
+    secret = "/Users/secret/leak/path"
+
+    def boom(_args):
+        raise RuntimeError(secret)
+
+    monkeypatch.setitem(mod._DISPATCH, "purge", boom)
+    assert mod.main(["purge"]) == mod.EXIT_INTERNAL
+    content = audit.read_text() if audit.exists() else ""
+    assert "RuntimeError" in content
+    assert secret not in content  # only the exception type is logged, never the message
+
+
+# --- audit hardening: partial write + PIPE_BUF bound ----------------------
+
+
+def test_audit_writes_full_line_on_partial_write(helper, monkeypatch):
+    mod, audit = helper
+    real_write = os.write
+
+    def short_write(fd, data):
+        return real_write(fd, data[:1])  # one byte per call -> exercises the loop
+
+    monkeypatch.setattr(mod.os, "write", short_write)
+    mod._audit("purge", "error", reason="hello-world")
+    rows = _read_audit(audit)
+    assert rows and rows[0]["reason"] == "hello-world"
+
+
+def test_audit_truncates_long_field(helper):
+    mod, audit = helper
+    mod._audit("purge", "error", reason="r", argv=["x" * 5000])
+    raw = audit.read_text()
+    assert len(raw.encode("utf-8")) < 4096  # below PIPE_BUF
+    assert "x" * 600 not in raw  # the 5000-char arg was clipped
+
+
+def test_audit_truncates_oversized_record_to_skeleton(helper):
+    mod, audit = helper
+    mod._audit("purge", "error", reason="r", argv=["aaaa"] * 2000)
+    rows = _read_audit(audit)
+    assert rows and rows[0].get("truncated") is True
+    assert len(audit.read_text().encode("utf-8")) < 4096
