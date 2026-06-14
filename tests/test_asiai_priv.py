@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import plistlib
 import pwd
 import stat
 from pathlib import Path
@@ -155,8 +156,9 @@ def test_run_never_uses_shell(helper, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _fake_pw(name: str, uid: int) -> pwd.struct_passwd:
-    return pwd.struct_passwd((name, "*", uid, uid, name, f"/Users/{name}", "/bin/zsh"))
+def _fake_pw(name: str, uid: int, gid: int | None = None) -> pwd.struct_passwd:
+    gid = uid if gid is None else gid
+    return pwd.struct_passwd((name, "*", uid, gid, name, f"/Users/{name}", "/bin/zsh"))
 
 
 # --- I2: identity derivation (the security-critical one) -------------------
@@ -504,3 +506,178 @@ def test_audit_truncates_oversized_record_to_skeleton(helper):
     rows = _read_audit(audit)
     assert rows and rows[0].get("truncated") is True
     assert len(audit.read_text().encode("utf-8")) < 4096
+
+
+# ---------------------------------------------------------------------------
+# Story 1.3 — plist generation (generate-don't-validate). The critical invariant
+# is that the generated plist forces a non-root UserName and can never emit a
+# dangerous key. Negative tests are first-class ACs.
+# ---------------------------------------------------------------------------
+
+
+def _real_pw() -> pwd.struct_passwd:
+    # The test runner's own (non-root) account; _build_plist_dict re-resolves the name
+    # via getpwnam, so the user_pw it receives must be a real, resolvable entry.
+    return pwd.getpwuid(os.getuid())
+
+
+def _plist(mod, **overrides):
+    kwargs = {
+        "label": "com.asiai.web",
+        "binary": "/opt/homebrew/bin/llama-server",
+        "user_pw": _real_pw(),
+    }
+    kwargs.update(overrides)
+    return mod._build_plist_dict(**kwargs)
+
+
+def test_plist_only_allowlisted_keys(helper):
+    mod, _ = helper
+    plist = _plist(
+        mod,
+        keep_alive={"Crashed": True},
+        throttle_interval=10,
+        timeout=30,
+        nice=0,
+        env={"FOO": "bar"},
+    )
+    assert set(plist) <= set(mod._PLIST_KEYS)
+
+
+def test_plist_never_emits_dangerous_keys(helper):
+    mod, _ = helper
+    plist = _plist(mod)
+    for dangerous in ("RootDirectory", "GroupName", "Sockets", "MachServices", "LaunchEvents"):
+        assert dangerous not in plist
+
+
+def test_plist_forces_nonroot_username(helper):
+    mod, _ = helper
+    pw = _real_pw()
+    plist = _plist(mod, user_pw=pw)
+    assert plist["UserName"] == pw.pw_name
+
+
+def test_plist_refuses_root_pw(helper):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        _plist(mod, user_pw=_fake_pw("root", 0))
+
+
+def test_plist_refuses_root_by_name_even_if_struct_uid_nonzero(helper):
+    """I2 self-defending: launchd resolves by NAME, so a struct claiming uid 502 but
+    name 'root' must still be refused (getpwnam('root').pw_uid == 0)."""
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        _plist(mod, user_pw=_fake_pw("root", 502))
+
+
+def test_plist_refuses_unknown_username(helper):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        _plist(mod, user_pw=_fake_pw("nonexistent-user-zzz-9999", 1234))
+
+
+def test_plist_forces_standard_paths_under_log_dir(helper):
+    mod, _ = helper
+    plist = _plist(mod, label="com.asiai.aux-1")
+    assert plist["StandardOutPath"] == "/Library/Logs/asiai/com.asiai.aux-1.out"
+    assert plist["StandardErrorPath"] == "/Library/Logs/asiai/com.asiai.aux-1.err"
+
+
+def test_plist_forces_home_and_path(helper):
+    mod, _ = helper
+    pw = _real_pw()
+    plist = _plist(mod, user_pw=pw)
+    env = plist["EnvironmentVariables"]
+    assert env["HOME"] == pw.pw_dir
+    assert env["PATH"].startswith("/usr/bin:/bin:")  # system dirs first (anti-masking)
+    assert env["PATH"].index("/usr/bin") < env["PATH"].index("/opt/homebrew/bin")
+    assert pw.pw_dir not in env["PATH"]  # daemon PATH never includes the home
+
+
+def test_plist_forced_env_overrides_caller(helper):
+    mod, _ = helper
+    pw = _real_pw()
+    plist = _plist(mod, user_pw=pw, env={"HOME": "/evil", "PATH": "/evil/bin", "OK": "1"})
+    env = plist["EnvironmentVariables"]
+    assert env["HOME"] == pw.pw_dir  # forced; caller /evil ignored
+    assert "/evil" not in env["PATH"]
+    assert env["OK"] == "1"
+
+
+def test_plist_refuses_dyld_ld_env(helper):
+    """Self-defending: DYLD_/LD_ keys are refused, not silently stripped."""
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        _plist(mod, env={"DYLD_INSERT_LIBRARIES": "/x.dylib"})
+    with pytest.raises(mod._Refused):
+        _plist(mod, env={"LD_PRELOAD": "/y"})
+
+
+def test_plist_refuses_bad_keep_alive(helper):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        _plist(mod, keep_alive={"PathState": {"/x": True}})  # activation directive smuggling
+    with pytest.raises(mod._Refused):
+        _plist(mod, keep_alive={"Crashed": "yes"})  # non-bool subvalue
+
+
+def test_plist_refuses_bad_label(helper):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        _plist(mod, label="com.evil.x")  # would also poison the log path
+
+
+def test_plist_optional_keys_omitted_when_none(helper):
+    mod, _ = helper
+    plist = _plist(mod)  # no keep_alive/throttle/timeout/nice
+    for optional in ("KeepAlive", "ThrottleInterval", "TimeOut", "Nice"):
+        assert optional not in plist
+
+
+def test_render_plist_xml_roundtrips(helper):
+    mod, _ = helper
+    plist = _plist(mod, keep_alive={"Crashed": True, "SuccessfulExit": False})
+    xml = mod._render_plist_xml(plist)
+    assert isinstance(xml, bytes)
+    assert b"<key>UserName</key>" in xml
+    parsed = plistlib.loads(xml)
+    assert parsed == plist  # lossless round-trip
+
+
+def test_precreate_log_leaves_creates_owned_files(helper, tmp_path):
+    mod, _ = helper
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    os.chmod(str(log_dir), 0o700)  # not group/other-writable -> passes the dir check
+    pw = _fake_pw("me", os.getuid(), os.getgid())  # chown to our own uid/gid: allowed non-root
+    mod._precreate_log_leaves("com.asiai.web", pw, log_dir=str(log_dir))
+    assert (log_dir / "com.asiai.web.out").exists()
+    assert (log_dir / "com.asiai.web.err").exists()
+
+
+def test_precreate_log_leaves_refuses_symlink_leaf(helper, tmp_path):
+    mod, _ = helper
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    os.chmod(str(log_dir), 0o700)
+    decoy = tmp_path / "decoy"
+    decoy.write_text("")
+    (log_dir / "com.asiai.web.out").symlink_to(decoy)  # pre-positioned symlink leaf
+    pw = _fake_pw("me", os.getuid(), os.getgid())
+    with pytest.raises(OSError):  # openat O_NOFOLLOW -> ELOOP
+        mod._precreate_log_leaves("com.asiai.web", pw, log_dir=str(log_dir))
+    assert decoy.read_text() == ""  # the symlink target was not written
+
+
+def test_precreate_log_leaves_refuses_symlinked_dir(helper, tmp_path):
+    mod, _ = helper
+    realdir = tmp_path / "real"
+    realdir.mkdir()
+    os.chmod(str(realdir), 0o700)
+    linkdir = tmp_path / "logs"
+    linkdir.symlink_to(realdir)  # log_dir itself is a symlink
+    pw = _fake_pw("me", os.getuid(), os.getgid())
+    with pytest.raises(OSError):  # O_DIRECTORY|O_NOFOLLOW refuses the symlinked dir
+        mod._precreate_log_leaves("com.asiai.web", pw, log_dir=str(linkdir))

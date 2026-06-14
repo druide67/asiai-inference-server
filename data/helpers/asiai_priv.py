@@ -6,18 +6,22 @@ an isolated system interpreter (``python3 -I``): no ``PYTHON*`` environment, no 
 site-packages, stdlib only, never a shell. Because of ``-I`` it cannot import
 ``ais_core`` — everything here is self-contained.
 
-This module holds the foundation (story 1.1) plus strict parameter validation (story 1.2).
-The lifecycle operations themselves are still stubs that raise ``NotImplementedError``; the
-plist generator (1.3) and the real lifecycle actions (1.4) — which will wire the argparse
-options and call the validators below — land in later stories.
+This module holds the foundation (1.1), strict parameter validation (1.2), and the plist
+generator (1.3). The lifecycle operations themselves are still stubs that raise
+``NotImplementedError``; the real actions (1.4) — which wire the argparse options and call
+the validators / generator below — land in a later story.
 
 Security invariants realised here:
+  * I1 — generate-don't-validate: the helper BUILDS the plist from bounded fields with a
+    CLOSED key allowlist; it never accepts a caller-supplied plist.
   * I2 — the daemon run-as account is forced non-root, decided on the resolved ``pwd``
     object (``pw_uid``), derived from ``SUDO_UID``, never ``$USER`` and never a root fallback.
-  * I3 — ``DYLD_*``/``LD_*`` environment keys are rejected.
+  * I3 — ``DYLD_*``/``LD_*`` environment keys are rejected; dangerous launchd keys
+    (``RootDirectory``, ``GroupName``, ``Sockets``, ...) are never emitted.
   * I5 — the daemon binary must live under a hardcoded prefix allowlist (secondary defence).
   * I6 — append-only, root-owned audit log, opened ``O_NOFOLLOW``, fail-open + syslog.
   * I7 — refuse by default: any unknown or missing action is refused and logged.
+  * I8 — log leaves are root-created (``O_NOFOLLOW``) then chowned to the daemon account.
   * I9 — labels are constrained to ``com.asiai.<name>``.
   * NFR10 — ``subprocess`` is always called with an argument list, never ``shell=True``.
 """
@@ -27,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import pwd
 import re
 import stat
@@ -77,6 +82,33 @@ _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # mlx-lm-server-start, llama-server-turboquant all live here). SECONDARY defence: the binary
 # runs under the non-root ``UserName`` (I2), which is the actual privilege barrier.
 _BINARY_PREFIXES: tuple[str, ...] = ("/opt/homebrew/bin/", "/usr/local/bin/")
+
+# I1 / plist: CLOSED allowlist of emitted keys. Anything outside this set is NEVER emitted —
+# in particular the dangerous keys RootDirectory (root pivot), GroupName (privileged group),
+# Sockets / MachServices / LaunchEvents (activation surface) are absent by construction (I3).
+# StartInterval is intentionally absent: engine daemons are long-running servers (KeepAlive),
+# never the periodic run-and-exit pattern.
+_PLIST_KEYS: tuple[str, ...] = (
+    "Label",
+    "ProgramArguments",
+    "UserName",
+    "EnvironmentVariables",
+    "StandardOutPath",
+    "StandardErrorPath",
+    "RunAtLoad",
+    "KeepAlive",
+    "ThrottleInterval",
+    "TimeOut",
+    "Nice",
+)
+
+# I8 / logs: root-owned, outside any home. Leaves are pre-created root then chowned to the
+# daemon account (launchd opens Standard*Path AFTER dropping to UserName — VERIF-4).
+_LOG_DIR = "/Library/Logs/asiai"
+
+# KeepAlive: a bool, or a dict whose subkeys are confined to this closed set (I1) — keeps
+# the only caller-supplied sub-tree bounded (no PathState/OtherJobEnabled activation tricks).
+_KEEP_ALIVE_KEYS: tuple[str, ...] = ("Crashed", "SuccessfulExit")
 
 # Closed allowlist of actions. Handlers are stubs in story 1.1.
 _ACTIONS: tuple[str, ...] = (
@@ -341,6 +373,191 @@ def _resolve_user_path(raw: str, home: str) -> str:
     if not _is_within(real, home.rstrip(os.sep)):
         raise _Refused(f"path escapes target home: {real!r}")
     return real
+
+
+# ---------------------------------------------------------------------------
+# Plist generation (story 1.3) — generate-don't-validate (I1). The helper never
+# receives a plist; it BUILDS one from bounded fields. Dangerous keys cannot be
+# emitted because they are not in ``_PLIST_KEYS``. The install handler that wires
+# argparse and writes the file lands in story 1.4.
+# ---------------------------------------------------------------------------
+
+
+def _validate_keep_alive(value: bool | dict) -> bool | dict:
+    """Constrain KeepAlive to a bool or a dict of allowlisted boolean subkeys (I1).
+
+    Stops a caller smuggling launchd activation directives (``PathState``,
+    ``OtherJobEnabled``, ...) through the only sub-tree the generator passes down.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict):
+        bad = set(value) - set(_KEEP_ALIVE_KEYS)
+        if bad:
+            raise _Refused(f"KeepAlive subkeys not allowed: {sorted(bad)}")
+        if not all(isinstance(v, bool) for v in value.values()):
+            raise _Refused("KeepAlive subvalues must be booleans")
+        return value
+    raise _Refused(f"KeepAlive must be bool or dict, got {type(value).__name__}")
+
+
+def _build_plist_dict(
+    *,
+    label: str,
+    binary: str,
+    user_pw: pwd.struct_passwd,
+    program_args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    run_at_load: bool = True,
+    keep_alive: bool | dict | None = None,
+    throttle_interval: int | None = None,
+    timeout: int | None = None,
+    nice: int | None = None,
+) -> dict:
+    """I1/I2/I3/I8: build a daemon plist from bounded inputs (never a caller-supplied one).
+
+    Only ``_PLIST_KEYS`` are emitted; the dangerous keys (``RootDirectory``,
+    ``GroupName``, ``Sockets``, ``MachServices``, ``LaunchEvents``) are absent by
+    construction. ``UserName`` is forced to the validated non-root account and root is
+    refused; ``Standard*Path`` are forced under ``/Library/Logs/asiai``; ``HOME``/``PATH``
+    are forced and ``DYLD_*``/``LD_*`` excluded even if the caller supplied them.
+    """
+    _validate_label(label)  # the label composes the log path — re-check, anti-poisoning
+
+    # I2 rampart, self-defending: launchd resolves UserName by NAME, so re-resolve the
+    # exact name we will emit and refuse root. Do NOT trust the caller's pw_uid field
+    # (decoupled from the emitted pw_name). getpwnam("")/unknown -> KeyError -> refused.
+    name = user_pw.pw_name
+    try:
+        resolved_uid = pwd.getpwnam(name).pw_uid
+    except KeyError:
+        raise _Refused(f"unknown run-as user: {name!r}") from None
+    if resolved_uid == 0:
+        raise _Refused("refuse to generate a plist that runs as root (uid 0)")
+
+    program = list(program_args or [])
+    for arg in program:
+        if not isinstance(arg, str) or "\x00" in arg:
+            raise _Refused(f"invalid program argument: {arg!r}")
+
+    # Forced environment, self-defending: re-validate caller keys/values (DYLD_/LD_ and
+    # malformed keys refused, not silently kept) then force HOME/PATH. PATH excludes the
+    # user's home — the binary is found via the absolute ProgramArguments[0]; PATH only
+    # serves its subprocesses.
+    binary_dir = os.path.dirname(binary)
+    environment: dict[str, str] = {}
+    for key, value in (env or {}).items():
+        if key in ("HOME", "PATH"):
+            continue  # forced below; any caller-supplied value is ignored
+        if not _ENV_KEY_RE.fullmatch(key) or key.startswith(_FORBIDDEN_ENV_PREFIXES):
+            raise _Refused(f"invalid or forbidden env key: {key!r}")
+        if any(c in value for c in ("\x00", "\n", "\r")):
+            raise _Refused(f"control character in env value for {key!r}")
+        environment[key] = value
+    environment["HOME"] = user_pw.pw_dir
+    # System dirs FIRST so a trojaned binary in an admin-writable prefix (homebrew /
+    # usr-local — where binary_dir itself always lives, per I5) cannot mask a system
+    # binary a daemon subprocess calls. The daemon's own binary is found via the absolute
+    # ProgramArguments[0], so binary_dir need not lead. dict.fromkeys dedups, order-preserving.
+    path_dirs = [
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+        binary_dir,
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    # dict.fromkeys dedups order-preserving, collapsing binary_dir when it equals a literal
+    # prefix. (Assumes realpath did not cross a symlinked prefix parent — the I5 prefixes are
+    # stable and non-symlinked on the fleet; a stale duplicate would be harmless, system leads.)
+    environment["PATH"] = ":".join(dict.fromkeys(path_dirs))
+
+    # GroupName is intentionally omitted: launchd runs the daemon with the non-root
+    # UserName's primary group (non-privileged). Emitting it would only add surface.
+    plist: dict[str, object] = {
+        "Label": label,
+        "ProgramArguments": [binary, *program],
+        "UserName": name,
+        "EnvironmentVariables": environment,
+        "StandardOutPath": f"{_LOG_DIR}/{label}.out",
+        "StandardErrorPath": f"{_LOG_DIR}/{label}.err",
+        "RunAtLoad": run_at_load,
+    }
+    if keep_alive is not None:
+        plist["KeepAlive"] = _validate_keep_alive(keep_alive)
+    if throttle_interval is not None:
+        plist["ThrottleInterval"] = throttle_interval
+    if timeout is not None:
+        plist["TimeOut"] = timeout
+    if nice is not None:
+        plist["Nice"] = nice
+    return plist
+
+
+def _render_plist_xml(plist: dict) -> bytes:
+    """Serialise a plist dict to XML bytes via plistlib (stdlib, available under -I)."""
+    return plistlib.dumps(plist, fmt=plistlib.FMT_XML, sort_keys=True)
+
+
+def _precreate_log_leaves(
+    label: str, user_pw: pwd.struct_passwd, *, log_dir: str = _LOG_DIR
+) -> None:
+    """I8: create the daemon's stdout/stderr leaves as root, then chown to the daemon.
+
+    launchd opens ``Standard*Path`` AFTER dropping to ``UserName`` (VERIF-4), so the
+    leaves must be writable by that account. The log dir is opened first with
+    ``O_DIRECTORY|O_NOFOLLOW`` and verified (real dir we own, not group/other-writable),
+    then each leaf is opened *relative to that dir fd* (``openat``) with ``O_NOFOLLOW``.
+    A symlinked ``log_dir``, a symlinked final component, and a symlinked / pre-positioned /
+    hardlinked leaf are all refused. (``O_NOFOLLOW`` guards the final dir component and the
+    leaves; an *intermediate* symlink in ``log_dir``'s path is still followed, but the dir
+    fstat below independently requires the resolved dir be root-owned and non-writable, so
+    swapping a component already needs root.) Local safety does NOT depend on the 2.1 lock.
+    Each leaf fd is then
+    ``fstat``'d (exactly like ``_audit``) to refuse a pre-positioned regular file, a
+    hardlink (``st_nlink``), or a group/other-writable file BEFORE ``fchown`` — otherwise
+    root would hand the daemon ownership of an attacker-chosen inode. ``_require_root`` is
+    enforced by the caller (install handler, 1.4), so this stays unit-testable non-root.
+    """
+    _validate_label(label)
+    dir_fd = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        dst = os.fstat(dir_fd)
+        if not (
+            stat.S_ISDIR(dst.st_mode)
+            and dst.st_uid == os.geteuid()
+            and not dst.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise _Refused(
+                f"refuse to use a suspect log dir: {log_dir!r} "
+                f"(uid={dst.st_uid} mode={dst.st_mode:#o})"
+            )
+        for suffix in ("out", "err"):
+            name = f"{label}.{suffix}"
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+                0o640,
+                dir_fd=dir_fd,
+            )
+            try:
+                st = os.fstat(fd)
+                if not (
+                    stat.S_ISREG(st.st_mode)
+                    and st.st_uid == os.geteuid()
+                    and st.st_nlink == 1
+                    and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                ):
+                    raise _Refused(
+                        f"refuse to chown a suspect log leaf: {name!r} "
+                        f"(uid={st.st_uid} nlink={st.st_nlink} mode={st.st_mode:#o})"
+                    )
+                os.fchown(fd, user_pw.pw_uid, user_pw.pw_gid)
+            finally:
+                os.close(fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _make_stub(action: str):
