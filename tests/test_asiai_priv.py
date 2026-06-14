@@ -76,13 +76,6 @@ def test_help_is_not_a_refusal(helper):
     assert _read_audit(audit) == []  # --help must never be audited as a refusal
 
 
-def test_stub_action_returns_internal_error(helper):
-    mod, audit = helper
-    assert mod.main(["purge"]) == mod.EXIT_INTERNAL
-    rows = _read_audit(audit)
-    assert any(r["action"] == "purge" and r["verdict"] == "error" for r in rows)
-
-
 def test_audit_is_append_only(helper):
     mod, audit = helper
     mod.main(["purge"])
@@ -253,6 +246,10 @@ def test_validate_label_accepts_canonical(helper):
         "com.asiai.a b",  # space
         "com.asiai.x\x00",  # NUL
         "prefixcom.asiai.web",  # not anchored at start
+        "com.asiai.-web",  # leading hyphen
+        "com.asiai.web-",  # trailing hyphen
+        "com.asiai.-",  # bare hyphen
+        "com.asiai.--",  # all hyphens
     ],
 )
 def test_validate_label_rejects(helper, bad):
@@ -681,3 +678,266 @@ def test_precreate_log_leaves_refuses_symlinked_dir(helper, tmp_path):
     pw = _fake_pw("me", os.getuid(), os.getgid())
     with pytest.raises(OSError):  # O_DIRECTORY|O_NOFOLLOW refuses the symlinked dir
         mod._precreate_log_leaves("com.asiai.web", pw, log_dir=str(linkdir))
+
+
+# ---------------------------------------------------------------------------
+# Story 1.4 — lifecycle actions (the integration point). The plist WRITE and the
+# operation ORDER are the crux; fchown(0,0) is mocked (root-only, not testable non-root).
+# ---------------------------------------------------------------------------
+
+
+def _mock_fchown(mod, monkeypatch) -> list:
+    calls: list = []
+    monkeypatch.setattr(mod.os, "fchown", lambda fd, uid, gid: calls.append((uid, gid)))
+    return calls
+
+
+def _daemons_dir(tmp_path) -> str:
+    d = tmp_path / "LaunchDaemons"
+    d.mkdir()
+    os.chmod(str(d), 0o755)  # root-equivalent on the target; not group/other-writable
+    return str(d)
+
+
+# --- _write_plist_atomic ---------------------------------------------------
+
+
+def test_write_plist_atomic_writes_root_wheel_0644(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    d = _daemons_dir(tmp_path)
+    calls = _mock_fchown(mod, monkeypatch)
+    path = mod._write_plist_atomic("com.asiai.web", b"<plist/>\n", daemons_dir=d)
+    assert path == f"{d}/com.asiai.web.plist"
+    leaf = Path(d) / "com.asiai.web.plist"
+    assert leaf.read_bytes() == b"<plist/>\n"
+    assert (leaf.stat().st_mode & 0o777) == 0o644
+    assert (0, 0) in calls  # fchown(fd, 0, 0) -> root:wheel
+    assert not (Path(d) / "com.asiai.web.plist.new").exists()  # temp gone
+
+
+def test_write_plist_atomic_overwrites_atomically(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    d = _daemons_dir(tmp_path)
+    (Path(d) / "com.asiai.web.plist").write_bytes(b"OLD")
+    _mock_fchown(mod, monkeypatch)
+    mod._write_plist_atomic("com.asiai.web", b"NEW\n", daemons_dir=d)
+    assert (Path(d) / "com.asiai.web.plist").read_bytes() == b"NEW\n"
+
+
+def test_write_plist_atomic_refuses_group_writable_dir(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    d = _daemons_dir(tmp_path)
+    os.chmod(d, 0o775)  # group-writable -> I0 runtime refusal
+    _mock_fchown(mod, monkeypatch)
+    with pytest.raises(mod._Refused):
+        mod._write_plist_atomic("com.asiai.web", b"x", daemons_dir=d)
+
+
+def test_write_plist_atomic_refuses_symlinked_dir(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    real = tmp_path / "real"
+    real.mkdir()
+    os.chmod(str(real), 0o755)
+    link = tmp_path / "LaunchDaemons"
+    link.symlink_to(real)
+    _mock_fchown(mod, monkeypatch)
+    with pytest.raises(OSError):  # O_DIRECTORY|O_NOFOLLOW
+        mod._write_plist_atomic("com.asiai.web", b"x", daemons_dir=str(link))
+
+
+def test_unlink_plist_removes_and_is_idempotent(helper, tmp_path):
+    mod, _ = helper
+    d = _daemons_dir(tmp_path)
+    leaf = os.path.join(d, "com.asiai.web.plist")
+    with open(leaf, "w") as fh:
+        fh.write("x")
+    mod._unlink_plist("com.asiai.web", daemons_dir=d)
+    assert not os.path.exists(leaf)
+    mod._unlink_plist("com.asiai.web", daemons_dir=d)  # idempotent: no error when absent
+
+
+# --- handlers via main() (mock _require_root + _run) ------------------------
+
+
+def test_install_daemon_order_and_bootstrap(helper, monkeypatch):
+    """Order is: validate -> write -> precreate logs -> bootstrap (never bootstrap first)."""
+    mod, audit = helper
+    seq: list = []
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_binary", lambda b: b)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+
+    def fake_write(label, xml, **_k):
+        seq.append("write")
+        return f"/Library/LaunchDaemons/{label}.plist"
+
+    def fake_precreate(label, pw, **_k):
+        seq.append("precreate")
+
+    def fake_run(argv, *, check):
+        seq.append(("run", tuple(argv)))
+
+    monkeypatch.setattr(mod, "_write_plist_atomic", fake_write)
+    monkeypatch.setattr(mod, "_precreate_log_leaves", fake_precreate)
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    rc = mod.main(
+        [
+            "install-daemon",
+            "--label",
+            "com.asiai.aux-1",
+            "--binary",
+            "/opt/homebrew/bin/llama-server",
+            "--program-arg",
+            "serve",
+        ]
+    )
+    assert rc == mod.EXIT_OK
+    assert seq[0] == "write"
+    assert seq[1] == "precreate"
+    assert seq[2] == (
+        "run",
+        ("/bin/launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.asiai.aux-1.plist"),
+    )
+    assert any(
+        r["action"] == "install-daemon" and r["verdict"] == "accepted" for r in _read_audit(audit)
+    )
+
+
+@pytest.mark.parametrize(
+    "action,expected",
+    [
+        ("start-daemon", ("/bin/launchctl", "kickstart", "-k", "system/com.asiai.aux-1")),
+        ("stop-daemon", ("/bin/launchctl", "kill", "SIGTERM", "system/com.asiai.aux-1")),
+        ("enable-daemon", ("/bin/launchctl", "enable", "system/com.asiai.aux-1")),
+        ("disable-daemon", ("/bin/launchctl", "disable", "system/com.asiai.aux-1")),
+    ],
+)
+def test_lifecycle_action_launchctl_argv(helper, monkeypatch, action, expected):
+    mod, audit = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    captured: dict = {}
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, *, check: captured.setdefault("argv", tuple(argv))
+    )
+    rc = mod.main([action, "--label", "com.asiai.aux-1"])
+    assert rc == mod.EXIT_OK
+    assert captured["argv"] == expected
+    assert any(r["verdict"] == "accepted" for r in _read_audit(audit))
+
+
+def test_purge_runs_purge(helper, monkeypatch):
+    mod, audit = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    captured: dict = {}
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, *, check: captured.setdefault("argv", tuple(argv))
+    )
+    rc = mod.main(["purge"])
+    assert rc == mod.EXIT_OK
+    assert captured["argv"] == ("/usr/sbin/purge",)
+    assert any(r["action"] == "purge" and r["verdict"] == "accepted" for r in _read_audit(audit))
+
+
+def test_uninstall_bootout_then_unlink(helper, monkeypatch):
+    mod, _ = helper
+    seq: list = []
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_run", lambda argv, *, check: seq.append(("run", tuple(argv), check)))
+    monkeypatch.setattr(mod, "_unlink_plist", lambda label, **_k: seq.append(("unlink", label)))
+    rc = mod.main(["uninstall-daemon", "--label", "com.asiai.aux-1"])
+    assert rc == mod.EXIT_OK
+    assert seq[0] == ("run", ("/bin/launchctl", "bootout", "system/com.asiai.aux-1"), False)
+    assert seq[1] == ("unlink", "com.asiai.aux-1")
+
+
+@pytest.mark.parametrize("action", ["disable-daemon", "uninstall-daemon", "stop-daemon"])
+@pytest.mark.parametrize("label", ["com.asiai.web", "com.asiai.aisctl-serve"])
+def test_reserved_label_refused(helper, monkeypatch, action, label):
+    """I9: destructive actions on a fixed asiai service are hard-refused, no launchctl runs."""
+    mod, audit = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    ran: list = []
+    monkeypatch.setattr(mod, "_run", lambda argv, *, check: ran.append(argv))
+    monkeypatch.setattr(mod, "_unlink_plist", lambda *a, **k: ran.append(("unlink",)))
+    rc = mod.main([action, "--label", label])
+    assert rc == mod.EXIT_REFUSED
+    assert not ran  # nothing privileged ran
+    assert any(r["verdict"] == "refused" for r in _read_audit(audit))
+
+
+@pytest.mark.parametrize("label", ["com.asiai.web", "com.asiai.aisctl-serve"])
+def test_install_reserved_label_refused(helper, monkeypatch, label):
+    """I9: install overwrites via renameat -> hijack; reserved labels are refused pre-write."""
+    mod, audit = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    did: list = []
+    monkeypatch.setattr(mod, "_write_plist_atomic", lambda *a, **k: did.append("write") or "/x")
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: did.append("run"))
+    rc = mod.main(
+        [
+            "install-daemon",
+            "--label",
+            label,
+            "--binary",
+            "/opt/homebrew/bin/llama-server",
+            "--program-arg",
+            "serve",
+        ]
+    )
+    assert rc == mod.EXIT_REFUSED
+    assert not did  # refused before any write/launchctl
+    assert any(r["verdict"] == "refused" for r in _read_audit(audit))
+
+
+def test_action_refused_when_not_root(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setattr(mod.os, "geteuid", lambda: 1000)  # not root
+    ran: list = []
+    monkeypatch.setattr(mod, "_run", lambda argv, *, check: ran.append(argv))
+    assert mod.main(["purge"]) == mod.EXIT_REFUSED
+    assert not ran  # _require_root refused before any privileged op
+
+
+@pytest.mark.parametrize(
+    "kw", [{"nice": 99}, {"nice": -99}, {"timeout": -1}, {"throttle_interval": -5}]
+)
+def test_plist_refuses_out_of_range_timing(helper, kw):
+    mod, _ = helper
+    with pytest.raises(mod._Refused):
+        _plist(mod, **kw)
+
+
+def test_install_rolls_back_on_bootstrap_failure(helper, monkeypatch):
+    """A failed bootstrap after the write must remove the plist (no stray reboot-load)."""
+    mod, audit = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_binary", lambda b: b)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+    monkeypatch.setattr(
+        mod, "_write_plist_atomic", lambda label, xml, **_k: f"/Library/LaunchDaemons/{label}.plist"
+    )
+    monkeypatch.setattr(mod, "_precreate_log_leaves", lambda label, pw, **_k: None)
+    unlinked: list = []
+    monkeypatch.setattr(mod, "_unlink_plist", lambda label, **_k: unlinked.append(label))
+
+    def fake_run(argv, *, check):
+        if "bootstrap" in argv:
+            raise mod.subprocess.CalledProcessError(1, argv)  # bootstrap fails
+        # bootout (rollback) succeeds
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    rc = mod.main(
+        [
+            "install-daemon",
+            "--label",
+            "com.asiai.aux-1",
+            "--binary",
+            "/opt/homebrew/bin/llama-server",
+            "--program-arg",
+            "serve",
+        ]
+    )
+    assert rc == mod.EXIT_INTERNAL
+    assert unlinked == ["com.asiai.aux-1"]  # rolled back
+    assert not any(r.get("verdict") == "accepted" for r in _read_audit(audit))  # no false accept

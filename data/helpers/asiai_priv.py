@@ -29,6 +29,7 @@ Security invariants realised here:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import plistlib
@@ -69,9 +70,10 @@ class _Refused(Exception):
     """
 
 
-# I9 / label: only ``com.asiai.<name>``. Anchored implicitly by ``fullmatch`` (no ``^``/``$``
-# — those would let a trailing newline slip through ``$``; fullmatch requires the whole string).
-_LABEL_RE = re.compile(r"com\.asiai\.[a-z0-9-]+")
+# I9 / label: only ``com.asiai.<name>`` where <name> starts and ends with an alphanumeric
+# (no leading/trailing/bare hyphen). Anchored implicitly by ``fullmatch`` (no ``^``/``$`` —
+# those would let a trailing newline slip through ``$``; fullmatch requires the whole string).
+_LABEL_RE = re.compile(r"com\.asiai\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
 
 # I3 / environment: keys that let a non-root daemon load attacker code are forbidden.
 _FORBIDDEN_ENV_PREFIXES = ("DYLD_", "LD_")
@@ -109,6 +111,23 @@ _LOG_DIR = "/Library/Logs/asiai"
 # KeepAlive: a bool, or a dict whose subkeys are confined to this closed set (I1) — keeps
 # the only caller-supplied sub-tree bounded (no PathState/OtherJobEnabled activation tricks).
 _KEEP_ALIVE_KEYS: tuple[str, ...] = ("Crashed", "SuccessfulExit")
+
+# Lifecycle (story 1.4). Absolute paths only — the helper runs via sudo, CWD is untrusted.
+_LAUNCH_DAEMONS_DIR = "/Library/LaunchDaemons"
+_LAUNCHCTL = "/bin/launchctl"
+_PURGE = "/usr/sbin/purge"
+
+# I9: fixed asiai services. Any action that could MUTATE a reserved service is hard-refused so
+# a bounded --label matching the regex cannot hijack it: install (renameat = OVERWRITE the
+# canonical plist = hijack), uninstall (destroy), disable (persistent-disable), stop
+# (persistent-down — the default KeepAlive does not restart after a clean SIGTERM exit).
+# start/enable stay allowed (transient/benign). The legitimate "reinstall the canonical
+# identically" goes through a content-validated path (story 2.2), never this bounded action.
+_RESERVED_LABELS: tuple[str, ...] = ("com.asiai.web", "com.asiai.aisctl-serve")
+
+# Long-running engine daemons: restart on crash, stay down on a clean exit (so `stop` =
+# SIGTERM keeps it down). Matches the legacy aisrv plist (KeepAlive parity).
+_DEFAULT_KEEP_ALIVE = {"Crashed": True, "SuccessfulExit": False}
 
 # Closed allowlist of actions. Handlers are stubs in story 1.1.
 _ACTIONS: tuple[str, ...] = (
@@ -435,6 +454,15 @@ def _build_plist_dict(
     if resolved_uid == 0:
         raise _Refused("refuse to generate a plist that runs as root (uid 0)")
 
+    # Bound the numeric timing knobs (refuse-by-default posture, even though they grant no
+    # privilege and the daemon is non-root): Nice is a kernel priority, the others seconds.
+    if nice is not None and not -20 <= nice <= 20:
+        raise _Refused(f"nice out of range [-20, 20]: {nice}")
+    if throttle_interval is not None and not 0 <= throttle_interval <= 86400:
+        raise _Refused(f"throttle_interval out of range [0, 86400]: {throttle_interval}")
+    if timeout is not None and not 0 <= timeout <= 86400:
+        raise _Refused(f"timeout out of range [0, 86400]: {timeout}")
+
     program = list(program_args or [])
     for arg in program:
         if not isinstance(arg, str) or "\x00" in arg:
@@ -560,18 +588,190 @@ def _precreate_log_leaves(
         os.close(dir_fd)
 
 
-def _make_stub(action: str):
-    """Return a handler that audits the attempt then refuses to pretend it worked."""
+# ---------------------------------------------------------------------------
+# Lifecycle actions (story 1.4) — the integration point. Each handler enforces root,
+# runs the 1.2 validators + 1.3 generator, performs the privileged op via the modern
+# launchctl family, and audits the accepted outcome. Refusals raise _Refused (audited by
+# main -> EXIT_REFUSED); subprocess/internal failures surface via main -> EXIT_INTERNAL.
+# ---------------------------------------------------------------------------
 
-    def handler(_args: argparse.Namespace) -> None:
-        _audit(action, "error", reason="not implemented: foundation story 1.1")
-        raise NotImplementedError(f"{action}: implemented in a later story")
 
-    return handler
+def _write_plist_atomic(label: str, xml: bytes, *, daemons_dir: str = _LAUNCH_DAEMONS_DIR) -> str:
+    """Write ``<label>.plist`` root:wheel 0644 atomically into ``daemons_dir`` (FR1, I0).
+
+    The dir is opened ``O_DIRECTORY|O_NOFOLLOW`` and verified (root-owned, not
+    group/other-writable = I0 runtime), then the write happens *relative to that dir fd*
+    (openat/renameat), so it does not depend on the 2.1 lock. (``O_NOFOLLOW`` guards only the
+    final ``daemons_dir`` component; an *intermediate* symlink in the path is still followed,
+    but the dir fstat independently requires the resolved dir be root-owned and non-writable,
+    so swapping a component already needs root.) The plist is written to a fresh temp leaf
+    (``O_EXCL|O_NOFOLLOW``, which
+    refuses any pre-positioned file/symlink), fstat-checked (regular, owned, single link),
+    ``fchmod 0o644`` + ``fchown(0, 0)`` (root:wheel), fsync'd, then ``renameat``'d over the
+    final name — atomic, no ``/tmp`` staging, no half-written plist on a mid-write crash.
+    """
+    final = f"{label}.plist"
+    tmp = f"{label}.plist.new"
+    dir_fd = os.open(daemons_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        dst = os.fstat(dir_fd)
+        if not (
+            stat.S_ISDIR(dst.st_mode)
+            and dst.st_uid == os.geteuid()
+            and not dst.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise _Refused(
+                f"refuse to write into a suspect dir: {daemons_dir!r} "
+                f"(uid={dst.st_uid} mode={dst.st_mode:#o})"
+            )
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp, dir_fd=dir_fd)  # clear a stale temp from a prior crash
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dir_fd
+        )
+        try:
+            st = os.fstat(fd)
+            if not (stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and st.st_nlink == 1):
+                raise _Refused(f"refuse to write a suspect temp leaf: {tmp!r}")
+            _write_all(fd, xml)
+            os.fchmod(fd, 0o644)
+            os.fchown(fd, 0, 0)  # root:wheel
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(tmp, final, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)  # atomic replace
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+    finally:
+        os.close(dir_fd)
+    return f"{daemons_dir}/{final}"
+
+
+def _unlink_plist(label: str, *, daemons_dir: str = _LAUNCH_DAEMONS_DIR) -> None:
+    """Remove ``<label>.plist`` via an openat anchored on a verified dir fd (FR2, idempotent)."""
+    dir_fd = os.open(daemons_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        dst = os.fstat(dir_fd)
+        if not (
+            stat.S_ISDIR(dst.st_mode)
+            and dst.st_uid == os.geteuid()
+            and not dst.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise _Refused(f"refuse to unlink in a suspect dir: {daemons_dir!r}")
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(f"{label}.plist", dir_fd=dir_fd)  # already gone -> idempotent
+    finally:
+        os.close(dir_fd)
+
+
+def _refuse_reserved(action: str, label: str) -> None:
+    """I9: hard-refuse a destructive action on a fixed asiai service."""
+    if label in _RESERVED_LABELS:
+        raise _Refused(f"{action} refused on reserved label: {label}")
+
+
+def _install_daemon(args: argparse.Namespace) -> None:
+    _require_root()
+    label = _validate_label(args.label)
+    _refuse_reserved("install-daemon", label)  # I9: overwrite of a reserved plist = hijack
+    binary = _resolve_binary(args.binary)
+    user_pw = _resolve_user(args.user)
+    env = _validate_env(args.env or [])
+    program_args = list(args.program_arg or [])
+    # Validated home-confined paths, appended with the llama-server flag convention (parity
+    # with ais_core/plist.py). Non-llama engines (ollama/mlx) pass all flags via --program-arg.
+    for flag, raw in (
+        ("--model", args.model_path),
+        ("--chat-template-file", args.template_path),
+        ("--mmproj", args.mmproj_path),
+    ):
+        if raw is not None:
+            program_args.extend([flag, _resolve_user_path(raw, user_pw.pw_dir)])
+    if args.port is not None:
+        program_args.extend(["--port", str(_validate_port(args.port))])
+    plist = _build_plist_dict(
+        label=label,
+        binary=binary,
+        user_pw=user_pw,
+        program_args=program_args,
+        env=env,
+        keep_alive=_DEFAULT_KEEP_ALIVE,
+        throttle_interval=args.throttle_interval,
+        timeout=args.timeout,
+        nice=args.nice,
+    )
+    path = _write_plist_atomic(label, _render_plist_xml(plist))
+    # The write is the first persistent side effect; if a later step fails the install did
+    # NOT complete -> roll it back so nothing loads on reboot and the audit stays truthful.
+    try:
+        _precreate_log_leaves(label, user_pw)
+        _run([_LAUNCHCTL, "bootstrap", "system", path], check=True)
+    except BaseException:
+        _run([_LAUNCHCTL, "bootout", f"system/{label}"], check=False)  # undo a partial load
+        _unlink_plist(label)
+        raise
+    _audit("install-daemon", "accepted", label=label, binary=binary, user=user_pw.pw_name)
+
+
+def _uninstall_daemon(args: argparse.Namespace) -> None:
+    _require_root()
+    label = _validate_label(args.label)
+    _refuse_reserved("uninstall-daemon", label)
+    _run([_LAUNCHCTL, "bootout", f"system/{label}"], check=False)  # best-effort unload
+    _unlink_plist(label)
+    _audit("uninstall-daemon", "accepted", label=label)
+
+
+def _start_daemon(args: argparse.Namespace) -> None:
+    _require_root()
+    label = _validate_label(args.label)
+    _run([_LAUNCHCTL, "kickstart", "-k", f"system/{label}"], check=True)
+    _audit("start-daemon", "accepted", label=label)
+
+
+def _stop_daemon(args: argparse.Namespace) -> None:
+    _require_root()
+    label = _validate_label(args.label)
+    _refuse_reserved("stop-daemon", label)  # I9: persistent-down on a reserved service = DoS
+    _run([_LAUNCHCTL, "kill", "SIGTERM", f"system/{label}"], check=True)
+    _audit("stop-daemon", "accepted", label=label)
+
+
+def _enable_daemon(args: argparse.Namespace) -> None:
+    _require_root()
+    label = _validate_label(args.label)
+    _run([_LAUNCHCTL, "enable", f"system/{label}"], check=True)
+    _audit("enable-daemon", "accepted", label=label)
+
+
+def _disable_daemon(args: argparse.Namespace) -> None:
+    _require_root()
+    label = _validate_label(args.label)
+    _refuse_reserved("disable-daemon", label)
+    _run([_LAUNCHCTL, "disable", f"system/{label}"], check=True)
+    _audit("disable-daemon", "accepted", label=label)
+
+
+def _purge(_args: argparse.Namespace) -> None:
+    _require_root()
+    _run([_PURGE], check=True)
+    _audit("purge", "accepted")
 
 
 # Dispatch table. Closed set, default-deny everywhere else (I7).
-_DISPATCH = {action: _make_stub(action) for action in _ACTIONS}
+_DISPATCH = {
+    "install-daemon": _install_daemon,
+    "uninstall-daemon": _uninstall_daemon,
+    "start-daemon": _start_daemon,
+    "stop-daemon": _stop_daemon,
+    "enable-daemon": _enable_daemon,
+    "disable-daemon": _disable_daemon,
+    "purge": _purge,
+}
+# Structural invariant: the dispatch covers exactly the declared action allowlist.
+assert set(_DISPATCH) == set(_ACTIONS)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -581,8 +781,32 @@ def _build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     sub = parser.add_subparsers(dest="action", required=True)
-    for action in _ACTIONS:
-        sub.add_parser(action, allow_abbrev=False)
+
+    install = sub.add_parser("install-daemon", allow_abbrev=False)
+    install.add_argument("--label", required=True)
+    install.add_argument("--binary", required=True)
+    install.add_argument("--user", default=None)
+    install.add_argument("--program-arg", action="append", dest="program_arg", default=[])
+    install.add_argument("--env", action="append", default=[])
+    install.add_argument("--port", default=None)
+    install.add_argument("--model-path", dest="model_path", default=None)
+    install.add_argument("--template-path", dest="template_path", default=None)
+    install.add_argument("--mmproj-path", dest="mmproj_path", default=None)
+    install.add_argument("--throttle-interval", dest="throttle_interval", type=int, default=None)
+    install.add_argument("--timeout", type=int, default=None)
+    install.add_argument("--nice", type=int, default=None)
+
+    for action in (
+        "uninstall-daemon",
+        "start-daemon",
+        "stop-daemon",
+        "enable-daemon",
+        "disable-daemon",
+    ):
+        p = sub.add_parser(action, allow_abbrev=False)
+        p.add_argument("--label", required=True)
+
+    sub.add_parser("purge", allow_abbrev=False)
     return parser
 
 
@@ -610,8 +834,6 @@ def main(argv: list[str] | None = None) -> int:
     except _Refused as exc:
         _audit(args.action, "refused", reason=str(exc), argv=argv)
         return EXIT_REFUSED
-    except NotImplementedError:
-        return EXIT_INTERNAL
     except Exception as exc:
         # Never let a root process crash with a traceback on stderr.
         # Log only the exception *type*, never its message: a stray path or secret
