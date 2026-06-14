@@ -311,7 +311,7 @@ def test_log_path_properties() -> None:
     """Manifests now store ~/Library/Logs/asiai/<engine>/ (US-015 fix).
 
     The properties expand ~ at access time so the absolute path works for
-    both the daemon (UserName=jmn) and the install-time mkdir.
+    both the daemon (UserName=testuser) and the install-time mkdir.
     """
     import os
 

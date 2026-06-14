@@ -113,7 +113,7 @@ def test_register_with_unknown_signature_raises_typeerror() -> None:
         ["engine", "status"],
         ["engine", "status", "ollama", "--json"],
         ["engine", "status", "ollama", "--deep", "--json"],
-        ["engine", "install", "ollama", "--firewall", "lan-only", "--user", "jmn"],
+        ["engine", "install", "ollama", "--firewall", "lan-only", "--user", "testuser"],
         ["engine", "install", "ollama", "--dry-run", "--force"],
         ["engine", "install", "llamacpp-aux-1", "--preset", "qwen3-4b-instruct-hermes-aux-1"],
         ["engine", "list-presets", "--json"],
