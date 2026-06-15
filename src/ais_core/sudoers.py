@@ -1,9 +1,10 @@
 """Generate, validate, and install ``/etc/sudoers.d/asiai-inference``.
 
-The strict-scope sudoers rule is what makes the unload+purge pipeline
-runnable from a non-interactive Claude Code agent: every privileged call we
-make is whitelisted by exact path, with the wildcard restricted to
-``com.asiai.*`` plist labels and pf anchors.
+The fragment grants ``NOPASSWD`` on the **privileged helper alone**
+(``/Library/PrivilegedHelperTools/asiai-priv``) — no wildcard rules on raw
+``launchctl``/``pfctl``/``mv``/``chown``/``chmod``. The helper validates every
+operation internally (generate-don't-validate, AEP-01), so one allowlisted
+command replaces the entire wildcard surface that an attacker could over-match.
 
 The file is **never** installed silently. ``aisctl bootstrap --install-sudoers``
 prints the generated content, runs ``visudo -cf`` to fail-fast on syntax
@@ -24,83 +25,53 @@ import sys
 from pathlib import Path
 
 from ais_core.io import secure_staging_dir
-from ais_core.manifest import EngineManifest
 
 SUDOERS_PATH = "/etc/sudoers.d/asiai-inference"
 ADMIN_GROUP = "%admin"
+# Canonical path of the EXECUTED helper: the root-owned copy that the bootstrap (story 2.1)
+# places at /Library/PrivilegedHelperTools/asiai-priv (root:wheel 0755). The sudoers rule and
+# the bootstrap copy MUST point at this same path — never the admin-writable site-packages
+# source (invariant #3).
+PRIVILEGED_HELPER_PATH = "/Library/PrivilegedHelperTools/asiai-priv"
 
 
 class SudoersError(RuntimeError):
     """Raised when the sudoers content is malformed or cannot be installed."""
 
 
-def generate_sudoers_content(manifests: list[EngineManifest] | None = None) -> str:
-    """Render the sudoers content. Pure function, no I/O.
+def generate_sudoers_content() -> str:
+    """Render the helper-only sudoers fragment. Pure function, no I/O.
 
-    The wildcard pattern ``com.asiai.*`` is the same one validated by
-    :func:`ais_core.manifest.is_valid_plist_label`, so no engine installed
-    via this tool can escape the scope.
+    Grants ``NOPASSWD`` on the privileged helper ALONE — zero wildcard rules on raw
+    ``launchctl``/``pfctl``/``mv``/``chown``/``chmod``/``rm``. The helper validates every
+    operation internally, so one allowlisted command (with any arguments — the helper
+    self-validates them) replaces the entire over-matchable wildcard surface (AEP-01).
+
+    Security — ``env_reset``/``SUDO_*``: the helper derives the daemon's non-root run-as
+    identity from ``SUDO_UID`` (I2), so that value must be the real invoker's, never
+    caller-spoofable. sudo guarantees this itself: it sets ``SUDO_UID``/``SUDO_GID``/
+    ``SUDO_USER`` from the authenticated invoker AFTER the env_keep/env_check pass, with
+    overwrite — so even a hostile global ``env_keep += SUDO_UID`` cannot shield a caller
+    value. The per-command ``Defaults!<helper> env_reset`` is defence-in-depth ONLY for the
+    case where a site disabled ``env_reset`` globally. Do NOT add an ``env_delete`` /
+    ``env_keep`` for ``SUDO_*``: it is unnecessary and could strip the legitimate sudo-set
+    value the helper depends on, breaking I2. (Verified: sudo 1.9.17p2 man pages + env.c.)
     """
-    # `manifests` is currently unused — the wildcard makes the rules
-    # engine-agnostic — but we keep the parameter so a future v0.2 can
-    # narrow the scope to specifically-installed engines.
-    _ = manifests
-
     lines = [
         "# /etc/sudoers.d/asiai-inference",
         "# Managed by asiai-inference-server. Do not edit by hand.",
         "# Generated via `aisctl bootstrap --install-sudoers`.",
         "#",
-        "# Scope: every wildcard is restricted to com.asiai.* so engines",
-        "# installed manually (or by openclaw legacy plists) are NOT covered.",
+        "# Single privileged surface: the root-owned helper validates everything",
+        "# internally; there are NO wildcard rules on launchctl/pfctl/mv/chown/chmod.",
+        "# SECURITY: the helper trusts SUDO_UID (set by sudo from the real invoker) to",
+        "# derive the daemon's non-root run-as account (I2). env_reset stays on; SUDO_* is",
+        "# never env_kept. Do NOT add env_delete/env_keep for SUDO_* (would break I2).",
         "",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/purge",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl load -w "
-        "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl unload "
-        "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl unload -w "
-        "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl stop com.asiai.*",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl start com.asiai.*",
-        # Phase 2 LaunchDaemon bootstrap / bootout (modern launchctl).
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl bootstrap system "
-        "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl bootout system/com.asiai.*",
-        # Cold standby (aisctl disable/enable): durable off across reboots.
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl disable system/com.asiai.*",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/launchctl enable system/com.asiai.*",
-        # Phase 2 install-service uses /usr/bin/install for atomic plist drop.
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/bin/install -m 0644 -o root -g wheel "
-        "/tmp/asiai-* /Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/sysctl iogpu.wired_limit_mb=*",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /sbin/pfctl -f /etc/pf.conf",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /sbin/pfctl -f /etc/pf.anchors/com.asiai.*",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /sbin/pfctl -e",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /sbin/pfctl -nf -",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mkdir -p /etc/pf.anchors",
-        # Source paths are scoped to /tmp/asiai-*/ — a per-invocation 0700
-        # staging directory created by ais_core.io.secure_staging_dir().
-        # The directory's mode 0700 collapses the symlink-swap TOCTOU window
-        # that would otherwise exist between file creation and `sudo /bin/mv`.
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/asiai-*/com.asiai.*.plist "
-        "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/asiai-*/com.asiai.*.anchor "
-        "/etc/pf.anchors/com.asiai.*",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv /tmp/asiai-*/pf.conf /etc/pf.conf",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/mv "
-        "/tmp/asiai-*/asiai-inference.sudoers /etc/sudoers.d/asiai-inference",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/chown root\\:wheel "
-        "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/chown root\\:wheel "
-        "/etc/pf.anchors/com.asiai.*",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /usr/sbin/chown root\\:wheel /etc/pf.conf",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/chmod 644 "
-        "/Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/chmod 644 /etc/pf.anchors/com.asiai.*",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/chmod 644 /etc/pf.conf",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/rm -f /Library/LaunchDaemons/com.asiai.*.plist",
-        f"{ADMIN_GROUP} ALL=(ALL) NOPASSWD: /bin/rm -f /etc/pf.anchors/com.asiai.*",
+        f"Defaults!{PRIVILEGED_HELPER_PATH} env_reset",
+        # runas restricted to root: the helper must run as root; (root) drops the needless
+        # freedom of (ALL) to target another account (the helper would refuse euid!=0 anyway).
+        f"{ADMIN_GROUP} ALL=(root) NOPASSWD: {PRIVILEGED_HELPER_PATH}",
         "",
     ]
     return "\n".join(lines)

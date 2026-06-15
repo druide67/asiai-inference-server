@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ais_core.sudoers import (
+    ADMIN_GROUP,
+    PRIVILEGED_HELPER_PATH,
     SUDOERS_PATH,
     SudoersError,
     generate_sudoers_content,
@@ -24,40 +26,34 @@ def test_content_starts_with_warning_header() -> None:
     assert "Do not edit by hand" in content
 
 
-def test_content_includes_purge_rule() -> None:
+def test_content_grants_helper_only() -> None:
+    """The single NOPASSWD rule targets the privileged helper (any args — self-validated)."""
     content = generate_sudoers_content()
-    assert "NOPASSWD: /usr/sbin/purge" in content
+    rule = f"{ADMIN_GROUP} ALL=(root) NOPASSWD: {PRIVILEGED_HELPER_PATH}"
+    assert rule in content
+    nopasswd = [ln for ln in content.splitlines() if "NOPASSWD:" in ln]
+    assert nopasswd == [rule]  # exactly one rule, nothing else
 
 
-def test_content_includes_disable_enable_rules() -> None:
-    """aisctl disable/enable (cold standby) need their launchctl verbs."""
+def test_content_has_no_wildcards_or_raw_commands() -> None:
+    """No '*' and no raw launchctl/pfctl/mv/chown/chmod/rm/install on ANY directive line."""
     content = generate_sudoers_content()
-    assert "NOPASSWD: /bin/launchctl disable system/com.asiai.*" in content
-    assert "NOPASSWD: /bin/launchctl enable system/com.asiai.*" in content
+    raw = ("launchctl", "pfctl", "/bin/mv", "chown", "chmod", "/bin/rm", "/usr/bin/install")
+    directives = [ln for ln in content.splitlines() if ln and not ln.lstrip().startswith("#")]
+    for line in directives:
+        assert "*" not in line, f"wildcard rule survived: {line!r}"
+        for cmd in raw:
+            assert cmd not in line, f"raw command rule survived: {line!r}"
 
 
-def test_content_scope_is_strict_com_asiai_only() -> None:
-    """Every line containing a wildcard ``*`` must scope it to com.asiai.*."""
+def test_content_env_reset_no_sudo_keep() -> None:
+    """env_reset re-asserted for the helper; SUDO_* never env_kept (I2 anti-spoof)."""
     content = generate_sudoers_content()
-    for line in content.splitlines():
-        if "NOPASSWD:" not in line:
-            continue
-        if "*" not in line:
-            continue  # exact paths are scoped by definition
-        # iogpu.wired_limit_mb=* is a sysctl key=*VALUE wildcard, not a path one.
-        if "iogpu.wired_limit_mb" in line:
-            continue
-        # /tmp/asiai-*/ tempfile sources are scoped to our per-invocation
-        # 0700 staging directories (see ais_core.io.secure_staging_dir).
-        if "/tmp/asiai-" in line:
-            continue
-        assert "com.asiai." in line, f"unscoped rule with wildcard: {line!r}"
-
-
-def test_content_includes_pfctl_validate_command() -> None:
-    """pfctl -nf - must be NOPASSWD; firewall.validate_anchor() depends on it."""
-    content = generate_sudoers_content()
-    assert "/sbin/pfctl -nf -" in content
+    assert f"Defaults!{PRIVILEGED_HELPER_PATH} env_reset" in content
+    # env_keep / SUDO_ may appear only in the explanatory comment, never in a directive.
+    directives = [ln for ln in content.splitlines() if ln and not ln.lstrip().startswith("#")]
+    assert all("env_keep" not in ln for ln in directives)
+    assert all("SUDO_" not in ln for ln in directives)
 
 
 def test_content_admin_group_only() -> None:

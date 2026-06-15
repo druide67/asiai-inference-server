@@ -598,8 +598,8 @@ def test_bootstrap_dry_run_prints_content(capsys: pytest.CaptureFixture[str]) ->
     rc = main(["bootstrap", "--install-sudoers", "--dry-run"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "/usr/sbin/purge" in out
-    assert "com.asiai." in out
+    assert "NOPASSWD: /Library/PrivilegedHelperTools/asiai-priv" in out  # helper-only
+    assert "com.asiai." not in out  # the wildcard surface is gone
 
 
 def test_bootstrap_install_invokes_install_sudoers(
