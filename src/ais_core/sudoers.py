@@ -27,6 +27,10 @@ from pathlib import Path
 from ais_core.io import secure_staging_dir
 
 SUDOERS_PATH = "/etc/sudoers.d/asiai-inference"
+SUDOERS_DIR = "/etc/sudoers.d"
+# Staging name INSIDE the root-owned sudoers.d, dot-prefixed: sudo ignores any sudoers.d
+# file whose name contains a '.', so a half-installed fragment is never parsed as a rule.
+SUDOERS_STAGED = f"{SUDOERS_DIR}/.asiai-inference.tmp"
 ADMIN_GROUP = "%admin"
 # Canonical path of the EXECUTED helper: the root-owned copy that the bootstrap (story 2.1)
 # places at /Library/PrivilegedHelperTools/asiai-priv (root:wheel 0755). The sudoers rule and
@@ -100,10 +104,22 @@ def validate_content(content: str) -> None:
 
 
 def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str:
-    """Validate then atomically install the sudoers fragment.
+    """Validate then atomically install the sudoers fragment, root:wheel 0440.
 
-    Returns the destination path. In dry-run mode prints the content and
-    returns the destination without touching the filesystem.
+    Returns the destination path. In dry-run mode prints the content and returns the
+    destination without touching the filesystem.
+
+    The fragment is root:wheel 0440 at every path sudo PARSES, never invoker-owned-then-
+    chowned. All owner/mode work happens on a DOT-PREFIXED staged name that sudo ignores in
+    ``sudoers.d``; only an atomic rename touches the final (parsed) name. ``cp`` run as root
+    writes the staged file root-owned directly — unlike ``install(1)`` it leaves no
+    non-dotted ``INS@`` temp that sudo would parse on a crash (cp's worst case is a partial
+    DOTTED file sudo ignores and cleanup removes). This closes the TOCTOU where a process in
+    the installer's session could rewrite an invoker-owned file between a ``mv`` and a later
+    ``chown`` and freeze attacker content as a root-owned sudoers rule (full root). A final
+    ``visudo -c`` validates the whole tree and fails loud if anything no longer parses, so a
+    broken sudoers file can never silently lock out ``sudo``. The install is interactive
+    (sudo password): in the helper-only model nothing here is NOPASSWD.
     """
     if content is None:
         content = generate_sudoers_content()
@@ -120,7 +136,7 @@ def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str
     if not sys.stdin.isatty():
         raise SudoersError(
             "aisctl bootstrap --install-sudoers requires an interactive terminal "
-            "the first time (sudo password is needed for /bin/mv into "
+            "the first time (sudo password is needed to install the fragment into "
             f"{SUDOERS_PATH}). Run this command directly in Terminal.app:\n\n"
             "  cd ~/projets/asiai-inference-server && "
             ".venv/bin/aisctl bootstrap --install-sudoers\n\n"
@@ -135,11 +151,20 @@ def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str
         tmp_path = staging / "asiai-inference.sudoers"
         tmp_path.write_text(content, encoding="utf-8")
         tmp_path.chmod(0o440)
+        # Owner/mode work happens only on the DOT-PREFIXED staged name (sudo ignores it in
+        # sudoers.d); the final parsed name appears via one atomic rename. cp (run as root)
+        # writes the staged file root-owned — and unlike install(1) leaves no non-dotted INS@
+        # temp that sudo could parse on a crash. chown/chmod are belt-and-suspenders on the
+        # already-root, sudo-ignored staged file; visudo -c then fails loud if the resulting
+        # tree no longer parses (a broken sudoers file must never silently lock out sudo).
         try:
-            subprocess.run(["sudo", "/bin/mv", str(tmp_path), SUDOERS_PATH], check=True)
-            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_PATH], check=True)
-            subprocess.run(["sudo", "/bin/chmod", "440", SUDOERS_PATH], check=True)
+            subprocess.run(["sudo", "/bin/cp", str(tmp_path), SUDOERS_STAGED], check=True)
+            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_STAGED], check=True)
+            subprocess.run(["sudo", "/bin/chmod", "0440", SUDOERS_STAGED], check=True)
+            subprocess.run(["sudo", "/bin/mv", SUDOERS_STAGED, SUDOERS_PATH], check=True)
+            subprocess.run(["sudo", "/usr/sbin/visudo", "-c"], check=True)
         except subprocess.CalledProcessError as e:
+            subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_STAGED], check=False)  # best-effort
             raise SudoersError(f"Failed to install {SUDOERS_PATH}: {e}") from e
 
     return SUDOERS_PATH

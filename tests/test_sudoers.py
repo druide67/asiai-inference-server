@@ -13,6 +13,7 @@ from ais_core.sudoers import (
     ADMIN_GROUP,
     PRIVILEGED_HELPER_PATH,
     SUDOERS_PATH,
+    SUDOERS_STAGED,
     SudoersError,
     generate_sudoers_content,
     install_sudoers,
@@ -95,15 +96,16 @@ def test_install_sudoers_dry_run_skips_subprocess() -> None:
     assert path == SUDOERS_PATH
 
 
-def test_install_sudoers_invokes_validate_then_mv() -> None:
-    """Validation must happen BEFORE we move the file under /etc/sudoers.d/."""
-    call_order: list[str] = []
+def test_install_sudoers_secure_publish_sequence() -> None:
+    """All owner/mode work on the DOTTED staged name; the final name appears via one atomic
+    rename; visudo -c validates the whole tree last. No invoker-owned / parsed-wrong-mode
+    window, and cp (not install) leaves no non-dotted temp sudo could parse.
+    """
+    sudo_calls: list[list[str]] = []
 
     def fake_run(cmd, **_kwargs):
-        if any("visudo" in c for c in cmd):
-            call_order.append("visudo")
-        elif cmd[:2] == ["sudo", "/bin/mv"]:
-            call_order.append("mv")
+        if cmd[0] == "sudo":  # validate_content's `visudo -cf <tmp>` is NOT a sudo call
+            sudo_calls.append(cmd)
         return MagicMock(returncode=0, stdout="", stderr="")
 
     # The non-TTY guard (US-004 fix) blocks pytest runs by default. We patch
@@ -114,7 +116,50 @@ def test_install_sudoers_invokes_validate_then_mv() -> None:
     ):
         install_sudoers("# minimal\n")
 
-    assert call_order[:2] == ["visudo", "mv"]
+    assert [c[1] for c in sudo_calls] == [
+        "/bin/cp",
+        "/usr/sbin/chown",
+        "/bin/chmod",
+        "/bin/mv",
+        "/usr/sbin/visudo",
+    ]
+    # cp/chown/chmod operate on the dot-prefixed staged name; only mv touches the final name.
+    assert sudo_calls[0][-1] == SUDOERS_STAGED  # cp writes the dotted staged file
+    assert sudo_calls[1] == ["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_STAGED]
+    assert sudo_calls[2] == ["sudo", "/bin/chmod", "0440", SUDOERS_STAGED]
+    assert sudo_calls[3] == ["sudo", "/bin/mv", SUDOERS_STAGED, SUDOERS_PATH]
+    assert sudo_calls[4] == ["sudo", "/usr/sbin/visudo", "-c"]
+
+
+@pytest.mark.parametrize("fail_at", ["/bin/cp", "/bin/mv"])
+def test_install_sudoers_cleans_staged_on_failure(fail_at: str) -> None:
+    """A failure at cp OR at the publish-rename removes the dot-prefixed staging file.
+
+    The mv-fail case is the sharp one: cp already succeeded, so a real dot-prefixed leftover
+    exists and must be cleaned (and being dot-prefixed, sudo ignores it meanwhile).
+    """
+    import subprocess as _sp
+
+    removed: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        if any("visudo" in c for c in cmd):
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if cmd[:2] == ["sudo", fail_at]:
+            raise _sp.CalledProcessError(1, cmd)
+        if cmd[:3] == ["sudo", "/bin/rm", "-f"]:
+            removed.append(cmd)
+            return MagicMock(returncode=0)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=fake_run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        pytest.raises(SudoersError),
+    ):
+        install_sudoers("# minimal\n")
+
+    assert removed and removed[0][-1].endswith("/.asiai-inference.tmp")
 
 
 def test_remove_sudoers_when_absent_returns_false() -> None:
