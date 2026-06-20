@@ -269,7 +269,8 @@ def test_resolve_binary_accepts_under_prefix(helper, monkeypatch, tmp_path):
     target.write_text("x")
     real_prefix = os.path.realpath(str(bindir)) + os.sep
     monkeypatch.setattr(mod, "_BINARY_PREFIXES", (real_prefix,))
-    assert mod._resolve_binary(str(target)) == os.path.realpath(str(target))
+    # Returns the ORIGINAL path (validated via realpath), not the realpath itself.
+    assert mod._resolve_binary(str(target)) == str(target)
 
 
 def test_resolve_binary_rejects_outside_prefix(helper, monkeypatch, tmp_path):
@@ -283,16 +284,38 @@ def test_resolve_binary_rejects_outside_prefix(helper, monkeypatch, tmp_path):
         mod._resolve_binary(str(target))
 
 
-def test_resolve_binary_rejects_symlink_final(helper, monkeypatch, tmp_path):
+def test_resolve_binary_accepts_symlink_into_prefix(helper, monkeypatch, tmp_path):
+    """homebrew ships bin/<engine> as a symlink into Cellar/. A symlink whose REALPATH
+    lands under an allowlisted prefix is now ACCEPTED and resolved (the refusal was removed —
+    it protected nothing and broke every brew engine)."""
+    mod, _ = helper
+    cellar = tmp_path / "Cellar" / "llama.cpp" / "9700" / "bin"
+    cellar.mkdir(parents=True)
+    real = cellar / "llama-server"
+    real.write_text("x")  # the real binary inside Cellar
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    link = bindir / "llama-server"
+    link.symlink_to(real)  # the stable brew symlink the plist references
+    monkeypatch.setattr(mod, "_BINARY_PREFIXES", (os.path.realpath(str(cellar.parent)) + os.sep,))
+    # Validated via the realpath (target under prefix) but RETURNS the stable symlink path the
+    # caller passed (launchd re-resolves it at exec → survives brew upgrade), not the
+    # versioned Cellar realpath.
+    assert mod._resolve_binary(str(link)) == str(link)
+
+
+def test_resolve_binary_rejects_symlink_escaping_prefix(helper, monkeypatch, tmp_path):
+    """The realpath check still pins the real target: a symlink UNDER the prefix that points
+    OUTSIDE every allowlisted prefix is refused (relaxing S_ISLNK did not open an escape)."""
     mod, _ = helper
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    real = bindir / "llama-server"
-    real.write_text("x")
-    link = bindir / "llama-link"
-    link.symlink_to(real)  # target is valid AND under prefix, but the leaf is a symlink
+    rogue = tmp_path / "rogue"
+    rogue.write_text("x")  # real file OUTSIDE the allowlist
+    link = bindir / "llama-server"
+    link.symlink_to(rogue)  # symlink sits under the prefix but escapes it on resolution
     monkeypatch.setattr(mod, "_BINARY_PREFIXES", (os.path.realpath(str(bindir)) + os.sep,))
-    with pytest.raises(mod._Refused):
+    with pytest.raises(mod._Refused, match="outside allowlisted prefixes"):
         mod._resolve_binary(str(link))
 
 

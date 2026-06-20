@@ -1,35 +1,30 @@
-"""LaunchDaemon plist generation.
+"""LaunchDaemon plist generation (pure) + path helper.
 
-Ports the heredoc-XML logic from ``lib-engine.sh:352-470`` to
-``plistlib.dumps()`` (stdlib). Producing the dict is a pure function and is
-tested in isolation; writing the file requires sudo and is wrapped in a
-single thin function so the privileged surface stays small.
+Ports the heredoc-XML logic from ``lib-engine.sh:352-470`` to ``plistlib.dumps()`` (stdlib).
+Producing the dict is a pure function, tested in isolation.
+
+After AEP-01 (privileged helper) the **daemon plist is generated AND written by the root
+helper** (``asiai-priv install-daemon``, generate-don't-validate) — there is no longer a
+raw-``sudo`` write path in this module. ``build_plist_dict`` / ``render_plist_xml`` are kept
+as the pure, tested **reference shape** (dry-run preview) — close to, but NOT byte-for-byte,
+the helper's output: the helper omits the cosmetic ``Comment`` key and an explicit ``Nice``
+(0 is launchd's default) and puts Standard*Path under ``/Library/Logs/asiai/<label>.{out,err}``
+rather than the user home. ``plist_path`` is the canonical ``/Library/LaunchDaemons/<label>.plist``
+locator used across the package. The helper, not this module, owns ``ProgramArguments[0]``
+resolution and the live plist.
 
 Why plistlib over a Jinja2 template
 -----------------------------------
-``plistlib.dumps()`` is stdlib, handles XML escaping (e.g. ampersands in env
-values), enforces the right DOCTYPE, and refuses non-string keys by
-construction. The Bash version had to escape arguments by hand and was prone
-to breakage on values containing quotes or angle brackets.
-
-Atomic write
-------------
-We render to a per-invocation 0700 staging directory under ``/tmp`` (see
-:mod:`ais_core.io`) and ``mv`` the file under sudo to the final
-``/Library/LaunchDaemons/`` path. The 0700 staging dir prevents a local
-attacker from swapping the source for a symlink between the write and the
-privileged move (TOCTOU). Atomic ``mv`` also avoids leaving a half-written
-plist if the process is killed mid-write.
+``plistlib.dumps()`` is stdlib, handles XML escaping (e.g. ampersands in env values), enforces
+the right DOCTYPE, and refuses non-string keys by construction.
 """
 
 from __future__ import annotations
 
 import os
 import plistlib
-import subprocess
 from pathlib import Path
 
-from ais_core.io import secure_staging_dir
 from ais_core.manifest import EngineManifest, is_valid_plist_label
 
 LAUNCH_DAEMONS_DIR = "/Library/LaunchDaemons"
@@ -159,56 +154,7 @@ def render_plist_xml(
     return plistlib.dumps(dct, fmt=plistlib.FMT_XML, sort_keys=False)
 
 
-def write_plist(
-    manifest: EngineManifest,
-    *,
-    user: str,
-    binary_path: str,
-    dry_run: bool = False,
-) -> str:
-    """Write the plist atomically under ``/Library/LaunchDaemons/``.
-
-    Returns the destination path. In ``dry_run=True`` mode, the rendered XML
-    is printed and no privileged operations run.
-
-    The atomic sequence is: render in a private temp file, ``sudo /bin/mv`` to
-    final destination, then ``sudo /usr/sbin/chown root:wheel`` and
-    ``sudo /bin/chmod 644``. The temp file is created under ``/tmp`` so
-    SIP-protected ``/Library/LaunchDaemons`` is never touched without sudo.
-    """
-    xml_bytes = render_plist_xml(manifest, user=user, binary_path=binary_path)
-    dst = plist_path(manifest)
-
-    if dry_run:
-        print(f"--- plist {dst} ---")
-        print(xml_bytes.decode("utf-8"))
-        print("--- end plist ---")
-        return dst
-
-    with secure_staging_dir() as staging:
-        tmp_path = staging / f"{manifest.plist.name}.plist"
-        tmp_path.write_bytes(xml_bytes)
-        tmp_path.chmod(0o644)
-        try:
-            subprocess.run(["sudo", "/bin/mv", str(tmp_path), dst], check=True)
-            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", dst], check=True)
-            subprocess.run(["sudo", "/bin/chmod", "644", dst], check=True)
-        except subprocess.CalledProcessError as e:
-            raise PlistError(
-                f"Failed to install plist at {dst}: {e.cmd} returned {e.returncode}"
-            ) from e
-    return dst
-
-
-def remove_plist(manifest: EngineManifest, *, dry_run: bool = False) -> bool:
-    """Delete the plist file under sudo. Returns True if removed, False if absent."""
-    dst = plist_path(manifest)
-    if not Path(dst).exists():
-        return False
-
-    if dry_run:
-        print(f"[dry-run] sudo /bin/rm -f {dst}")
-        return True
-
-    subprocess.run(["sudo", "/bin/rm", "-f", dst], check=True)
-    return True
+# NOTE: the privileged write/remove (the old raw-``sudo`` ``mv``/``chown``/``chmod``/``rm``
+# path) was removed in AEP-01. The root helper (``asiai-priv install-daemon`` /
+# ``uninstall-daemon``) now generates + writes + removes the daemon plist; ``ais_core``
+# invokes it via :mod:`ais_core.privhelper`. This module is pure generation + ``plist_path``.

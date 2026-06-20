@@ -14,9 +14,16 @@ isn't enough — ``port UP ≠ API ready`` (Copilot Q3) — so we hit the manife
 declared ``health_endpoint`` and require a 2xx.
 
 **Idempotent install.** Running ``install`` twice in a row must not double the
-LaunchDaemon or break pf.conf with a duplicate ``anchor`` line. The plist is
-overwritten in place; the anchor line is added only if absent;
-``launchctl load -w`` returns success on already-loaded daemons.
+LaunchDaemon or break pf.conf with a duplicate ``anchor`` line. ``stop_existing``
+boots out + unlinks any prior daemon first, so the helper's ``install-daemon``
+bootstrap starts from a clean slate; the pf anchor line is added only if absent.
+
+**Privileged ops route through the helper (AEP-01).** Daemon lifecycle no longer
+shells out to raw ``sudo launchctl``/``sudo mv``: it calls the root-owned
+``asiai-priv`` helper via :mod:`ais_core.privhelper` (the sudoers fragment grants
+NOPASSWD on that one binary only). The helper uses the modern launchctl model
+(bootstrap/bootout/kickstart/kill/enable/disable). Firewall (pf) stays raw
+``sudo``, password-gated (see :mod:`ais_core.firewall`).
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from ais_core import firewall, plist
+from ais_core import firewall, plist, privhelper
 from ais_core.manifest import EngineManifest
 
 
@@ -80,12 +87,13 @@ def install(
     """Install an engine end-to-end.
 
     Steps:
-      1. Stop any pre-existing daemon/process for this engine (idempotent).
-      2. Resolve the binary if not supplied (manifest's first existing candidate).
-      3. Ensure the user-space log directory exists.
-      4. Write the plist atomically.
-      5. Optionally write the pf anchor and reload pf.
-      6. Load and start the daemon, wait for the health endpoint.
+      1. Resolve the binary if not supplied (manifest's first existing candidate).
+      2. Boot out + unlink any pre-existing daemon/process (``stop_existing``, idempotent).
+      3. ``asiai-priv install-daemon``: the helper generates the plist, writes it root:wheel,
+         pre-creates the root-owned ``/Library/Logs/asiai`` leaves, and bootstraps it
+         (RunAtLoad starts it) — so there is no separate plist write, log mkdir, or start here.
+      4. Optionally write the pf anchor and reload pf (firewall, password-gated).
+      5. Wait for the health endpoint.
 
     Returns a dict with the resolved binary, plist path, anchor path (or None),
     and whether the health endpoint answered within the manifest's timeout.
@@ -124,52 +132,100 @@ def install(
 
     stop_existing(manifest, dry_run=dry_run)
 
-    # Ensure user-space log directory exists before launchctl tries to open
-    # StandardOut/ErrorPath. Using ~/Library/Logs/asiai/<engine>/ avoids the
-    # need for sudo (vs the BSD legacy /var/log/<engine>/).
-    if not dry_run:
-        Path(manifest.logs.expanded_dir).mkdir(parents=True, exist_ok=True)
-
-    plist_path_str = plist.write_plist(
-        manifest, user=user, binary_path=binary_path, dry_run=dry_run
+    # The privileged helper GENERATES the plist (generate-don't-validate), writes it
+    # root:wheel into /Library/LaunchDaemons, pre-creates the root-owned log leaves under
+    # /Library/Logs/asiai, and bootstraps (RunAtLoad starts it). We therefore no longer
+    # write the plist or mkdir a user log dir here, and no longer call start() afterwards
+    # (bootstrap already started it). Standard*Path live at /Library/Logs/asiai/<label>.{out,err}.
+    privhelper.run(
+        "install-daemon",
+        *_install_args(manifest, user=user, binary_path=binary_path),
+        dry_run=dry_run,
     )
 
     anchor_path_str: str | None = None
     if enable_firewall:
+        # Firewall stays raw-sudo (password-gated post-cutover): pf.conf editing is opt-in,
+        # install-time, operator-present — deliberately NOT in the NOPASSWD helper surface.
         anchor_path_str = firewall.install_anchor(manifest, subnets=subnets, dry_run=dry_run)
-
-    if not dry_run:
-        start(manifest)
 
     health_ok = not dry_run and wait_for_health(manifest, timeout=manifest.network.health_timeout)
 
     return {
         "engine": manifest.name,
         "binary": binary_path,
-        "plist": plist_path_str,
+        "plist": plist.plist_path(manifest),
         "anchor": anchor_path_str,
         "health_ok": health_ok if not dry_run else None,
         "dry_run": dry_run,
     }
 
 
-def uninstall(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
-    """Tear down an engine: stop daemon, remove plist, remove pf anchor.
+def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> list[str]:
+    """Translate a manifest into ``asiai-priv install-daemon`` flags.
 
-    Log files in ``manifest.logs.dir`` are left untouched. If a future user
-    needs log purging on uninstall, surface it as a separate command rather
-    than a flag on ``uninstall`` (irreversible side effects don't belong on
-    a removal verb the operator may run by reflex).
+    The helper is generate-don't-validate: we pass bounded fields, never a plist.
+
+    **Every value is joined to its flag as ``--flag=value`` (not ``--flag value``).** This is
+    load-bearing: the helper's argparse uses ``action="append"`` for ``--program-arg``/``--env``,
+    which reads a *separate* token beginning with ``-`` as a new option and errors out — and
+    every llama-server program-arg is dash-prefixed (``--flash-attn``, ``--mlock``,
+    ``--n-gpu-layers``, ``--jinja``), as is the ``--host`` we inject. ``--flag=value`` parses the
+    value verbatim regardless of a leading dash.
+
+    ``--host``/``--port`` are emitted together **only when the manifest binds** — parity with the
+    old ``plist.build_plist_dict`` (ollama has ``bind=''`` and sets its port via the
+    ``OLLAMA_HOST`` env var; ``ollama serve --port N`` is a fatal unknown-flag).
+
+    Tilde model/template/mmproj paths are passed raw — the helper expands them against the
+    DAEMON account's home and confines them there (paths outside it are refused: a deliberate
+    hardening). ``binary_path`` is the manifest's resolved candidate (the STABLE
+    ``/opt/homebrew/bin/<engine>`` symlink for brew engines — survives ``brew upgrade``); the
+    helper re-validates it (I5: realpath under an allowlisted prefix; the symlink is accepted).
     """
-    stop(manifest, dry_run=dry_run)
-    plist_removed = plist.remove_plist(manifest, dry_run=dry_run)
+    label = manifest.plist.name
+    program = manifest.wrapper.install_path if manifest.wrapper.needed else binary_path
+    args = [f"--label={label}", f"--binary={program}", f"--user={user}"]
+    if not manifest.wrapper.needed:
+        for pa in manifest.binary.program_args:
+            args.append(f"--program-arg={pa}")
+        if manifest.binary.model_path:
+            args.append(f"--model-path={manifest.binary.model_path}")
+        if manifest.binary.template_path:
+            args.append(f"--template-path={manifest.binary.template_path}")
+        if manifest.binary.mmproj_path:
+            args.append(f"--mmproj-path={manifest.binary.mmproj_path}")
+        if manifest.network.bind:
+            # --host/--port only when bound (parity): ollama (bind='') must NOT get --port.
+            args.append("--program-arg=--host")
+            args.append(f"--program-arg={manifest.network.bind}")
+            args.append(f"--port={manifest.network.port}")
+    for entry in manifest.env_vars:
+        args.append(f"--env={entry}")
+    args.append(f"--throttle-interval={manifest.plist.throttle_interval}")
+    args.append(f"--timeout={manifest.plist.timeout}")
+    return args
+
+
+def uninstall(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
+    """Tear down an engine: boot out the daemon, remove plist, remove pf anchor.
+
+    Log files under /Library/Logs/asiai are left untouched. If a future user needs log
+    purging on uninstall, surface it as a separate command rather than a flag on
+    ``uninstall`` (irreversible side effects don't belong on a removal verb the operator
+    may run by reflex).
+    """
+    existed = Path(plist.plist_path(manifest)).exists()
+    # The helper boots out the daemon AND unlinks the plist in one idempotent action (a
+    # missing label/plist still exits 0). Replaces the old stop()+remove_plist() pair.
+    privhelper.run("uninstall-daemon", "--label", manifest.plist.name, dry_run=dry_run)
     fw_changed = (
         firewall.remove_anchor(manifest, dry_run=dry_run) if manifest.firewall.supported else False
     )
 
     return {
         "engine": manifest.name,
-        "plist_removed": plist_removed,
+        "plist_removed": existed,
         "firewall_removed": fw_changed,
         "dry_run": dry_run,
     }
@@ -181,111 +237,66 @@ def uninstall(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
 
 
 def start(manifest: EngineManifest, *, dry_run: bool = False) -> None:
-    """Load the LaunchDaemon. ``-w`` overrides any prior 'disabled' state."""
-    if dry_run:
-        print(f"[dry-run] would start {manifest.plist.name}")
-        return
-    try:
-        subprocess.run(
-            ["sudo", "/bin/launchctl", "load", "-w", plist.plist_path(manifest)],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise LifecycleError(f"{manifest.name}: launchctl load failed: {e}") from e
+    """Start an installed engine (modern launchctl model, via the helper).
+
+    Clears any persistent disabled override first (``enable-daemon`` — parity with the legacy
+    ``load -w`` that cleared disable), then ``start-daemon`` (``kickstart -k``). The plist must
+    already exist + be bootstrapped (i.e. ``install`` ran); ``start`` does not (re)generate it.
+    """
+    label = manifest.plist.name
+    privhelper.run("enable-daemon", "--label", label, dry_run=dry_run)
+    privhelper.run("start-daemon", "--label", label, dry_run=dry_run)
 
 
 def stop(manifest: EngineManifest, *, dry_run: bool = False) -> None:
-    """Stop the daemon, unload it, kill any straggler process.
+    """Stop the engine via ``stop-daemon`` (``launchctl kill SIGTERM``).
 
-    The unload deliberately has no ``-w``: that flag writes the durable
-    disabled override, which is ``disable()``'s job. ``stop`` is the
-    temporary state — the engine rejoins the boot sequence via RunAtLoad.
+    The daemon stays bootstrapped (state becomes LOADED_NOT_RUNNING). With
+    ``KeepAlive{SuccessfulExit:false}`` a clean (exit 0) shutdown stays down, and SIGTERM is
+    not a crash signal so ``KeepAlive{Crashed:true}`` does not respawn it either. Best-effort
+    (``check=False``): ``kill`` on an already-stopped service returns non-zero — that's a no-op,
+    not a failure. **No ``pkill``**: a SIGKILL on a still-bootstrapped KeepAlive daemon would
+    read as a crash and be RESPAWNED by launchd (the legacy ``pkill`` only worked because
+    ``unload`` had already deregistered the job).
     """
-    if dry_run:
-        print(f"[dry-run] would stop {manifest.plist.name}")
-        return
-
-    subprocess.run(
-        ["sudo", "/bin/launchctl", "stop", manifest.plist.name],
-        check=False,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["sudo", "/bin/launchctl", "unload", plist.plist_path(manifest)],
-        check=False,
-        capture_output=True,
-    )
-    if process_alive(manifest):
-        subprocess.run(
-            ["pkill", "-f", manifest.binary.process_pattern],
-            check=False,
-            capture_output=True,
-        )
-        time.sleep(2)
+    label = manifest.plist.name
+    privhelper.run("stop-daemon", "--label", label, check=False, dry_run=dry_run)
 
 
 def restart(manifest: EngineManifest, *, dry_run: bool = False) -> None:
-    """Stop then start. Health check is the caller's responsibility."""
-    if dry_run:
-        print(f"[dry-run] would restart {manifest.plist.name}")
-        return
-    stop(manifest)
-    start(manifest)
+    """Restart the engine. ``start-daemon`` is ``kickstart -k`` — it kills the current instance
+    and starts a fresh one atomically — so a restart is just ``start`` (enable + kickstart).
+    Health check is the caller's responsibility."""
+    start(manifest, dry_run=dry_run)
 
 
 def disable(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
-    """Durable cold standby: stop now AND stay off across reboots.
+    """Durable cold standby: stay off across reboots AND stop now.
 
-    Writes the launchd disabled override for the label, then stops the
-    daemon. The plist (and therefore the tuned preset configuration) is
-    left untouched — this is the middle state between ``stop`` (back at
-    next boot via RunAtLoad) and ``uninstall`` (gone entirely).
-
-    The override is written *before* stopping so a KeepAlive daemon can't
-    respawn in the gap. ``aisctl start`` re-enables (``load -w`` clears
-    the override) — starting a disabled engine is an explicit operator
-    action, not an accident.
+    ``disable-daemon`` writes the launchd disabled override (survives reboot) *before* the
+    SIGTERM, so a KeepAlive daemon can't respawn in the gap. The plist (and the tuned preset)
+    is left untouched — the middle state between ``stop`` (back at next boot via RunAtLoad) and
+    ``uninstall`` (gone). ``aisctl start`` re-enables (``enable-daemon`` clears the override),
+    an explicit operator action.
     """
-    if dry_run:
-        print(f"[dry-run] would disable {manifest.plist.name}")
-        return {"engine": manifest.name, "disabled": True, "dry_run": True}
-
-    try:
-        subprocess.run(
-            ["sudo", "/bin/launchctl", "disable", f"system/{manifest.plist.name}"],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise LifecycleError(f"{manifest.name}: launchctl disable failed: {e}") from e
-    stop(manifest)
-    return {"engine": manifest.name, "disabled": True, "dry_run": False}
+    label = manifest.plist.name
+    privhelper.run("disable-daemon", "--label", label, dry_run=dry_run)
+    privhelper.run("stop-daemon", "--label", label, check=False, dry_run=dry_run)
+    return {"engine": manifest.name, "disabled": True, "dry_run": dry_run}
 
 
 def enable(manifest: EngineManifest, *, start_now: bool = False, dry_run: bool = False) -> dict:
     """Clear the launchd disabled override; optionally start right away.
 
-    Without ``start_now`` the engine simply rejoins the boot sequence at
-    the next reboot — that's the cold-standby contract: enabling is not
-    the same decision as paying the model-load memory spike now.
+    Without ``start_now`` the engine simply rejoins the boot sequence at the next reboot —
+    that's the cold-standby contract: enabling is not the same decision as paying the
+    model-load memory spike now.
     """
-    if dry_run:
-        return {
-            "engine": manifest.name,
-            "enabled": True,
-            "started": start_now,
-            "dry_run": True,
-        }
-
-    try:
-        subprocess.run(
-            ["sudo", "/bin/launchctl", "enable", f"system/{manifest.plist.name}"],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        raise LifecycleError(f"{manifest.name}: launchctl enable failed: {e}") from e
+    label = manifest.plist.name
+    privhelper.run("enable-daemon", "--label", label, dry_run=dry_run)
     if start_now:
-        start(manifest)
-    return {"engine": manifest.name, "enabled": True, "started": start_now, "dry_run": False}
+        privhelper.run("start-daemon", "--label", label, dry_run=dry_run)
+    return {"engine": manifest.name, "enabled": True, "started": start_now, "dry_run": dry_run}
 
 
 def is_disabled(manifest: EngineManifest) -> bool:
@@ -314,21 +325,17 @@ def is_disabled(manifest: EngineManifest) -> bool:
 def stop_existing(manifest: EngineManifest, *, dry_run: bool = False) -> None:
     """Best-effort cleanup before a fresh install.
 
-    Mirrors ``engine_stop_existing()`` (lib-engine.sh:301-330): unload the
-    plist if it's there and kill the process if it's there. Both arms are
-    independent so a missing plist doesn't prevent a process kill.
+    Boots out + unlinks any prior daemon under this label (idempotent ``uninstall-daemon``,
+    ``check=False``) so the upcoming ``install-daemon`` bootstrap won't trip on an
+    already-loaded label. Because the label is then **deregistered**, ``pkill``'ing a straggler
+    is safe here — unlike in ``stop``, there is no KeepAlive job left to respawn it.
     """
     if dry_run:
         print(f"[dry-run] would stop existing {manifest.name} services")
         return
 
-    if subprocess.run(["test", "-f", plist.plist_path(manifest)], check=False).returncode == 0:
-        subprocess.run(
-            ["sudo", "/bin/launchctl", "unload", plist.plist_path(manifest)],
-            check=False,
-            capture_output=True,
-        )
-        time.sleep(2)
+    privhelper.run("uninstall-daemon", "--label", manifest.plist.name, check=False)
+    time.sleep(1)
 
     if process_alive(manifest):
         subprocess.run(

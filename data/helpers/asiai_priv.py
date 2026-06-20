@@ -79,11 +79,19 @@ _LABEL_RE = re.compile(r"com\.asiai\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
 _FORBIDDEN_ENV_PREFIXES = ("DYLD_", "LD_")
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# I5 / binary: the daemon binary (``ProgramArguments[0]``) must resolve under one of these
-# hardcoded system prefixes. Calibrated on the real engine manifests (llama-server, ollama,
-# mlx-lm-server-start, llama-server-turboquant all live here). SECONDARY defence: the binary
-# runs under the non-root ``UserName`` (I2), which is the actual privilege barrier.
-_BINARY_PREFIXES: tuple[str, ...] = ("/opt/homebrew/bin/", "/usr/local/bin/")
+# I5 / binary: the daemon binary's REALPATH (``ProgramArguments[0]``) must resolve under one
+# of these hardcoded prefixes. Homebrew ships ``bin/`` as symlinks INTO ``Cellar/`` (and
+# ``opt/<formula>/bin`` symlinks that also realpath into Cellar), so Cellar must be listed for
+# brew engines (llama-server, ollama) to resolve; ``/usr/local/bin`` covers the custom
+# turboquant build (a real file). NOT bare ``/opt/homebrew/`` — that would admit etc/, var/…
+# SECONDARY defence (defence-in-depth, not a trust boundary — these prefixes are
+# admin-writable): the binary runs under the non-root ``UserName`` (I2), the actual barrier.
+_BINARY_PREFIXES: tuple[str, ...] = (
+    "/opt/homebrew/bin/",
+    "/opt/homebrew/Cellar/",
+    "/opt/homebrew/opt/",
+    "/usr/local/bin/",
+)
 
 # I1 / plist: CLOSED allowlist of emitted keys. Anything outside this set is NEVER emitted —
 # in particular the dangerous keys RootDirectory (root pivot), GroupName (privileged group),
@@ -317,26 +325,43 @@ def _is_within(path: str, prefix: str) -> bool:
 
 
 def _resolve_binary(path: str) -> str:
-    """I5: canonicalise the daemon binary and require it under a hardcoded prefix.
+    """I5: validate the daemon binary against a hardcoded prefix allowlist, return the
+    caller's path (the STABLE one to emit), validated via its realpath.
 
-    The final component must not be a symlink (``lstat``, anti-TOCTOU); ``realpath``
-    then resolves parent symlinks before the prefix check. Secondary defence: the
-    binary runs under the non-root ``UserName`` (I2).
+    The allowlist is DEFENCE-IN-DEPTH, not a trust boundary: the homebrew/usr-local prefixes
+    are admin-writable, so whoever could plant a trojan there already holds the admin account
+    (hence Cellar, and the ``sudo`` helper invocation itself) — a non-admin cannot write
+    there. The real privilege barrier is I2: the daemon runs under the forced non-root
+    ``UserName`` and the root helper NEVER executes this binary, it only emits it into the
+    plist + bootstraps. A symlink on ``--binary`` is therefore ALLOWED — homebrew ships
+    ``bin/`` as symlinks into ``Cellar/`` — because ``realpath`` resolves it for the
+    post-resolution prefix check which still pins the real target. Do NOT re-add a symlink
+    refusal here: it protects nothing real (admin-writable prefix + realpath already attaches
+    any escapee) and breaks every brew engine. (Contrast ``_resolve_user_path``, where the
+    symlink refusal stays — there it guards a symlink-trick inside the target user's home, a
+    genuinely different threat.)
+
+    RETURNS THE ORIGINAL ``path`` (not the realpath): for a brew engine that is the stable
+    ``/opt/homebrew/bin/<engine>`` symlink, which ``launchd`` re-resolves at exec time — so the
+    plist survives ``brew upgrade --cleanup`` (which deletes the versioned ``Cellar`` dir a
+    realpath would have pinned). Security is unchanged: a later symlink swap needs admin, who is
+    already trusted; the install-time realpath check still gates what may be emitted.
     """
     if "\x00" in path:
         raise _Refused("NUL byte in binary path")
     if not path.startswith("/"):
         raise _Refused(f"binary path must be absolute: {path!r}")
+    real = os.path.realpath(path)
     try:
-        st = os.lstat(path)
+        # stat (follows) the REAL target: a missing file or a dangling symlink is refused.
+        st = os.stat(real)
     except OSError as exc:
         raise _Refused(f"binary not found: {path!r} ({exc.strerror})") from None
-    if stat.S_ISLNK(st.st_mode):
-        raise _Refused(f"binary must not be a symlink: {path!r}")
-    real = os.path.realpath(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise _Refused(f"binary is not a regular file: {real!r}")
     if not any(_is_within(real, prefix) for prefix in _BINARY_PREFIXES):
         raise _Refused(f"binary outside allowlisted prefixes: {real!r}")
-    return real
+    return path
 
 
 def _validate_env(pairs: list[str]) -> dict[str, str]:

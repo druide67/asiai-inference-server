@@ -191,9 +191,11 @@ def _install_one(
                 "ok": False,
                 "error": "install_failed",
                 "detail": (
-                    f"sudo /bin/mv returned {rc}. Run 'aisctl bootstrap "
-                    "--install-sudoers' on this node (interactive once) "
-                    "to grant non-interactive sudo for the Phase 2 ops."
+                    f"sudo -n /bin/mv returned {rc}. Post-AEP-01 the helper-only sudoers "
+                    "fragment no longer grants this wildcard, and the helper REFUSES the "
+                    "reserved labels com.asiai.web / aisctl-serve by design (I9). Migrating "
+                    "Phase 2 to the helper is story 2.2 (content-validated path). Until then, "
+                    "install these services with an interactive sudo (operator present, TTY)."
                 ),
             }
 
