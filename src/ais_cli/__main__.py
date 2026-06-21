@@ -224,12 +224,19 @@ def build_parser() -> argparse.ArgumentParser:
     # bootstrap
     p_boot = sub.add_parser(
         "bootstrap",
-        help="One-shot setup. Currently: install /etc/sudoers.d/asiai-inference.",
+        help="One-time setup: install the privileged helper + helper-only sudoers fragment.",
+    )
+    p_boot.add_argument(
+        "--install",
+        action="store_true",
+        help="Full one-time bootstrap: I0 chain check -> install helper "
+        "(/Library/PrivilegedHelperTools/asiai-priv root:wheel 0755) -> install sudoers. "
+        "Idempotent.",
     )
     p_boot.add_argument(
         "--install-sudoers",
         action="store_true",
-        help="Write the sudoers fragment after visudo validation.",
+        help="Install only the sudoers fragment (granular/legacy), after visudo validation.",
     )
     p_boot.add_argument("--dry-run", action="store_true")
     p_boot.set_defaults(func=commands.cmd_bootstrap)

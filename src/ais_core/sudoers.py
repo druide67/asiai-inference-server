@@ -147,6 +147,13 @@ def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str
 
     validate_content(content)
 
+    # I0 (defense-in-depth): refuse before any privileged write if /etc/sudoers.d's chain isn't
+    # locked — a group/other-writable or non-root ancestor could let a non-root party swap the
+    # fragment (root-equivalent). Deferred import: bootstrap imports sudoers (cycle otherwise).
+    from ais_core import bootstrap
+
+    bootstrap.assert_chain_locked(SUDOERS_DIR)
+
     with secure_staging_dir() as staging:
         tmp_path = staging / "asiai-inference.sudoers"
         tmp_path.write_text(content, encoding="utf-8")
@@ -158,6 +165,11 @@ def install_sudoers(content: str | None = None, *, dry_run: bool = False) -> str
         # already-root, sudo-ignored staged file; visudo -c then fails loud if the resulting
         # tree no longer parses (a broken sudoers file must never silently lock out sudo).
         try:
+            # Clear any stale/pre-positioned staged inode first: the staged name is a fixed
+            # sibling, and cp (no -P) would follow a symlink left there (e.g. from a SIGKILL'd
+            # prior run) and write through it. /etc/sudoers.d is root-only so a non-root party
+            # can't plant one, but the stale-symlink case is real — rm -f closes both.
+            subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_STAGED], check=True)
             subprocess.run(["sudo", "/bin/cp", str(tmp_path), SUDOERS_STAGED], check=True)
             subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_STAGED], check=True)
             subprocess.run(["sudo", "/bin/chmod", "0440", SUDOERS_STAGED], check=True)

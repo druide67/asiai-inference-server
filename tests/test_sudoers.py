@@ -117,18 +117,20 @@ def test_install_sudoers_secure_publish_sequence() -> None:
         install_sudoers("# minimal\n")
 
     assert [c[1] for c in sudo_calls] == [
+        "/bin/rm",  # clear any stale/pre-positioned staged inode before cp (no symlink-follow)
         "/bin/cp",
         "/usr/sbin/chown",
         "/bin/chmod",
         "/bin/mv",
         "/usr/sbin/visudo",
     ]
-    # cp/chown/chmod operate on the dot-prefixed staged name; only mv touches the final name.
-    assert sudo_calls[0][-1] == SUDOERS_STAGED  # cp writes the dotted staged file
-    assert sudo_calls[1] == ["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_STAGED]
-    assert sudo_calls[2] == ["sudo", "/bin/chmod", "0440", SUDOERS_STAGED]
-    assert sudo_calls[3] == ["sudo", "/bin/mv", SUDOERS_STAGED, SUDOERS_PATH]
-    assert sudo_calls[4] == ["sudo", "/usr/sbin/visudo", "-c"]
+    # rm + cp/chown/chmod operate on the dot-prefixed staged name; only mv touches the final name.
+    assert sudo_calls[0] == ["sudo", "/bin/rm", "-f", SUDOERS_STAGED]
+    assert sudo_calls[1][-1] == SUDOERS_STAGED  # cp writes the dotted staged file
+    assert sudo_calls[2] == ["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_STAGED]
+    assert sudo_calls[3] == ["sudo", "/bin/chmod", "0440", SUDOERS_STAGED]
+    assert sudo_calls[4] == ["sudo", "/bin/mv", SUDOERS_STAGED, SUDOERS_PATH]
+    assert sudo_calls[5] == ["sudo", "/usr/sbin/visudo", "-c"]
 
 
 @pytest.mark.parametrize("fail_at", ["/bin/cp", "/bin/mv"])

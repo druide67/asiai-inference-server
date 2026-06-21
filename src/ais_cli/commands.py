@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ais_core import install_state, lifecycle, memory, sudoers
+from ais_core import bootstrap, install_state, lifecycle, memory, sudoers
 from ais_core.manifest import (
     EngineManifest,
     list_manifests,
@@ -616,25 +616,57 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
-    if not args.install_sudoers:
-        print(
-            "bootstrap: nothing to do without --install-sudoers.\n"
-            "Run with --install-sudoers to write /etc/sudoers.d/asiai-inference\n"
-            "(validated via visudo -cf before any sudo move into place)."
-        )
-        return 0
+    if args.install:
+        return _bootstrap_full(dry_run=args.dry_run)
+    if args.install_sudoers:
+        return _bootstrap_sudoers_only(dry_run=args.dry_run)
+    print(
+        "bootstrap: nothing to do.\n"
+        "  --install          full one-time setup: install the privileged helper "
+        "(/Library/PrivilegedHelperTools/asiai-priv, root:wheel 0755) THEN the helper-only\n"
+        "                     sudoers fragment. I0-checked, strict order, idempotent.\n"
+        "  --install-sudoers  install only the sudoers fragment (granular/legacy).\n"
+        "Add --dry-run to preview without touching the system."
+    )
+    return 0
 
+
+def _bootstrap_full(*, dry_run: bool) -> int:
+    """One-time idempotent bootstrap in the strict order: I0 chain check -> install helper
+    (root:wheel 0755, invariant #3) -> install the helper-only sudoers fragment (visudo-c'd).
+
+    Signature (NFR11) and the optional dedicated ``_aisrv`` account (NFR12) are not yet wired
+    here — they slot between the helper copy and the sudoers install, and are co-designed with
+    the security reviewer.
+    """
+    if dry_run:
+        bootstrap.install_helper(dry_run=True)
+        sudoers.install_sudoers(dry_run=True)
+        return 0
+    try:
+        # I0 first: refuse if ANY root-write target's chain is unlocked, before any write.
+        bootstrap.assert_fleet_chain_locked()
+        helper_path = bootstrap.install_helper()
+        sudoers_path = sudoers.install_sudoers()
+    except (bootstrap.BootstrapError, sudoers.SudoersError) as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 2
+    print(f"installed helper:  {helper_path}")
+    print(f"installed sudoers: {sudoers_path}")
+    print("bootstrap complete. Engine lifecycle now routes through the helper (NOPASSWD).")
+    return 0
+
+
+def _bootstrap_sudoers_only(*, dry_run: bool) -> int:
     content = sudoers.generate_sudoers_content()
-    if args.dry_run:
+    if dry_run:
         print(content)
         return 0
-
     try:
         sudoers.validate_content(content)
     except sudoers.SudoersError as e:
         print(f"sudoers validation FAILED: {e}", file=sys.stderr)
         return 2
-
     try:
         path = sudoers.install_sudoers(content)
     except sudoers.SudoersError as e:

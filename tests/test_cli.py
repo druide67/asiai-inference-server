@@ -627,3 +627,60 @@ def test_bootstrap_install_returns_2_on_validation_failure() -> None:
     ):
         rc = main(["bootstrap", "--install-sudoers"])
     assert rc == 2
+
+
+def test_bootstrap_full_install_runs_in_strict_order(capsys: pytest.CaptureFixture[str]) -> None:
+    """--install = strict order: I0 fleet chain check -> install helper -> install sudoers."""
+    order: list[str] = []
+
+    def _i0() -> None:
+        order.append("i0")
+
+    def _helper() -> str:
+        order.append("helper")
+        return "/Library/PrivilegedHelperTools/asiai-priv"
+
+    def _sud() -> str:
+        order.append("sud")
+        return "/etc/sudoers.d/asiai-inference"
+
+    with (
+        patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked", side_effect=_i0),
+        patch("ais_cli.commands.bootstrap.install_helper", side_effect=_helper),
+        patch("ais_cli.commands.sudoers.install_sudoers", side_effect=_sud),
+    ):
+        rc = main(["bootstrap", "--install"])
+    assert rc == 0
+    assert order == ["i0", "helper", "sud"]  # I0 before any write, helper before sudoers
+    assert "/Library/PrivilegedHelperTools/asiai-priv" in capsys.readouterr().out
+
+
+def test_bootstrap_full_install_dry_run_previews_both(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with (
+        patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked") as m_i0,
+        patch("ais_cli.commands.bootstrap.install_helper") as m_helper,
+        patch("ais_cli.commands.sudoers.install_sudoers") as m_sud,
+    ):
+        rc = main(["bootstrap", "--install", "--dry-run"])
+    assert rc == 0
+    m_i0.assert_not_called()  # dry-run previews; no live I0 walk
+    m_helper.assert_called_once_with(dry_run=True)
+    m_sud.assert_called_once_with(dry_run=True)
+
+
+def test_bootstrap_full_install_aborts_on_i0_failure() -> None:
+    """I0 gate: a locked-chain failure stops BEFORE any helper/sudoers write."""
+    with (
+        patch(
+            "ais_cli.commands.bootstrap.assert_fleet_chain_locked",
+            side_effect=commands.bootstrap.BootstrapError("chain not locked"),
+        ),
+        patch("ais_cli.commands.bootstrap.install_helper") as m_helper,
+        patch("ais_cli.commands.sudoers.install_sudoers") as m_sud,
+    ):
+        rc = main(["bootstrap", "--install"])
+    assert rc == 2
+    m_helper.assert_not_called()
+    m_sud.assert_not_called()
