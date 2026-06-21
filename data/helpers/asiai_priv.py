@@ -568,10 +568,17 @@ def _precreate_log_leaves(
     fstat below independently requires the resolved dir be root-owned and non-writable, so
     swapping a component already needs root.) Local safety does NOT depend on the 2.1 lock.
     Each leaf fd is then
-    ``fstat``'d (exactly like ``_audit``) to refuse a pre-positioned regular file, a
-    hardlink (``st_nlink``), or a group/other-writable file BEFORE ``fchown`` — otherwise
-    root would hand the daemon ownership of an attacker-chosen inode. ``_require_root`` is
-    enforced by the caller (install handler, 1.4), so this stays unit-testable non-root.
+    ``fstat``'d (exactly like ``_audit``) to refuse a hardlink (``st_nlink``), a non-regular
+    file, or a group/other-writable file BEFORE ``fchown`` — otherwise root would hand the
+    daemon ownership of an attacker-chosen inode. Ownership must be root (a leaf we just
+    ``O_CREAT``'d) OR the target daemon account itself: a leaf owned by that account can only
+    come from a *prior legitimate install* (the dir is verified root-owned and
+    not group/other-writable just above, so no non-root party can place or replace a file in
+    it), and re-chowning it to the same account is a no-op. Accepting it is what makes a
+    re-install idempotent (FR7) — caught empirically: a second install of an engine otherwise
+    failed on the daemon-user-owned leaf the first install left behind, since ``uninstall``
+    deliberately keeps logs. ``_require_root`` is enforced by the caller (install handler, 1.4),
+    so this stays unit-testable non-root.
     """
     _validate_label(label)
     dir_fd = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -596,9 +603,13 @@ def _precreate_log_leaves(
             )
             try:
                 st = os.fstat(fd)
+                # Owner must be root (just O_CREAT'd by us) OR the target daemon account (a leaf
+                # left by a prior legitimate install — the dir is root-only, so nothing else can
+                # have placed it). Both are safe to chown; accepting the latter keeps re-install
+                # idempotent. nlink==1 + S_ISREG + not group/other-writable still hold.
                 if not (
                     stat.S_ISREG(st.st_mode)
-                    and st.st_uid == os.geteuid()
+                    and st.st_uid in (os.geteuid(), user_pw.pw_uid)
                     and st.st_nlink == 1
                     and not st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
                 ):

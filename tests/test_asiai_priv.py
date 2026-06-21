@@ -703,6 +703,56 @@ def test_precreate_log_leaves_refuses_symlinked_dir(helper, tmp_path):
         mod._precreate_log_leaves("com.asiai.web", pw, log_dir=str(linkdir))
 
 
+def test_precreate_log_leaves_accepts_prior_daemon_owned_leaf(helper, monkeypatch, tmp_path):
+    """Re-install idempotency (FR7): a leaf left by a PRIOR install — owned by the target daemon
+    account, NOT root — must be accepted and re-chowned, not refused. The dir is root-only so
+    such a leaf can only be legitimate. (Caught empirically: a 2nd install of an
+    already-installed engine failed on the daemon-user-owned leaf the first install left, since
+    uninstall deliberately keeps logs.) ``os.fstat`` is stubbed to report a non-root leaf owner
+    while the dir stays real (owned by our euid -> dir check passes); ``fchown`` is mocked
+    (chowning to an arbitrary uid needs root)."""
+    mod, _ = helper
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    os.chmod(str(log_dir), 0o700)
+    daemon_uid = 9999  # != our euid -> only the NEW clause (uid == daemon) can accept it
+    real_fstat = os.fstat
+
+    def fake_fstat(fd):
+        st = real_fstat(fd)
+        if stat.S_ISREG(st.st_mode):  # a leaf: pretend a prior install left it owned by daemon
+            return os.stat_result((st.st_mode, 0, 0, 1, daemon_uid, st.st_gid, 0, 0, 0, 0))
+        return st  # the dir: real (owned by our euid)
+
+    monkeypatch.setattr(mod.os, "fstat", fake_fstat)
+    chowns = _mock_fchown(mod, monkeypatch)
+    pw = _fake_pw("aisrv", daemon_uid, os.getgid())
+    mod._precreate_log_leaves("com.asiai.web", pw, log_dir=str(log_dir))  # must NOT raise
+    assert chowns == [(daemon_uid, os.getgid()), (daemon_uid, os.getgid())]  # .out + .err
+
+
+def test_precreate_log_leaves_refuses_leaf_owned_by_third_party(helper, monkeypatch, tmp_path):
+    """A leaf owned by NEITHER root NOR the target daemon account is still refused (the fix
+    only widened acceptance to the daemon account, nothing else)."""
+    mod, _ = helper
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    os.chmod(str(log_dir), 0o700)
+    real_fstat = os.fstat
+
+    def fake_fstat(fd):
+        st = real_fstat(fd)
+        if stat.S_ISREG(st.st_mode):
+            return os.stat_result((st.st_mode, 0, 0, 1, 12345, st.st_gid, 0, 0, 0, 0))  # stranger
+        return st
+
+    monkeypatch.setattr(mod.os, "fstat", fake_fstat)
+    _mock_fchown(mod, monkeypatch)
+    pw = _fake_pw("aisrv", 9999, os.getgid())  # daemon uid 9999 != 12345
+    with pytest.raises(mod._Refused, match="suspect log leaf"):
+        mod._precreate_log_leaves("com.asiai.web", pw, log_dir=str(log_dir))
+
+
 # ---------------------------------------------------------------------------
 # Story 1.4 — lifecycle actions (the integration point). The plist WRITE and the
 # operation ORDER are the crux; fchown(0,0) is mocked (root-only, not testable non-root).
