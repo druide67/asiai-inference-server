@@ -618,6 +618,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     if args.verify:
         return _bootstrap_verify()
+    if args.rollback:
+        return _bootstrap_rollback(dry_run=args.dry_run)
     if args.install:
         return _bootstrap_full(dedicated_user=args.dedicated_user, dry_run=args.dry_run)
     if args.install_sudoers:
@@ -628,6 +630,8 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         "(/Library/PrivilegedHelperTools/asiai-priv, root:wheel 0755) THEN the helper-only\n"
         "                     sudoers fragment. I0-checked, strict order, idempotent.\n"
         "  --install-sudoers  install only the sudoers fragment (granular/legacy).\n"
+        "  --rollback         revert: restore the pre-bootstrap sudoers, then remove the helper.\n"
+        "  --verify           recompute the helper SHA-256 and compare to its sidecar.\n"
         "Add --dry-run to preview without touching the system."
     )
     return 0
@@ -643,6 +647,7 @@ def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
         bootstrap.write_helper_signature(dry_run=True)
         if dedicated_user:
             bootstrap.create_dedicated_user(dry_run=True)
+        sudoers.backup_existing_sudoers(dry_run=True)
         sudoers.install_sudoers(dry_run=True)
         return 0
     try:
@@ -651,6 +656,9 @@ def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
         helper_path = bootstrap.install_helper()
         sidecar_path = bootstrap.write_helper_signature()  # NFR11, after the copy
         user_info = bootstrap.create_dedicated_user() if dedicated_user else None  # NFR12, opt-in
+        # FR8: record the pre-bootstrap sudoers state ONCE, BEFORE the helper-only fragment
+        # overwrites it, so `--rollback` can restore exactly what was there (the rollback net).
+        backup_path = sudoers.backup_existing_sudoers()
         sudoers_path = sudoers.install_sudoers()
     except (bootstrap.BootstrapError, sudoers.SudoersError) as e:
         print(f"\n{e}", file=sys.stderr)
@@ -660,6 +668,8 @@ def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
     if user_info is not None:
         state = "created" if user_info["created"] else "already present"
         print(f"dedicated user:      {user_info['user']} (uid {user_info.get('uid')}, {state})")
+    if backup_path is not None:
+        print(f"backed up sudoers:   {backup_path} (for --rollback)")
     print(f"installed sudoers:   {sudoers_path}")
     print("bootstrap complete. Engine lifecycle now routes through the helper (NOPASSWD).")
     return 0
@@ -686,6 +696,8 @@ def _bootstrap_verify() -> int:
 def _bootstrap_sudoers_only(*, dry_run: bool) -> int:
     content = sudoers.generate_sudoers_content()
     if dry_run:
+        # mirror the live order: backup-before-install
+        sudoers.backup_existing_sudoers(dry_run=True)
         print(content)
         return 0
     try:
@@ -694,6 +706,9 @@ def _bootstrap_sudoers_only(*, dry_run: bool) -> int:
         print(f"sudoers validation FAILED: {e}", file=sys.stderr)
         return 2
     try:
+        # FR8: record the prior state ONCE before overwriting, so --rollback stays possible even
+        # via the granular path (no-op if already recorded by a prior install).
+        sudoers.backup_existing_sudoers()
         path = sudoers.install_sudoers(content)
     except sudoers.SudoersError as e:
         # US-004: non-TTY guard surfaces clear instructions; print them
@@ -701,4 +716,32 @@ def _bootstrap_sudoers_only(*, dry_run: bool) -> int:
         print(f"\n{e}", file=sys.stderr)
         return 2
     print(f"installed {path}")
+    return 0
+
+
+def _bootstrap_rollback(*, dry_run: bool) -> int:
+    """``aisctl bootstrap --rollback`` (FR8) — revert the helper model, never locking out sudo.
+
+    Order matters: restore the sudoers FIRST (raw sudo / the pre-bootstrap state is back, and the
+    restore itself is anti-lockout — visudo-validated, never publishes broken content), THEN remove
+    the helper + its signature sidecar. The dedicated ``_aisrv`` account is intentionally NOT
+    removed (out of scope, harmless, reversible by the operator via ``sysadminctl -deleteUser``).
+    """
+    if dry_run:
+        sudoers.restore_sudoers(dry_run=True)
+        bootstrap.remove_helper(dry_run=True)
+        return 0
+    try:
+        desc = sudoers.restore_sudoers()  # sudoers first — re-establish a working sudo
+        removed = bootstrap.remove_helper()  # then the helper, after sudo is healthy
+    except (bootstrap.BootstrapError, sudoers.SudoersError) as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 2
+    print(f"sudoers:             {desc}")
+    print(f"removed helper:      {removed[0]}")
+    print(f"removed signature:   {removed[1]}")
+    print(
+        "rollback complete. Raw sudo is restored; re-run `aisctl bootstrap --install` to "
+        "re-apply the helper model."
+    )
     return 0

@@ -283,6 +283,60 @@ def test_install_helper_dest_is_the_invoked_path():
 
 
 # ---------------------------------------------------------------------------
+# remove_helper — the rollback half on the helper side (FR8, story 2.3).
+# ---------------------------------------------------------------------------
+
+
+def test_remove_helper_dry_run_touches_nothing(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda *a, **k: calls.append(a))
+    targets = bootstrap_mod.remove_helper(dry_run=True)
+    assert targets == [sudoers.PRIVILEGED_HELPER_PATH, bootstrap_mod.HELPER_SHA256_PATH]
+    assert calls == []
+
+
+def test_remove_helper_non_tty_raises(monkeypatch):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(BootstrapError, match="interactive terminal"):
+        bootstrap_mod.remove_helper()
+
+
+def test_remove_helper_rms_helper_and_sidecar_after_i0(monkeypatch):
+    """I0-checked, then a single rm -f over BOTH the helper and its signature (idempotent)."""
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    checks: list[str] = []
+    monkeypatch.setattr(bootstrap_mod, "assert_chain_locked", lambda p: checks.append(p))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda argv, **k: calls.append(argv))
+
+    targets = bootstrap_mod.remove_helper()
+
+    assert checks == [sudoers.PRIVILEGED_HELPER_PATH]  # I0 before the privileged rm
+    assert calls == [
+        [
+            "sudo",
+            "/bin/rm",
+            "-f",
+            sudoers.PRIVILEGED_HELPER_PATH,
+            bootstrap_mod.HELPER_SHA256_PATH,
+        ]
+    ]
+    assert targets == [sudoers.PRIVILEGED_HELPER_PATH, bootstrap_mod.HELPER_SHA256_PATH]
+
+
+def test_remove_helper_wraps_rm_failure(monkeypatch):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(bootstrap_mod, "assert_chain_locked", lambda p: None)
+
+    def fake_run(argv, **k):
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", fake_run)
+    with pytest.raises(BootstrapError, match="Failed to remove the helper"):
+        bootstrap_mod.remove_helper()
+
+
+# ---------------------------------------------------------------------------
 # write_helper_signature / verify_helper — NFR11 SHA-256 sidecar.
 # ---------------------------------------------------------------------------
 

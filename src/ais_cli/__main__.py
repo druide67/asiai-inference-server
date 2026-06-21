@@ -226,22 +226,32 @@ def build_parser() -> argparse.ArgumentParser:
         "bootstrap",
         help="One-time setup: install the privileged helper + helper-only sudoers fragment.",
     )
-    p_boot.add_argument(
+    # The four verbs are mutually exclusive: this is a root- and sudoers-mutating command, so a
+    # fat-fingered `--rollback --install` must error loudly, never silently run one and drop the
+    # other. --dedicated-user / --dry-run are modifiers and stay outside the group.
+    p_boot_verb = p_boot.add_mutually_exclusive_group()
+    p_boot_verb.add_argument(
         "--install",
         action="store_true",
         help="Full one-time bootstrap: I0 chain check -> install helper "
         "(/Library/PrivilegedHelperTools/asiai-priv root:wheel 0755) -> install sudoers. "
         "Idempotent.",
     )
-    p_boot.add_argument(
+    p_boot_verb.add_argument(
         "--install-sudoers",
         action="store_true",
         help="Install only the sudoers fragment (granular/legacy), after visudo validation.",
     )
-    p_boot.add_argument(
+    p_boot_verb.add_argument(
         "--verify",
         action="store_true",
         help="Recompute the installed helper's SHA-256 and compare it to its sidecar (NFR11).",
+    )
+    p_boot_verb.add_argument(
+        "--rollback",
+        action="store_true",
+        help="Revert (FR8): restore the pre-bootstrap sudoers fragment (anti-lockout, "
+        "visudo-validated), then remove the helper and its signature sidecar.",
     )
     p_boot.add_argument(
         "--dedicated-user",

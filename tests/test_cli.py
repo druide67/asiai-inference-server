@@ -607,6 +607,7 @@ def test_bootstrap_install_invokes_install_sudoers(
 ) -> None:
     with (
         patch("ais_cli.commands.sudoers.validate_content"),
+        patch("ais_cli.commands.sudoers.backup_existing_sudoers", return_value=None),
         patch(
             "ais_cli.commands.sudoers.install_sudoers",
             return_value="/etc/sudoers.d/asiai-inference",
@@ -644,6 +645,10 @@ def test_bootstrap_full_install_runs_in_strict_order(capsys: pytest.CaptureFixtu
         order.append("sig")
         return "/Library/PrivilegedHelperTools/asiai-priv.sha256"
 
+    def _backup() -> str:
+        order.append("backup")
+        return "/etc/sudoers.d/.asiai-inference.pre-bootstrap.bak"
+
     def _sud() -> str:
         order.append("sud")
         return "/etc/sudoers.d/asiai-inference"
@@ -652,12 +657,13 @@ def test_bootstrap_full_install_runs_in_strict_order(capsys: pytest.CaptureFixtu
         patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked", side_effect=_i0),
         patch("ais_cli.commands.bootstrap.install_helper", side_effect=_helper),
         patch("ais_cli.commands.bootstrap.write_helper_signature", side_effect=_sig),
+        patch("ais_cli.commands.sudoers.backup_existing_sudoers", side_effect=_backup),
         patch("ais_cli.commands.sudoers.install_sudoers", side_effect=_sud),
     ):
         rc = main(["bootstrap", "--install"])
     assert rc == 0
-    # I0 before any write; signature after the copy, before sudoers (NFR11 in the strict order)
-    assert order == ["i0", "helper", "sig", "sud"]
+    # I0 before any write; signature after the copy; backup (FR8) right before the sudoers overwrite
+    assert order == ["i0", "helper", "sig", "backup", "sud"]
     assert "/Library/PrivilegedHelperTools/asiai-priv" in capsys.readouterr().out
 
 
@@ -668,6 +674,7 @@ def test_bootstrap_full_install_dry_run_previews_all(
         patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked") as m_i0,
         patch("ais_cli.commands.bootstrap.install_helper") as m_helper,
         patch("ais_cli.commands.bootstrap.write_helper_signature") as m_sig,
+        patch("ais_cli.commands.sudoers.backup_existing_sudoers") as m_backup,
         patch("ais_cli.commands.sudoers.install_sudoers") as m_sud,
     ):
         rc = main(["bootstrap", "--install", "--dry-run"])
@@ -675,6 +682,7 @@ def test_bootstrap_full_install_dry_run_previews_all(
     m_i0.assert_not_called()  # dry-run previews; no live I0 walk
     m_helper.assert_called_once_with(dry_run=True)
     m_sig.assert_called_once_with(dry_run=True)
+    m_backup.assert_called_once_with(dry_run=True)
     m_sud.assert_called_once_with(dry_run=True)
 
 
@@ -703,11 +711,15 @@ def test_bootstrap_full_install_dedicated_user_runs_create_before_sudoers(
             "ais_cli.commands.bootstrap.create_dedicated_user",
             side_effect=_step("user", {"user": "_aisrv", "created": True, "uid": 450}),
         ) as m_user,
+        patch(
+            "ais_cli.commands.sudoers.backup_existing_sudoers",
+            side_effect=_step("backup", "/etc/sudoers.d/.asiai-inference.pre-bootstrap.bak"),
+        ),
         patch("ais_cli.commands.sudoers.install_sudoers", side_effect=_step("sud", "/s")),
     ):
         rc = main(["bootstrap", "--install", "--dedicated-user"])
     assert rc == 0
-    assert order == ["i0", "helper", "sig", "user", "sud"]
+    assert order == ["i0", "helper", "sig", "user", "backup", "sud"]
     m_user.assert_called_once()
 
 
@@ -717,6 +729,7 @@ def test_bootstrap_full_install_without_dedicated_user_skips_create() -> None:
         patch("ais_cli.commands.bootstrap.install_helper", return_value="/h"),
         patch("ais_cli.commands.bootstrap.write_helper_signature", return_value="/h.sha256"),
         patch("ais_cli.commands.bootstrap.create_dedicated_user") as m_user,
+        patch("ais_cli.commands.sudoers.backup_existing_sudoers", return_value=None),
         patch("ais_cli.commands.sudoers.install_sudoers", return_value="/s"),
     ):
         rc = main(["bootstrap", "--install"])
@@ -761,3 +774,66 @@ def test_bootstrap_full_install_aborts_on_i0_failure() -> None:
     assert rc == 2
     m_helper.assert_not_called()
     m_sud.assert_not_called()
+
+
+# bootstrap --rollback (FR8)
+
+
+def test_bootstrap_rollback_restores_sudoers_before_removing_helper(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Order matters: sudoers restored FIRST (raw sudo back), THEN the helper removed."""
+    order: list[str] = []
+
+    def _restore(**_k) -> str:
+        order.append("restore")
+        return "restored the pre-bootstrap fragment from backup"
+
+    def _remove(**_k) -> list[str]:
+        order.append("remove")
+        return [
+            "/Library/PrivilegedHelperTools/asiai-priv",
+            "/Library/PrivilegedHelperTools/asiai-priv.sha256",
+        ]
+
+    with (
+        patch("ais_cli.commands.sudoers.restore_sudoers", side_effect=_restore),
+        patch("ais_cli.commands.bootstrap.remove_helper", side_effect=_remove),
+    ):
+        rc = main(["bootstrap", "--rollback"])
+    assert rc == 0
+    assert order == ["restore", "remove"]  # sudo re-established before touching the helper
+    out = capsys.readouterr().out
+    assert "rollback complete" in out
+
+
+def test_bootstrap_rollback_dry_run_previews_both(capsys: pytest.CaptureFixture[str]) -> None:
+    with (
+        patch("ais_cli.commands.sudoers.restore_sudoers") as m_restore,
+        patch("ais_cli.commands.bootstrap.remove_helper") as m_remove,
+    ):
+        rc = main(["bootstrap", "--rollback", "--dry-run"])
+    assert rc == 0
+    m_restore.assert_called_once_with(dry_run=True)
+    m_remove.assert_called_once_with(dry_run=True)
+
+
+def test_bootstrap_rollback_returns_2_on_restore_error() -> None:
+    """A restore that refuses (e.g. no recorded state) does NOT remove the helper."""
+    with (
+        patch(
+            "ais_cli.commands.sudoers.restore_sudoers",
+            side_effect=commands.sudoers.SudoersError("no recorded pre-bootstrap state"),
+        ),
+        patch("ais_cli.commands.bootstrap.remove_helper") as m_remove,
+    ):
+        rc = main(["bootstrap", "--rollback"])
+    assert rc == 2
+    m_remove.assert_not_called()  # sudoers must be healthy before the helper is touched
+
+
+def test_bootstrap_verbs_are_mutually_exclusive() -> None:
+    """Two verbs on this root-mutating command must error loudly, never silently run one."""
+    for combo in (["--rollback", "--install"], ["--install", "--verify"]):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["bootstrap", *combo])

@@ -12,11 +12,17 @@ import pytest
 from ais_core.sudoers import (
     ADMIN_GROUP,
     PRIVILEGED_HELPER_PATH,
+    SUDOERS_ABSENT_MARKER,
+    SUDOERS_BACKUP_PATH,
+    SUDOERS_BACKUP_STAGED,
     SUDOERS_PATH,
     SUDOERS_STAGED,
     SudoersError,
+    _sudo_exists,
+    backup_existing_sudoers,
     generate_sudoers_content,
     install_sudoers,
+    restore_sudoers,
     validate_content,
 )
 
@@ -224,3 +230,308 @@ def test_install_sudoers_dry_run_skips_tty_check() -> None:
     with patch("ais_core.sudoers.sys.stdin.isatty", return_value=False):
         result = install_sudoers("# dry\n", dry_run=True)
     assert result == "/etc/sudoers.d/asiai-inference"
+
+
+# ---------------------------------------------------------------------------
+# Rollback support — backup + restore (FR8, story 2.3)
+# ---------------------------------------------------------------------------
+
+
+def _sudo_driver(
+    existence: dict[str, bool],
+    *,
+    visudo_cf_rc: int = 0,
+    grep_rc: int = 1,
+    raise_on: str | None = None,
+):
+    """Build a fake ``subprocess.run`` driven by a path->exists map, plus a recording list.
+
+    ``_sudo_exists`` issues ``sudo /bin/ls -d -- <path>``; we answer rc 0 (exists) or rc 1 with the
+    real "No such file or directory" stderr (absent). ``visudo -cf`` returns ``visudo_cf_rc``. The
+    baseline-poisoning ``grep -qF`` returns ``grep_rc`` (default 1 = the live fragment is NOT the
+    helper model — the normal pre-cutover case). ``raise_on`` (a basename like "/bin/cp") makes that
+    sudo verb raise CalledProcessError.
+    """
+    import subprocess as _sp
+
+    calls: list[list[str]] = []
+
+    def run(cmd, **_kw):
+        calls.append(cmd)
+        if raise_on is not None and cmd[:2] == ["sudo", raise_on]:
+            raise _sp.CalledProcessError(1, cmd)
+        if cmd[:4] == ["sudo", "/bin/ls", "-d", "--"]:
+            path = cmd[4]
+            if existence.get(path, False):
+                return MagicMock(returncode=0, stdout=path + "\n", stderr="")
+            return MagicMock(
+                returncode=1, stdout="", stderr=f"ls: {path}: No such file or directory"
+            )
+        if cmd[:3] == ["sudo", "/usr/bin/grep", "-qF"]:
+            return MagicMock(returncode=grep_rc, stdout="", stderr="")
+        if cmd[:3] == ["sudo", "/usr/sbin/visudo", "-cf"]:
+            return MagicMock(returncode=visudo_cf_rc, stdout="", stderr="parse error")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return run, calls
+
+
+def test_sudo_exists_three_states() -> None:
+    run, _ = _sudo_driver({"/exists": True})
+    with patch("ais_core.sudoers.subprocess.run", side_effect=run):
+        assert _sudo_exists("/exists") is True
+        assert _sudo_exists("/gone") is False
+
+    # An indeterminate result (neither rc 0 nor a clean "No such file") fails CLOSED.
+    def weird(cmd, **_kw):
+        return MagicMock(returncode=2, stdout="", stderr="sudo: a password is required")
+
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=weird),
+        pytest.raises(SudoersError, match="cannot determine existence"),
+    ):
+        _sudo_exists("/x")
+
+
+def test_backup_skips_when_already_recorded() -> None:
+    """If either marker already exists, the original pre-helper state is left untouched."""
+    run, calls = _sudo_driver({SUDOERS_BACKUP_PATH: True})  # backup already present
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+    ):
+        assert backup_existing_sudoers() is None
+    # only the existence probe(s) ran — no cp/mv/touch clobbering the recorded state
+    verbs = [c[1] for c in calls]
+    assert "/bin/cp" not in verbs and "/bin/mv" not in verbs and "/usr/bin/touch" not in verbs
+
+
+def test_backup_copies_prior_fragment_when_present() -> None:
+    """No markers yet + a genuine (non-helper) prior fragment -> copy it to the backup via atomic mv."""
+    existence = {SUDOERS_BACKUP_PATH: False, SUDOERS_ABSENT_MARKER: False, SUDOERS_PATH: True}
+    run, calls = _sudo_driver(existence, grep_rc=1)  # grep_rc=1 -> not the helper model
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+    ):
+        result = backup_existing_sudoers()
+    assert result == SUDOERS_BACKUP_PATH
+    seq = [c[1:] for c in calls if c[1] in ("/bin/cp", "/usr/sbin/chown", "/bin/chmod", "/bin/mv")]
+    assert seq[0][:2] == ["/bin/cp", SUDOERS_PATH]  # copy the prior fragment...
+    assert seq[0][-1] == SUDOERS_BACKUP_STAGED  # ...to the dotted staged name
+    assert ["/bin/mv", SUDOERS_BACKUP_STAGED, SUDOERS_BACKUP_PATH] in seq  # atomic publish
+    assert not any(c[1] == "/usr/bin/touch" for c in calls)  # no absent-marker path taken
+
+
+def test_backup_refuses_to_record_a_helper_model_fragment() -> None:
+    """HIGH (anti-poisoning): no markers + live fragment ALREADY references the helper -> refuse,
+    never freeze the helper-only model as the 'pre-bootstrap' baseline (would defeat FR8)."""
+    existence = {SUDOERS_BACKUP_PATH: False, SUDOERS_ABSENT_MARKER: False, SUDOERS_PATH: True}
+    run, calls = _sudo_driver(existence, grep_rc=0)  # grep_rc=0 -> IS the helper model
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+        pytest.raises(SudoersError, match="refusing to record the baseline"),
+    ):
+        backup_existing_sudoers()
+    # refused BEFORE recording anything
+    assert not any(
+        c[1] in ("/bin/cp", "/bin/mv", "/usr/bin/touch") for c in calls if c[0] == "sudo"
+    )
+
+
+def test_fragment_is_helper_model_three_states() -> None:
+    from ais_core.sudoers import _fragment_is_helper_model
+
+    with patch("ais_core.sudoers.subprocess.run", return_value=MagicMock(returncode=0)):
+        assert _fragment_is_helper_model("/x") is True
+    with patch("ais_core.sudoers.subprocess.run", return_value=MagicMock(returncode=1)):
+        assert _fragment_is_helper_model("/x") is False
+    with (
+        patch(
+            "ais_core.sudoers.subprocess.run",
+            return_value=MagicMock(returncode=2, stderr="boom"),
+        ),
+        pytest.raises(SudoersError, match="cannot inspect"),
+    ):
+        _fragment_is_helper_model("/x")
+
+
+def test_backup_writes_absent_marker_when_no_prior() -> None:
+    """No markers yet + NO live fragment -> stage an empty marker, then atomic mv (symmetric)."""
+    existence = {SUDOERS_BACKUP_PATH: False, SUDOERS_ABSENT_MARKER: False, SUDOERS_PATH: False}
+    run, calls = _sudo_driver(existence)
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+    ):
+        result = backup_existing_sudoers()
+    assert result == SUDOERS_ABSENT_MARKER
+    # absent branch is now atomic+symmetric: touch the STAGED name, then mv it onto the marker
+    assert ["sudo", "/usr/bin/touch", SUDOERS_BACKUP_STAGED] in calls
+    assert ["sudo", "/bin/mv", SUDOERS_BACKUP_STAGED, SUDOERS_ABSENT_MARKER] in calls
+    assert not any(c[1] == "/bin/cp" for c in calls)  # nothing to copy
+    # the live marker name is never written directly (no rm-f-before-write skip, no symlink-follow)
+    assert not any(c[-1] == SUDOERS_ABSENT_MARKER and c[1] == "/usr/bin/touch" for c in calls)
+
+
+def test_backup_dry_run_and_non_tty() -> None:
+    with patch("ais_core.sudoers.subprocess.run") as m:
+        assert backup_existing_sudoers(dry_run=True) is None
+    m.assert_not_called()
+    with (
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=False),
+        pytest.raises(SudoersError, match="interactive terminal"),
+    ):
+        backup_existing_sudoers()
+
+
+def test_backup_cleans_staged_on_failure() -> None:
+    """A cp failure mid-capture removes the dotted staged file and surfaces a SudoersError."""
+    existence = {SUDOERS_BACKUP_PATH: False, SUDOERS_ABSENT_MARKER: False, SUDOERS_PATH: True}
+    run, calls = _sudo_driver(existence, raise_on="/bin/cp")
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+        pytest.raises(SudoersError, match="Failed to back up"),
+    ):
+        backup_existing_sudoers()
+    # best-effort cleanup rm of the staged name ran (the last rm targets the staged backup)
+    assert any(c == ["sudo", "/bin/rm", "-f", SUDOERS_BACKUP_STAGED] for c in calls)
+
+
+def test_restore_from_backup_validates_then_publishes() -> None:
+    """backup present -> stage, visudo -cf the staged backup, atomic mv, visudo -c the tree."""
+    run, calls = _sudo_driver({SUDOERS_BACKUP_PATH: True})
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+    ):
+        desc = restore_sudoers()
+    assert "restored" in desc and SUDOERS_BACKUP_PATH in desc
+    privileged = [c[1:] for c in calls if c[0] == "sudo" and c[1] != "/bin/ls"]
+    # cp backup -> staged ; validate the STAGED file BEFORE it becomes live ; mv ; then whole-tree
+    assert ["/bin/cp", SUDOERS_BACKUP_PATH, SUDOERS_STAGED] in privileged
+    assert ["/usr/sbin/visudo", "-cf", SUDOERS_STAGED] in privileged
+    mv_i = privileged.index(["/bin/mv", SUDOERS_STAGED, SUDOERS_PATH])
+    cf_i = privileged.index(["/usr/sbin/visudo", "-cf", SUDOERS_STAGED])
+    c_i = privileged.index(["/usr/sbin/visudo", "-c"])
+    assert cf_i < mv_i < c_i  # validate-before-publish, then whole-tree check last
+    # the recorded baseline is INTENTIONALLY retained (re-bootstrap must round-trip to it)
+    assert not any(["/bin/rm", "-f", SUDOERS_BACKUP_PATH] == c for c in privileged)
+
+
+def test_restore_refuses_backup_that_fails_visudo() -> None:
+    """ANTI-LOCKOUT: a backup that fails visudo -cf is NOT published; the live fragment stays."""
+    run, calls = _sudo_driver({SUDOERS_BACKUP_PATH: True}, visudo_cf_rc=1)
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+        pytest.raises(SudoersError, match="visudo -cf"),
+    ):
+        restore_sudoers()
+    privileged = [c[1:] for c in calls if c[0] == "sudo"]
+    assert ["/bin/mv", SUDOERS_STAGED, SUDOERS_PATH] not in privileged  # never went live
+    assert ["/bin/rm", "-f", SUDOERS_STAGED] in privileged  # staged backup cleaned up
+
+
+def test_restore_absent_marker_removes_fragment() -> None:
+    """absent-marker present (no backup) -> remove the live fragment, then visudo -c."""
+    run, calls = _sudo_driver({SUDOERS_BACKUP_PATH: False, SUDOERS_ABSENT_MARKER: True})
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+    ):
+        desc = restore_sudoers()
+    assert "removed the live fragment" in desc
+    privileged = [c[1:] for c in calls if c[0] == "sudo"]
+    assert ["/bin/rm", "-f", SUDOERS_PATH] in privileged
+    assert ["/usr/sbin/visudo", "-c"] in privileged
+    # the absent-marker is INTENTIONALLY retained, so a re-bootstrap still round-trips to "absent"
+    assert not any(["/bin/rm", "-f", SUDOERS_ABSENT_MARKER] == c for c in privileged)
+
+
+def test_restore_refuses_when_no_markers() -> None:
+    """Neither backup nor absent-marker -> refuse (never guess the prior state)."""
+    run, calls = _sudo_driver({SUDOERS_BACKUP_PATH: False, SUDOERS_ABSENT_MARKER: False})
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+        pytest.raises(SudoersError, match="no recorded pre-bootstrap state"),
+    ):
+        restore_sudoers()
+    # refusal happens before any mutating verb
+    assert not any(c[1] in ("/bin/cp", "/bin/mv", "/bin/rm") for c in calls if c[0] == "sudo")
+
+
+def test_restore_dry_run_and_non_tty() -> None:
+    with patch("ais_core.sudoers.subprocess.run") as m:
+        assert restore_sudoers(dry_run=True) == "dry-run"
+    m.assert_not_called()
+    with (
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=False),
+        pytest.raises(SudoersError, match="interactive terminal"),
+    ):
+        restore_sudoers()
+
+
+def test_fr8_roundtrip_first_capture_wins_survives_two_cycles() -> None:
+    """FR8 durability: install -> rollback -> re-install -> rollback. The backup is captured ONCE
+    (the original pre-helper fragment) and SURVIVES both cycles, so the 2nd rollback still targets
+    the ORIGINAL baseline — modelled with a stateful filesystem map driving the real functions."""
+    fs: dict[str, bool] = {
+        SUDOERS_BACKUP_PATH: False,
+        SUDOERS_ABSENT_MARKER: False,
+        SUDOERS_PATH: True,
+    }
+    backup_captures: list[str] = []
+
+    def run(cmd, **_kw):
+        if cmd[:4] == ["sudo", "/bin/ls", "-d", "--"]:
+            p = cmd[4]
+            return (
+                MagicMock(returncode=0, stdout=p, stderr="")
+                if fs.get(p, False)
+                else MagicMock(returncode=1, stdout="", stderr="No such file or directory")
+            )
+        if cmd[:3] == ["sudo", "/usr/bin/grep", "-qF"]:
+            return MagicMock(returncode=1)  # the prior fragment is NOT the helper model
+        if cmd[:2] == ["sudo", "/bin/cp"]:
+            if cmd[-1] == SUDOERS_BACKUP_STAGED:  # only the backup-capture cp, not restore's cp
+                backup_captures.append(cmd[2])  # source = what got recorded as the baseline
+            fs[cmd[-1]] = True
+            return MagicMock(returncode=0)
+        if cmd[:2] == ["sudo", "/bin/mv"]:
+            fs[cmd[-1]] = True
+            fs[cmd[-2]] = False
+            return MagicMock(returncode=0)
+        if cmd[:3] == ["sudo", "/bin/rm", "-f"]:
+            for t in cmd[3:]:
+                fs[t] = False
+            return MagicMock(returncode=0)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with (
+        patch("ais_core.sudoers.subprocess.run", side_effect=run),
+        patch("ais_core.sudoers.sys.stdin.isatty", return_value=True),
+        patch("ais_core.bootstrap.assert_chain_locked"),
+    ):
+        # cycle 1: capture the ORIGINAL pre-helper fragment, then roll back
+        assert backup_existing_sudoers() == SUDOERS_BACKUP_PATH
+        assert fs[SUDOERS_BACKUP_PATH] is True
+        restore_sudoers()
+        # cycle 2: re-bootstrap must be a NO-OP (backup already recorded), not re-capture
+        assert backup_existing_sudoers() is None
+        restore_sudoers()
+
+    # the cp-as-baseline ran EXACTLY once, on the ORIGINAL live fragment — never on a later one
+    assert backup_captures == [SUDOERS_PATH]
+    assert fs[SUDOERS_BACKUP_PATH] is True  # baseline still there after both cycles

@@ -284,6 +284,32 @@ def verify_helper() -> bool:
     return _sha256_hex(dest) == token
 
 
+def remove_helper(*, dry_run: bool = False) -> list[str]:
+    """Remove the installed helper and its SHA-256 sidecar (FR8 rollback). Returns the paths.
+
+    Idempotent: ``rm -f`` makes removing an already-absent helper a no-op. Interactive (raw sudo
+    password — removing a root file under ``/Library/PrivilegedHelperTools`` is NOT in the NOPASSWD
+    helper, by design). I0-checked defensively before the privileged ``rm`` (a missing leaf is fine
+    — :func:`assert_chain_locked` validates the parent chain and returns at the absent helper).
+    """
+    dest = sudoers.PRIVILEGED_HELPER_PATH
+    targets = [dest, HELPER_SHA256_PATH]
+    if dry_run:
+        print(f"[dry-run] remove helper {dest} and signature {HELPER_SHA256_PATH}")
+        return targets
+    if not sys.stdin.isatty():
+        raise BootstrapError(
+            "aisctl bootstrap --rollback requires an interactive terminal "
+            f"(sudo password is needed to remove {dest})."
+        )
+    assert_chain_locked(dest)
+    try:
+        subprocess.run(["sudo", "/bin/rm", "-f", *targets], check=True)
+    except subprocess.CalledProcessError as e:
+        raise BootstrapError(f"Failed to remove the helper at {dest}: {e}") from e
+    return targets
+
+
 # Dedicated daemon account (NFR12, opt-in via --dedicated-user). A hidden, non-login, non-admin
 # macOS role account that engine daemons run as, confining a network RCE in an engine to a
 # powerless uid (the operator is admin; engines should not be). uid in the sanctioned role range

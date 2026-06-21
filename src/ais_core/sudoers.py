@@ -38,6 +38,27 @@ ADMIN_GROUP = "%admin"
 # source (invariant #3).
 PRIVILEGED_HELPER_PATH = "/Library/PrivilegedHelperTools/asiai-priv"
 
+# --- Rollback support (FR8, story 2.3) ------------------------------------------------------
+# A rollback must restore EXACTLY the pre-bootstrap state of SUDOERS_PATH so the operator is never
+# locked out of sudo. We record that state ONCE — the first time a fragment is installed — as one
+# of two DOTTED files in sudoers.d. sudo ignores any sudoers.d entry whose name contains a '.'
+# (the same property SUDOERS_STAGED relies on), so NEITHER is ever parsed as a live rule:
+#   * SUDOERS_BACKUP_PATH   — the prior fragment's bytes, when one existed (the wildcard fragment
+#                             on a parc machine). Rollback re-installs it.
+#   * SUDOERS_ABSENT_MARKER — an empty marker, when NO prior fragment existed (clean install).
+#                             Rollback removes the live fragment (revert to "no fragment").
+# Exactly one is created at first install; both are left untouched on re-runs, so the recorded
+# state always remains the ORIGINAL pre-helper one — never a later helper-only fragment that a
+# re-bootstrap or cutover writes over it. Existence is decided AS ROOT (see ``_sudo_exists``) so a
+# hardened (0750) sudoers.d can't make a present file look absent, and no privileged content read
+# is needed for the rollback decision.
+SUDOERS_BACKUP_PATH = f"{SUDOERS_DIR}/.asiai-inference.pre-bootstrap.bak"
+SUDOERS_ABSENT_MARKER = f"{SUDOERS_DIR}/.asiai-inference.was-absent.marker"
+# Staging name for capturing the backup (dotted -> sudo-ignored). Distinct from SUDOERS_STAGED,
+# which restore reuses (a restore stages into the same "about-to-be-live fragment" slot install
+# uses). Backup never runs concurrently with install.
+SUDOERS_BACKUP_STAGED = f"{SUDOERS_DIR}/.asiai-inference.bak.tmp"
+
 
 class SudoersError(RuntimeError):
     """Raised when the sudoers content is malformed or cannot be installed."""
@@ -198,3 +219,209 @@ def remove_sudoers(*, dry_run: bool = False) -> bool:
 
     subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_PATH], check=True)
     return True
+
+
+def _sudo_exists(path: str) -> bool:
+    """True iff PATH exists, decided AS ROOT so a 0750 sudoers.d (or a 0440 fragment a non-wheel
+    invoker cannot stat) can never make a present file look absent — which would silently corrupt
+    the rollback decision (restore vs remove). FAIL-CLOSED: only a clean "No such file" counts as
+    absent; a sudo/authentication/other error raises rather than being read as "not there".
+
+    ``ls -d -- <path>`` distinguishes the three states unambiguously: rc 0 (exists) / rc!=0 with
+    "No such file or directory" on stderr (absent) / anything else (sudo failed, permission, …).
+    """
+    proc = subprocess.run(
+        ["sudo", "/bin/ls", "-d", "--", path],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        return True
+    if "No such file or directory" in (proc.stderr or ""):
+        return False
+    detail = (proc.stderr or "").strip() or f"ls rc={proc.returncode}"
+    raise SudoersError(f"cannot determine existence of {path}: {detail}")
+
+
+def backup_recorded() -> bool:
+    """True iff the pre-bootstrap state has already been recorded (either marker present)."""
+    return _sudo_exists(SUDOERS_BACKUP_PATH) or _sudo_exists(SUDOERS_ABSENT_MARKER)
+
+
+def _fragment_is_helper_model(path: str) -> bool:
+    """True iff the sudoers fragment at PATH already references the privileged helper (i.e. it IS
+    our helper-only model, not a genuine pre-helper fragment). FAIL-CLOSED: grep rc 0 = match,
+    rc 1 = no match, anything else (sudo/read error) raises rather than guessing.
+
+    Used to refuse recording our OWN fragment as the "pre-bootstrap" baseline if the dotted markers
+    were ever lost while the live fragment was already migrated — which would silently freeze the
+    helper-only fragment as the rollback target and defeat FR8.
+    """
+    proc = subprocess.run(
+        ["sudo", "/usr/bin/grep", "-qF", "--", PRIVILEGED_HELPER_PATH, path],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 1:
+        return False
+    raise SudoersError(
+        f"cannot inspect {path} to tell the pre-bootstrap fragment from the helper model "
+        f"(grep rc={proc.returncode}): {(proc.stderr or '').strip()}"
+    )
+
+
+def backup_existing_sudoers(*, dry_run: bool = False) -> str | None:
+    """Record the pre-bootstrap state of SUDOERS_PATH ONCE so a rollback can restore it (FR8).
+
+    Called from the bootstrap BEFORE the helper-only fragment overwrites whatever is there. First
+    capture only: if either marker already exists the recorded state is LEFT UNTOUCHED, so a re-run
+    (or a later cutover) never overwrites the original pre-helper backup with a helper-only
+    fragment. Writes ``SUDOERS_BACKUP_PATH`` (the prior fragment's bytes) when one exists, else an
+    empty ``SUDOERS_ABSENT_MARKER``. Both are dotted (sudo-ignored), root:wheel 0440, published
+    TOCTOU-safe (dotted staged name cleared + chowned/chmod'd, then ONE atomic mv) — identically
+    for both branches.
+
+    Baseline-poisoning guard: if no marker exists yet BUT the live fragment already references the
+    helper (so the dotted markers were lost while the model was live), refuse rather than freeze the
+    helper-only fragment as the "pre-bootstrap" baseline — that would silently break FR8. The
+    operator must re-establish the baseline from a known-good source.
+
+    Returns the path written, or None if a backup already existed / in dry-run.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] record pre-bootstrap state of {SUDOERS_PATH} ONCE -> "
+            f"{SUDOERS_BACKUP_PATH} (or {SUDOERS_ABSENT_MARKER} if no prior fragment)"
+        )
+        return None
+
+    if not sys.stdin.isatty():
+        raise SudoersError(
+            "recording the sudoers backup requires an interactive terminal (sudo password). "
+            "Run `aisctl bootstrap --install` directly in Terminal.app."
+        )
+
+    if backup_recorded():
+        return None  # the first capture is the authoritative pre-helper state — never clobber it.
+
+    # I0 (defence-in-depth; the bootstrap already checked, cheap to re-assert before a root write).
+    from ais_core import bootstrap
+
+    bootstrap.assert_chain_locked(SUDOERS_DIR)
+
+    prior_exists = _sudo_exists(SUDOERS_PATH)
+    if prior_exists and _fragment_is_helper_model(SUDOERS_PATH):
+        # No marker recorded, yet the live fragment is ALREADY the helper model: the baseline was
+        # lost. Recording this fragment would make --rollback "restore" the helper-only model — a
+        # silent FR8 defeat. Refuse and tell the operator to re-establish the baseline.
+        raise SudoersError(
+            f"refusing to record the baseline: {SUDOERS_PATH} already references the helper "
+            f"({PRIVILEGED_HELPER_PATH}) but no pre-bootstrap marker exists — the rollback baseline "
+            "was lost. Re-establish it from a known-good source (or restore the dotted markers) "
+            "before re-running; recording the helper-only fragment as 'pre-bootstrap' would break "
+            "rollback."
+        )
+
+    # Both branches publish via the same TOCTOU-safe pattern: clear a stale/symlinked staged inode,
+    # write+lock owner/mode on the dotted staged name, then ONE atomic mv onto the dotted target.
+    target = SUDOERS_BACKUP_PATH if prior_exists else SUDOERS_ABSENT_MARKER
+    try:
+        subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_BACKUP_STAGED], check=True)
+        if prior_exists:
+            # Copy the prior fragment's bytes (as root — it is 0440) into the staged name.
+            subprocess.run(["sudo", "/bin/cp", SUDOERS_PATH, SUDOERS_BACKUP_STAGED], check=True)
+        else:
+            # No prior fragment: an empty staged marker so rollback reverts to "no fragment".
+            subprocess.run(["sudo", "/usr/bin/touch", SUDOERS_BACKUP_STAGED], check=True)
+        subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_BACKUP_STAGED], check=True)
+        subprocess.run(["sudo", "/bin/chmod", "0440", SUDOERS_BACKUP_STAGED], check=True)
+        subprocess.run(["sudo", "/bin/mv", SUDOERS_BACKUP_STAGED, target], check=True)
+        return target
+    except subprocess.CalledProcessError as e:
+        subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_BACKUP_STAGED], check=False)  # best-effort
+        raise SudoersError(f"Failed to back up {SUDOERS_PATH}: {e}") from e
+
+
+def restore_sudoers(*, dry_run: bool = False) -> str:
+    """Restore SUDOERS_PATH to its recorded pre-bootstrap state (FR8). Returns a short description.
+
+    ANTI-LOCKOUT (AC2): never publishes content that does not pass ``visudo -cf``, and re-validates
+    the WHOLE tree with ``visudo -c`` afterwards — so a malformed restore can never lock ``%admin``
+    out of password sudo. If the backup itself fails ``visudo -cf`` the live fragment is left
+    untouched (the helper-only one is valid → sudo keeps working) and the error is surfaced.
+
+    Three cases, decided by root-side existence checks (no privileged content read):
+      * backup present  -> validate it, then atomically install it as the live fragment.
+      * absent-marker    -> remove the live fragment (revert to no asiai fragment).
+      * neither          -> REFUSE (the prior state was never recorded; never guess).
+
+    The markers are INTENTIONALLY retained after a rollback (not deleted here): they record the
+    original pre-bootstrap state, so a later ``--install`` round-trips to the same baseline. To
+    fully un-asiai a node, remove the dotted markers deliberately — :func:`backup_existing_sudoers`
+    refuses to re-record a helper-model fragment as the baseline, so a missing-marker re-install
+    fails loud rather than silently freezing the wrong baseline.
+    """
+    if dry_run:
+        print(
+            f"[dry-run] restore {SUDOERS_PATH} from its recorded pre-bootstrap state: "
+            f"re-install {SUDOERS_BACKUP_PATH} if present, else remove the live fragment if "
+            f"{SUDOERS_ABSENT_MARKER} is present, else refuse; then visudo -c the whole tree"
+        )
+        return "dry-run"
+
+    if not sys.stdin.isatty():
+        raise SudoersError(
+            "rollback requires an interactive terminal (sudo password). "
+            "Run `aisctl bootstrap --rollback` directly in Terminal.app."
+        )
+
+    from ais_core import bootstrap
+
+    bootstrap.assert_chain_locked(SUDOERS_DIR)
+
+    if _sudo_exists(SUDOERS_BACKUP_PATH):
+        try:
+            subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_STAGED], check=True)
+            subprocess.run(["sudo", "/bin/cp", SUDOERS_BACKUP_PATH, SUDOERS_STAGED], check=True)
+            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", SUDOERS_STAGED], check=True)
+            subprocess.run(["sudo", "/bin/chmod", "0440", SUDOERS_STAGED], check=True)
+            # Validate the staged backup BEFORE it becomes the live fragment: a backup that no
+            # longer parses must NOT be published (it would lock out sudo). Leave the current
+            # (valid) fragment in place and fail loud instead.
+            check = subprocess.run(
+                ["sudo", "/usr/sbin/visudo", "-cf", SUDOERS_STAGED],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if check.returncode != 0:
+                subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_STAGED], check=False)
+                why = (check.stderr or check.stdout).strip()
+                raise SudoersError(
+                    "refusing to restore: the recorded backup no longer passes visudo -cf "
+                    f"({why}); the current sudoers is left intact"
+                )
+            subprocess.run(["sudo", "/bin/mv", SUDOERS_STAGED, SUDOERS_PATH], check=True)
+            subprocess.run(["sudo", "/usr/sbin/visudo", "-c"], check=True)
+        except subprocess.CalledProcessError as e:
+            subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_STAGED], check=False)
+            raise SudoersError(f"Failed to restore {SUDOERS_PATH} from backup: {e}") from e
+        return f"restored the pre-bootstrap fragment from {SUDOERS_BACKUP_PATH}"
+
+    if _sudo_exists(SUDOERS_ABSENT_MARKER):
+        try:
+            subprocess.run(["sudo", "/bin/rm", "-f", SUDOERS_PATH], check=True)
+            subprocess.run(["sudo", "/usr/sbin/visudo", "-c"], check=True)
+        except subprocess.CalledProcessError as e:
+            raise SudoersError(f"Failed to remove {SUDOERS_PATH} during rollback: {e}") from e
+        return "removed the live fragment (no asiai fragment existed before bootstrap)"
+
+    raise SudoersError(
+        f"no recorded pre-bootstrap state ({SUDOERS_BACKUP_PATH} / {SUDOERS_ABSENT_MARKER} both "
+        "absent): the full bootstrap was never run, or the markers were removed. Refusing to guess "
+        f"— inspect {SUDOERS_PATH} manually."
+    )
