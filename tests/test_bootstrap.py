@@ -616,13 +616,18 @@ def _ro(returncode: int, stdout: str = "", stderr: str = ""):
 
 
 def test_has_auth_authority_present(monkeypatch):
+    # present: rc 0, the value on stdout (dscl -read returns rc 0 here)
     monkeypatch.setattr(bootstrap_mod, "_run_ro", _ro(0, stdout="AuthenticationAuthority: ;X;"))
     assert bootstrap_mod._has_auth_authority("x") is True
 
 
 def test_has_auth_authority_absent_no_such_key(monkeypatch):
+    # REAL macOS 26 behaviour: an ABSENT key still returns rc 0, with empty stdout and
+    # "No such key" on STDERR. The decision must be made on the OUTPUT, never on rc==0
+    # (which previously made _has_auth_authority wrongly report every account as login-capable,
+    # breaking --dedicated-user against a perfectly valid role account).
     monkeypatch.setattr(
-        bootstrap_mod, "_run_ro", _ro(56, stderr="No such key: AuthenticationAuthority")
+        bootstrap_mod, "_run_ro", _ro(0, stderr="No such key: AuthenticationAuthority")
     )
     assert bootstrap_mod._has_auth_authority("x") is False
 
@@ -630,5 +635,12 @@ def test_has_auth_authority_absent_no_such_key(monkeypatch):
 def test_has_auth_authority_indeterminate_fails_closed(monkeypatch):
     # a non-zero rc that is NOT "No such key" (transient DS error) -> refuse, never assume absent
     monkeypatch.setattr(bootstrap_mod, "_run_ro", _ro(5, stderr="DS connection error"))
+    with pytest.raises(BootstrapError, match="cannot read AuthenticationAuthority"):
+        bootstrap_mod._has_auth_authority("x")
+
+
+def test_has_auth_authority_rc0_but_empty_is_indeterminate(monkeypatch):
+    # rc 0 with neither a value NOR "No such key" is unexpected -> fail-closed, not "present"
+    monkeypatch.setattr(bootstrap_mod, "_run_ro", _ro(0, stdout="", stderr=""))
     with pytest.raises(BootstrapError, match="cannot read AuthenticationAuthority"):
         bootstrap_mod._has_auth_authority("x")

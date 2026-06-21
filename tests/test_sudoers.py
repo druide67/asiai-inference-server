@@ -307,7 +307,7 @@ def test_backup_skips_when_already_recorded() -> None:
 
 
 def test_backup_copies_prior_fragment_when_present() -> None:
-    """No markers yet + a genuine (non-helper) prior fragment -> copy it to the backup via atomic mv."""
+    """No markers + a genuine (non-helper) prior fragment -> copy it to the backup via atomic mv."""
     existence = {SUDOERS_BACKUP_PATH: False, SUDOERS_ABSENT_MARKER: False, SUDOERS_PATH: True}
     run, calls = _sudo_driver(existence, grep_rc=1)  # grep_rc=1 -> not the helper model
     with (
@@ -423,7 +423,7 @@ def test_restore_from_backup_validates_then_publishes() -> None:
     c_i = privileged.index(["/usr/sbin/visudo", "-c"])
     assert cf_i < mv_i < c_i  # validate-before-publish, then whole-tree check last
     # the recorded baseline is INTENTIONALLY retained (re-bootstrap must round-trip to it)
-    assert not any(["/bin/rm", "-f", SUDOERS_BACKUP_PATH] == c for c in privileged)
+    assert not any(c == ["/bin/rm", "-f", SUDOERS_BACKUP_PATH] for c in privileged)
 
 
 def test_restore_refuses_backup_that_fails_visudo() -> None:
@@ -455,7 +455,7 @@ def test_restore_absent_marker_removes_fragment() -> None:
     assert ["/bin/rm", "-f", SUDOERS_PATH] in privileged
     assert ["/usr/sbin/visudo", "-c"] in privileged
     # the absent-marker is INTENTIONALLY retained, so a re-bootstrap still round-trips to "absent"
-    assert not any(["/bin/rm", "-f", SUDOERS_ABSENT_MARKER] == c for c in privileged)
+    assert not any(c == ["/bin/rm", "-f", SUDOERS_ABSENT_MARKER] for c in privileged)
 
 
 def test_restore_refuses_when_no_markers() -> None:

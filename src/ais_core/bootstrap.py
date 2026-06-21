@@ -364,19 +364,23 @@ def _has_auth_authority(name: str) -> bool:
     """True iff the account has an AuthenticationAuthority key (i.e. a usable login/password).
 
     A ``sysadminctl -roleAccount`` has NONE (``No such key``), which is what we require: the
-    daemon account must not be loginable. FAIL-CLOSED like :func:`_in_admin_group` — only the
-    expected ``No such key`` counts as absent; any other read error raises rather than assume.
+    daemon account must not be loginable.
+
+    CRITICAL — ``dscl -read`` returns rc 0 whether the key is PRESENT or ABSENT (verified on
+    macOS 26: absent -> rc 0, empty stdout, ``No such key: AuthenticationAuthority`` on STDERR;
+    present -> rc 0, the value on stdout). So the return code is NOT a present/absent signal — the
+    decision must be made on the OUTPUT. FAIL-CLOSED: ``No such key`` -> absent; a non-empty value
+    -> present; anything else (a DirectoryServices error, or rc 0 with no value and no
+    ``No such key``) is indeterminate -> raise rather than assume the account is non-loginable.
     """
     proc = _run_ro([_DSCL, ".", "-read", f"/Users/{name}", "AuthenticationAuthority"])
-    if proc.returncode == 0:
-        return True  # key present -> a usable login authority
     if "No such key" in (proc.stdout or "") or "No such key" in (proc.stderr or ""):
         return False  # key absent -> no login authority (the role-account case)
-    # FAIL-CLOSED (symmetry with _in_admin_group): a non-zero rc that is NOT the expected
-    # "No such key" is an indeterminate DirectoryServices result — refuse rather than assume the
-    # account is non-loginable and adopt it.
+    if proc.returncode == 0 and (proc.stdout or "").strip():
+        return True  # key present with a value -> a usable login authority
     raise BootstrapError(
-        f"cannot read AuthenticationAuthority of {name!r} (rc={proc.returncode}); refusing"
+        f"cannot read AuthenticationAuthority of {name!r} "
+        f"(rc={proc.returncode}, no value and no 'No such key'); refusing"
     )
 
 

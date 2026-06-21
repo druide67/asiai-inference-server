@@ -320,10 +320,10 @@ def backup_existing_sudoers(*, dry_run: bool = False) -> str | None:
         # silent FR8 defeat. Refuse and tell the operator to re-establish the baseline.
         raise SudoersError(
             f"refusing to record the baseline: {SUDOERS_PATH} already references the helper "
-            f"({PRIVILEGED_HELPER_PATH}) but no pre-bootstrap marker exists — the rollback baseline "
-            "was lost. Re-establish it from a known-good source (or restore the dotted markers) "
-            "before re-running; recording the helper-only fragment as 'pre-bootstrap' would break "
-            "rollback."
+            f"({PRIVILEGED_HELPER_PATH}) but no pre-bootstrap marker exists — the rollback "
+            "baseline was lost. Re-establish it from a known-good source (or restore the dotted "
+            "markers) before re-running; recording the helper-only fragment as 'pre-bootstrap' "
+            "would break rollback."
         )
 
     # Both branches publish via the same TOCTOU-safe pattern: clear a stale/symlinked staged inode,
