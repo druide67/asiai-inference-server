@@ -8,6 +8,8 @@ without needing root.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 import stat
 import subprocess
@@ -278,3 +280,112 @@ def test_install_helper_dest_is_the_invoked_path():
     from ais_core import privhelper
 
     assert bootstrap_mod.install_helper(dry_run=True) == privhelper.helper_path()
+
+
+# ---------------------------------------------------------------------------
+# write_helper_signature / verify_helper — NFR11 SHA-256 sidecar.
+# ---------------------------------------------------------------------------
+
+
+def test_write_helper_signature_dry_run(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda *a, **k: calls.append(a))
+    out = bootstrap_mod.write_helper_signature(dry_run=True)
+    assert out == bootstrap_mod.HELPER_SHA256_PATH
+    assert calls == []
+
+
+def test_write_helper_signature_requires_installed_helper(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(bootstrap_mod.sudoers, "PRIVILEGED_HELPER_PATH", str(tmp_path / "absent"))
+    with pytest.raises(BootstrapError, match="not installed"):
+        bootstrap_mod.write_helper_signature()
+
+
+def test_write_helper_signature_sequence(monkeypatch, tmp_path):
+    helper = tmp_path / "asiai-priv"
+    helper.write_text("#!/usr/bin/python3 -I\n")
+    sidecar = tmp_path / "asiai-priv.sha256"
+    staged = tmp_path / ".asiai-priv.sha256.tmp"
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+    monkeypatch.setattr(bootstrap_mod.sudoers, "PRIVILEGED_HELPER_PATH", str(helper))
+    monkeypatch.setattr(bootstrap_mod, "HELPER_SHA256_PATH", str(sidecar))
+    monkeypatch.setattr(bootstrap_mod, "SIDECAR_STAGED", str(staged))
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(bootstrap_mod, "assert_chain_locked", lambda p: None)
+
+    @contextlib.contextmanager
+    def fake_staging():
+        yield staging_dir
+
+    monkeypatch.setattr(bootstrap_mod, "secure_staging_dir", fake_staging)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda argv, **k: calls.append(argv))
+
+    out = bootstrap_mod.write_helper_signature()
+
+    assert out == str(sidecar)
+    tmp_content = (staging_dir / "asiai-priv.sha256").read_text()
+    digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+    assert tmp_content == f"{digest}  asiai-priv\n"  # shasum -a 256 -c format
+    assert calls == [
+        ["sudo", "/bin/rm", "-f", str(staged)],
+        ["sudo", "/bin/cp", str(staging_dir / "asiai-priv.sha256"), str(staged)],
+        ["sudo", "/usr/sbin/chown", "root:wheel", str(staged)],
+        ["sudo", "/bin/chmod", "0644", str(staged)],
+        ["sudo", "/bin/mv", str(staged), str(sidecar)],
+    ]
+
+
+def test_verify_helper_match(monkeypatch, tmp_path):
+    helper = tmp_path / "asiai-priv"
+    helper.write_text("payload\n")
+    sidecar = tmp_path / "asiai-priv.sha256"
+    digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+    sidecar.write_text(f"{digest}  asiai-priv\n")
+    monkeypatch.setattr(bootstrap_mod.sudoers, "PRIVILEGED_HELPER_PATH", str(helper))
+    monkeypatch.setattr(bootstrap_mod, "HELPER_SHA256_PATH", str(sidecar))
+    assert bootstrap_mod.verify_helper() is True
+
+
+def test_verify_helper_mismatch(monkeypatch, tmp_path):
+    helper = tmp_path / "asiai-priv"
+    helper.write_text("payload\n")
+    sidecar = tmp_path / "asiai-priv.sha256"
+    sidecar.write_text(f"{'0' * 64}  asiai-priv\n")  # wrong hash
+    monkeypatch.setattr(bootstrap_mod.sudoers, "PRIVILEGED_HELPER_PATH", str(helper))
+    monkeypatch.setattr(bootstrap_mod, "HELPER_SHA256_PATH", str(sidecar))
+    assert bootstrap_mod.verify_helper() is False
+
+
+def test_verify_helper_missing_sidecar(monkeypatch, tmp_path):
+    helper = tmp_path / "asiai-priv"
+    helper.write_text("x")
+    monkeypatch.setattr(bootstrap_mod.sudoers, "PRIVILEGED_HELPER_PATH", str(helper))
+    monkeypatch.setattr(bootstrap_mod, "HELPER_SHA256_PATH", str(tmp_path / "absent.sha256"))
+    with pytest.raises(BootstrapError, match="no signature sidecar"):
+        bootstrap_mod.verify_helper()
+
+
+def test_verify_helper_malformed_sidecar(monkeypatch, tmp_path):
+    helper = tmp_path / "asiai-priv"
+    helper.write_text("x")
+    sidecar = tmp_path / "asiai-priv.sha256"
+    sidecar.write_text("not-a-hash\n")
+    monkeypatch.setattr(bootstrap_mod.sudoers, "PRIVILEGED_HELPER_PATH", str(helper))
+    monkeypatch.setattr(bootstrap_mod, "HELPER_SHA256_PATH", str(sidecar))
+    with pytest.raises(BootstrapError, match="malformed"):
+        bootstrap_mod.verify_helper()
+
+
+def test_verify_helper_rejects_64_char_non_hex_sidecar(monkeypatch, tmp_path):
+    """A 64-char token that isn't hex is 'malformed', not a silent mismatch."""
+    helper = tmp_path / "asiai-priv"
+    helper.write_text("x")
+    sidecar = tmp_path / "asiai-priv.sha256"
+    sidecar.write_text(f"{'z' * 64}  asiai-priv\n")  # 64 chars but not hex
+    monkeypatch.setattr(bootstrap_mod.sudoers, "PRIVILEGED_HELPER_PATH", str(helper))
+    monkeypatch.setattr(bootstrap_mod, "HELPER_SHA256_PATH", str(sidecar))
+    with pytest.raises(BootstrapError, match="malformed"):
+        bootstrap_mod.verify_helper()

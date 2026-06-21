@@ -238,6 +238,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Install only the sudoers fragment (granular/legacy), after visudo validation.",
     )
+    p_boot.add_argument(
+        "--verify",
+        action="store_true",
+        help="Recompute the installed helper's SHA-256 and compare it to its sidecar (NFR11).",
+    )
     p_boot.add_argument("--dry-run", action="store_true")
     p_boot.set_defaults(func=commands.cmd_bootstrap)
 

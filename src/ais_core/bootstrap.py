@@ -11,6 +11,7 @@ CLI orchestration (``aisctl bootstrap --install``) composes these in the strict 
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -18,6 +19,7 @@ import sys
 from pathlib import Path
 
 from ais_core import plist, sudoers
+from ais_core.io import secure_staging_dir
 
 # The helper's audit log + Standard*Path live here; no other ais_core module owns this path.
 LOG_DIR = "/Library/Logs/asiai"
@@ -202,3 +204,80 @@ def install_helper(*, dry_run: bool = False) -> str:
         subprocess.run(["sudo", "/bin/rm", "-f", HELPER_STAGED], check=False)  # best-effort
         raise BootstrapError(f"Failed to install helper at {dest}: {e}") from e
     return dest
+
+
+# Integrity sidecar (NFR11). A root-owned SHA-256 of the installed helper, written next to it.
+# This is integrity + audit, NOT execution control — that is invariant #3 (only the root-owned
+# copy is executed) + I2 (the daemon runs non-root). Honestly: a root-owned hash beside a
+# root-owned helper adds no resistance against a ROOT attacker (it would replace both); its job
+# is to detect corruption / a wrong version and to record what was installed, verifiable at any
+# time via ``aisctl bootstrap --verify`` (and by ``shasum -a 256 -c`` — the file is in that
+# format). Stronger provenance (a detached CMS signature over the hash) is a future upgrade.
+HELPER_SHA256_PATH = sudoers.PRIVILEGED_HELPER_PATH + ".sha256"
+SIDECAR_STAGED = str(Path(HELPER_SHA256_PATH).with_name(".asiai-priv.sha256.tmp"))
+
+
+def _sha256_hex(path: str) -> str:
+    """Stream a file through SHA-256 and return its hex digest (constant memory)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_helper_signature(*, dry_run: bool = False) -> str:
+    """NFR11: hash the INSTALLED helper and write a root:wheel 0644 ``<helper>.sha256`` sidecar.
+
+    Hashes the on-disk installed copy (not the source) so the sidecar records what is actually
+    executed. Same TOCTOU-safe publish as the helper itself (I0 on the dir, dotted staged name
+    cleared + written + chowned/chmod'd, then atomic mv). ``shasum -a 256 -c`` compatible.
+    Must run AFTER :func:`install_helper` (it reads the installed helper).
+    """
+    dest = sudoers.PRIVILEGED_HELPER_PATH
+    if dry_run:
+        print(f"[dry-run] write SHA-256 sidecar {HELPER_SHA256_PATH} for {dest}")
+        return HELPER_SHA256_PATH
+
+    if not sys.stdin.isatty():
+        raise BootstrapError(
+            "aisctl bootstrap --install requires an interactive terminal (sudo password)."
+        )
+    if not Path(dest).is_file():
+        raise BootstrapError(f"cannot sign: helper not installed at {dest} (run install first)")
+
+    # I0 on the sidecar's chain (same dir as the helper) before the privileged write.
+    assert_chain_locked(HELPER_SHA256_PATH)
+    content = f"{_sha256_hex(dest)}  {Path(dest).name}\n"  # shasum -a 256 -c format
+    with secure_staging_dir() as staging:
+        tmp = staging / "asiai-priv.sha256"
+        tmp.write_text(content, encoding="utf-8")
+        try:
+            subprocess.run(["sudo", "/bin/rm", "-f", SIDECAR_STAGED], check=True)
+            subprocess.run(["sudo", "/bin/cp", str(tmp), SIDECAR_STAGED], check=True)
+            subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", SIDECAR_STAGED], check=True)
+            subprocess.run(["sudo", "/bin/chmod", "0644", SIDECAR_STAGED], check=True)
+            subprocess.run(["sudo", "/bin/mv", SIDECAR_STAGED, HELPER_SHA256_PATH], check=True)
+        except subprocess.CalledProcessError as e:
+            subprocess.run(["sudo", "/bin/rm", "-f", SIDECAR_STAGED], check=False)
+            raise BootstrapError(f"Failed to write signature {HELPER_SHA256_PATH}: {e}") from e
+    return HELPER_SHA256_PATH
+
+
+def verify_helper() -> bool:
+    """NFR11: True iff the installed helper's SHA-256 matches its sidecar.
+
+    Raises :class:`BootstrapError` if the helper or its sidecar is missing or the sidecar is
+    malformed — those are "cannot verify" states, distinct from a clean mismatch (returns False).
+    """
+    dest = sudoers.PRIVILEGED_HELPER_PATH
+    if not Path(dest).is_file():
+        raise BootstrapError(f"helper not installed at {dest}")
+    try:
+        recorded = Path(HELPER_SHA256_PATH).read_text(encoding="utf-8").split()
+    except FileNotFoundError:
+        raise BootstrapError(f"no signature sidecar at {HELPER_SHA256_PATH}") from None
+    token = recorded[0].lower() if recorded else ""
+    if len(token) != 64 or any(c not in "0123456789abcdef" for c in token):
+        raise BootstrapError(f"malformed signature sidecar at {HELPER_SHA256_PATH}")
+    return _sha256_hex(dest) == token

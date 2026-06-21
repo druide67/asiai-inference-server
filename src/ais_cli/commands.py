@@ -616,6 +616,8 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
+    if args.verify:
+        return _bootstrap_verify()
     if args.install:
         return _bootstrap_full(dry_run=args.dry_run)
     if args.install_sudoers:
@@ -641,20 +643,41 @@ def _bootstrap_full(*, dry_run: bool) -> int:
     """
     if dry_run:
         bootstrap.install_helper(dry_run=True)
+        bootstrap.write_helper_signature(dry_run=True)
         sudoers.install_sudoers(dry_run=True)
         return 0
     try:
         # I0 first: refuse if ANY root-write target's chain is unlocked, before any write.
         bootstrap.assert_fleet_chain_locked()
         helper_path = bootstrap.install_helper()
+        sidecar_path = bootstrap.write_helper_signature()  # NFR11, after the copy, before sudoers
         sudoers_path = sudoers.install_sudoers()
     except (bootstrap.BootstrapError, sudoers.SudoersError) as e:
         print(f"\n{e}", file=sys.stderr)
         return 2
-    print(f"installed helper:  {helper_path}")
-    print(f"installed sudoers: {sudoers_path}")
+    print(f"installed helper:    {helper_path}")
+    print(f"wrote signature:     {sidecar_path}")
+    print(f"installed sudoers:   {sudoers_path}")
     print("bootstrap complete. Engine lifecycle now routes through the helper (NOPASSWD).")
     return 0
+
+
+def _bootstrap_verify() -> int:
+    """``aisctl bootstrap --verify`` — recompute the helper's SHA-256 and compare to its sidecar."""
+    try:
+        ok = bootstrap.verify_helper()
+    except bootstrap.BootstrapError as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 2
+    if ok:
+        print(f"helper integrity OK: {sudoers.PRIVILEGED_HELPER_PATH} matches its SHA-256 sidecar")
+        return 0
+    print(
+        f"helper integrity MISMATCH: {sudoers.PRIVILEGED_HELPER_PATH} does not match "
+        f"{bootstrap.HELPER_SHA256_PATH} — the helper was modified or the sidecar is stale",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _bootstrap_sudoers_only(*, dry_run: bool) -> int:
