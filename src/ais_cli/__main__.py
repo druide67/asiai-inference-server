@@ -243,6 +243,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Recompute the installed helper's SHA-256 and compare it to its sidecar (NFR11).",
     )
+    p_boot.add_argument(
+        "--dedicated-user",
+        action="store_true",
+        help="With --install: also create the hidden non-admin role account engines run as "
+        "(_aisrv, uid 450-499). Recommended; confines an engine RCE to a powerless uid.",
+    )
     p_boot.add_argument("--dry-run", action="store_true")
     p_boot.set_defaults(func=commands.cmd_bootstrap)
 

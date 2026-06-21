@@ -389,3 +389,192 @@ def test_verify_helper_rejects_64_char_non_hex_sidecar(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap_mod, "HELPER_SHA256_PATH", str(sidecar))
     with pytest.raises(BootstrapError, match="malformed"):
         bootstrap_mod.verify_helper()
+
+
+# ---------------------------------------------------------------------------
+# create_dedicated_user / role-uid helpers — NFR12 (_aisrv).
+# ---------------------------------------------------------------------------
+
+
+def test_create_dedicated_user_dry_run(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda *a, **k: calls.append(a))
+    out = bootstrap_mod.create_dedicated_user(dry_run=True)
+    assert out["created"] is None
+    assert calls == []  # dry-run runs nothing
+
+
+def test_create_dedicated_user_creates_role_account(monkeypatch):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    uids = iter([None, 450])  # existence check -> absent; post-create verify -> 450
+    monkeypatch.setattr(bootstrap_mod, "_account_uid", lambda n: next(uids))
+    monkeypatch.setattr(bootstrap_mod, "_free_role_uid", lambda: 450)
+    monkeypatch.setattr(bootstrap_mod, "_assert_role_account", lambda n: None)  # checked separately
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda argv, **k: calls.append(argv))
+
+    out = bootstrap_mod.create_dedicated_user("_aisrv")
+
+    assert out == {"user": "_aisrv", "created": True, "uid": 450}
+    assert calls == [
+        ["sudo", "/usr/sbin/sysadminctl", "-addUser", "_aisrv", "-UID", "450", "-roleAccount"]
+    ]
+
+
+def test_create_dedicated_user_idempotent_reverifies_shape(monkeypatch):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(bootstrap_mod, "_account_uid", lambda n: 450)
+    asserted: list[str] = []
+    monkeypatch.setattr(bootstrap_mod, "_assert_role_account", lambda n: asserted.append(n))
+
+    def _no_run(*a, **k):
+        pytest.fail("no sysadminctl on an idempotent no-op")
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", _no_run)
+    out = bootstrap_mod.create_dedicated_user("_aisrv")
+    assert out == {"user": "_aisrv", "created": False, "uid": 450}
+    assert asserted == ["_aisrv"]  # full NFR12 shape re-verified before adopting
+
+
+@pytest.mark.parametrize("uid", [0, 501])
+def test_create_dedicated_user_refuses_uid_out_of_range(monkeypatch, uid):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(bootstrap_mod, "_account_uid", lambda n: uid)
+
+    def _no_run(*a, **k):
+        pytest.fail("must not run sysadminctl on an out-of-range existing account")
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", _no_run)
+    with pytest.raises(BootstrapError, match="outside the role range"):
+        bootstrap_mod.create_dedicated_user("_aisrv")
+
+
+def test_create_dedicated_user_refuses_existing_failing_shape(monkeypatch):
+    """A uid-in-range existing account that fails the full shape check is refused, not adopted."""
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(bootstrap_mod, "_account_uid", lambda n: 450)
+
+    def _boom(_n):
+        raise BootstrapError("_aisrv: is in the admin group — the daemon account must not be")
+
+    monkeypatch.setattr(bootstrap_mod, "_assert_role_account", _boom)
+    with pytest.raises(BootstrapError, match="admin group"):
+        bootstrap_mod.create_dedicated_user("_aisrv")
+
+
+@pytest.mark.parametrize("bad", ["_aisrv/x", "../admin", "a b", "_AISRV", "-x", ""])
+def test_create_dedicated_user_rejects_invalid_name(bad):
+    with pytest.raises(BootstrapError, match="invalid account name"):
+        bootstrap_mod.create_dedicated_user(bad)
+
+
+def test_create_dedicated_user_non_tty_raises(monkeypatch):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(BootstrapError, match="interactive terminal"):
+        bootstrap_mod.create_dedicated_user("_aisrv")
+
+
+def test_free_role_uid_picks_first_unused_in_range(monkeypatch):
+    listing = "root 0\n_mbsetupuser 248\n_aisrvtest 450\nsomeone 451\njmn 501\n"
+
+    def fake_run(argv, **k):
+        assert argv[:4] == ["/usr/bin/dscl", ".", "-list", "/Users"]
+        return type("P", (), {"returncode": 0, "stdout": listing})()
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", fake_run)
+    assert bootstrap_mod._free_role_uid() == 452  # 450 + 451 taken -> 452
+
+
+def test_free_role_uid_raises_when_range_full(monkeypatch):
+    listing = "".join(f"u{n} {n}\n" for n in range(450, 500))  # 450..499 all taken
+
+    def fake_run(argv, **k):
+        return type("P", (), {"returncode": 0, "stdout": listing})()
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", fake_run)
+    with pytest.raises(BootstrapError, match="no free uid"):
+        bootstrap_mod._free_role_uid()
+
+
+def test_free_role_uid_raises_on_dscl_error(monkeypatch):
+    monkeypatch.setattr(
+        bootstrap_mod, "_run_ro", lambda argv: type("P", (), {"returncode": 1, "stdout": ""})()
+    )
+    with pytest.raises(BootstrapError, match="cannot enumerate uids"):
+        bootstrap_mod._free_role_uid()
+
+
+# --- _in_admin_group: fail-CLOSED tri-state -------------------------------
+
+
+@pytest.mark.parametrize(("rc", "expected"), [(0, True), (67, False)])
+def test_in_admin_group_decisive(monkeypatch, rc, expected):
+    monkeypatch.setattr(bootstrap_mod, "_run_ro", lambda argv: type("P", (), {"returncode": rc})())
+    assert bootstrap_mod._in_admin_group("_aisrv") is expected
+
+
+def test_in_admin_group_indeterminate_fails_closed(monkeypatch):
+    # any rc that is neither 0 (member) nor 67 (confirmed not-member) -> refuse, never assume
+    monkeypatch.setattr(bootstrap_mod, "_run_ro", lambda argv: type("P", (), {"returncode": 64})())
+    with pytest.raises(BootstrapError, match="cannot determine admin membership"):
+        bootstrap_mod._in_admin_group("_aisrv")
+
+
+# --- _assert_role_account: full NFR12 shape -------------------------------
+
+
+def _patch_role_attrs(
+    monkeypatch, *, shell="/usr/bin/false", home="/var/empty", hidden="1", auth=False, admin=False
+):
+    vals = {"UserShell": shell, "NFSHomeDirectory": home, "IsHidden": hidden}
+    monkeypatch.setattr(bootstrap_mod, "_dscl_value", lambda n, k: vals.get(k))
+    monkeypatch.setattr(bootstrap_mod, "_has_auth_authority", lambda n: auth)
+    monkeypatch.setattr(bootstrap_mod, "_in_admin_group", lambda n: admin)
+
+
+def test_assert_role_account_accepts_conforming(monkeypatch):
+    _patch_role_attrs(monkeypatch)
+    bootstrap_mod._assert_role_account("_aisrv")  # must not raise
+
+
+@pytest.mark.parametrize(
+    ("kw", "match"),
+    [
+        ({"shell": "/bin/zsh"}, "UserShell"),
+        ({"home": "/Users/_aisrv"}, "NFSHomeDirectory"),
+        ({"hidden": "0"}, "IsHidden"),
+        ({"auth": True}, "AuthenticationAuthority"),
+        ({"admin": True}, "admin group"),
+    ],
+)
+def test_assert_role_account_refuses_nonconforming(monkeypatch, kw, match):
+    _patch_role_attrs(monkeypatch, **kw)
+    with pytest.raises(BootstrapError, match=match):
+        bootstrap_mod._assert_role_account("_aisrv")
+
+
+# --- _has_auth_authority: fail-CLOSED (symmetry with _in_admin_group) ------
+
+
+def _ro(returncode: int, stdout: str = "", stderr: str = ""):
+    proc = type("P", (), {"returncode": returncode, "stdout": stdout, "stderr": stderr})()
+    return lambda _argv: proc
+
+
+def test_has_auth_authority_present(monkeypatch):
+    monkeypatch.setattr(bootstrap_mod, "_run_ro", _ro(0, stdout="AuthenticationAuthority: ;X;"))
+    assert bootstrap_mod._has_auth_authority("x") is True
+
+
+def test_has_auth_authority_absent_no_such_key(monkeypatch):
+    monkeypatch.setattr(
+        bootstrap_mod, "_run_ro", _ro(56, stderr="No such key: AuthenticationAuthority")
+    )
+    assert bootstrap_mod._has_auth_authority("x") is False
+
+
+def test_has_auth_authority_indeterminate_fails_closed(monkeypatch):
+    # a non-zero rc that is NOT "No such key" (transient DS error) -> refuse, never assume absent
+    monkeypatch.setattr(bootstrap_mod, "_run_ro", _ro(5, stderr="DS connection error"))
+    with pytest.raises(BootstrapError, match="cannot read AuthenticationAuthority"):
+        bootstrap_mod._has_auth_authority("x")

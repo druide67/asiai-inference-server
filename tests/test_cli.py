@@ -678,6 +678,52 @@ def test_bootstrap_full_install_dry_run_previews_all(
     m_sud.assert_called_once_with(dry_run=True)
 
 
+def test_bootstrap_full_install_dedicated_user_runs_create_before_sudoers(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--install --dedicated-user inserts the role-account creation after the signature and
+    before the sudoers install; without the flag, create is never called."""
+    order: list[str] = []
+
+    def _step(tag: str, ret=None):
+        def _f(*_a, **_k):
+            order.append(tag)
+            return ret
+
+        return _f
+
+    with (
+        patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked", side_effect=_step("i0")),
+        patch("ais_cli.commands.bootstrap.install_helper", side_effect=_step("helper", "/h")),
+        patch(
+            "ais_cli.commands.bootstrap.write_helper_signature",
+            side_effect=_step("sig", "/h.sha256"),
+        ),
+        patch(
+            "ais_cli.commands.bootstrap.create_dedicated_user",
+            side_effect=_step("user", {"user": "_aisrv", "created": True, "uid": 450}),
+        ) as m_user,
+        patch("ais_cli.commands.sudoers.install_sudoers", side_effect=_step("sud", "/s")),
+    ):
+        rc = main(["bootstrap", "--install", "--dedicated-user"])
+    assert rc == 0
+    assert order == ["i0", "helper", "sig", "user", "sud"]
+    m_user.assert_called_once()
+
+
+def test_bootstrap_full_install_without_dedicated_user_skips_create() -> None:
+    with (
+        patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked"),
+        patch("ais_cli.commands.bootstrap.install_helper", return_value="/h"),
+        patch("ais_cli.commands.bootstrap.write_helper_signature", return_value="/h.sha256"),
+        patch("ais_cli.commands.bootstrap.create_dedicated_user") as m_user,
+        patch("ais_cli.commands.sudoers.install_sudoers", return_value="/s"),
+    ):
+        rc = main(["bootstrap", "--install"])
+    assert rc == 0
+    m_user.assert_not_called()  # opt-in only
+
+
 def test_bootstrap_verify_ok(capsys: pytest.CaptureFixture[str]) -> None:
     with patch("ais_cli.commands.bootstrap.verify_helper", return_value=True):
         rc = main(["bootstrap", "--verify"])

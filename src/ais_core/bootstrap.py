@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -281,3 +282,182 @@ def verify_helper() -> bool:
     if len(token) != 64 or any(c not in "0123456789abcdef" for c in token):
         raise BootstrapError(f"malformed signature sidecar at {HELPER_SHA256_PATH}")
     return _sha256_hex(dest) == token
+
+
+# Dedicated daemon account (NFR12, opt-in via --dedicated-user). A hidden, non-login, non-admin
+# macOS role account that engine daemons run as, confining a network RCE in an engine to a
+# powerless uid (the operator is admin; engines should not be). uid in the sanctioned role range
+# [450, 499] => < 500, satisfying NFR12.
+DEDICATED_USER = "_aisrv"
+_ROLE_UID_MIN = 450
+_ROLE_UID_MAX = 499
+_DSCL = "/usr/bin/dscl"
+_SYSADMINCTL = "/usr/sbin/sysadminctl"
+_DSEDITGROUP = "/usr/sbin/dseditgroup"
+# `dseditgroup -o checkmember` exit codes (verified on macOS 26): 0 = member, 67 = confirmed
+# not-a-member. ANY OTHER code (e.g. 64 = lookup error) is INDETERMINATE -> fail closed.
+_DSEDITGROUP_NOT_MEMBER = 67
+# Account name must be a safe directory-services record name (no '/', '..', whitespace). Only
+# reachable via a programmatic caller — the CLI flag is store_true and always uses DEDICATED_USER
+# — but validated so a future change that wires it to user input can't path-traverse dscl.
+_ACCOUNT_NAME_RE = re.compile(r"_?[a-z][a-z0-9_-]*")
+
+
+def _run_ro(argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a read-only directory query with a bounded timeout; a hang becomes a clean
+    BootstrapError (caught by the bootstrap's exit-2 path) instead of blocking forever."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired as e:
+        raise BootstrapError(f"directory query timed out: {' '.join(argv)}") from e
+
+
+def _account_uid(name: str) -> int | None:
+    """The account's numeric UniqueID, or None if it does not exist. dscl read needs no sudo."""
+    proc = _run_ro([_DSCL, ".", "-read", f"/Users/{name}", "UniqueID"])
+    if proc.returncode != 0:
+        return None
+    parts = proc.stdout.split()
+    return int(parts[1]) if len(parts) >= 2 and parts[1].lstrip("-").isdigit() else None
+
+
+def _dscl_value(name: str, key: str) -> str | None:
+    """Last whitespace token of ``dscl -read /Users/<name> <key>`` (the attribute value), or None.
+
+    Works for single-token values (UserShell, NFSHomeDirectory) and macOS's
+    ``dsAttrTypeNative:IsHidden: 1`` form alike (the value is always the trailing token).
+    """
+    proc = _run_ro([_DSCL, ".", "-read", f"/Users/{name}", key])
+    if proc.returncode != 0:
+        return None
+    tokens = proc.stdout.split()
+    return tokens[-1] if tokens else None
+
+
+def _has_auth_authority(name: str) -> bool:
+    """True iff the account has an AuthenticationAuthority key (i.e. a usable login/password).
+
+    A ``sysadminctl -roleAccount`` has NONE (``No such key``), which is what we require: the
+    daemon account must not be loginable. FAIL-CLOSED like :func:`_in_admin_group` — only the
+    expected ``No such key`` counts as absent; any other read error raises rather than assume.
+    """
+    proc = _run_ro([_DSCL, ".", "-read", f"/Users/{name}", "AuthenticationAuthority"])
+    if proc.returncode == 0:
+        return True  # key present -> a usable login authority
+    if "No such key" in (proc.stdout or "") or "No such key" in (proc.stderr or ""):
+        return False  # key absent -> no login authority (the role-account case)
+    # FAIL-CLOSED (symmetry with _in_admin_group): a non-zero rc that is NOT the expected
+    # "No such key" is an indeterminate DirectoryServices result — refuse rather than assume the
+    # account is non-loginable and adopt it.
+    raise BootstrapError(
+        f"cannot read AuthenticationAuthority of {name!r} (rc={proc.returncode}); refusing"
+    )
+
+
+def _in_admin_group(name: str) -> bool:
+    """True iff ``name`` is in the admin group. FAIL-CLOSED: an INDETERMINATE result (any rc that
+    is neither 0=member nor 67=confirmed-not-member — e.g. a DirectoryServices error) raises
+    ``BootstrapError`` so callers refuse rather than assume non-admin on an admin-membership query
+    that did not actually answer (the most security-relevant predicate of the safe-fail gate)."""
+    rc = _run_ro([_DSEDITGROUP, "-o", "checkmember", "-m", name, "admin"]).returncode
+    if rc == 0:
+        return True
+    if rc == _DSEDITGROUP_NOT_MEMBER:
+        return False
+    raise BootstrapError(
+        f"cannot determine admin membership of {name!r} (dseditgroup rc={rc}); refusing to assume"
+    )
+
+
+def _assert_role_account(name: str) -> None:
+    """Assert ``name`` has the full NFR12 role-account shape; raise ``BootstrapError`` on ANY
+    mismatch (never auto-fix — the operator decides). Used BOTH right after creation (catch a
+    partial ``sysadminctl``) AND before adopting a pre-existing account (so the idempotent no-op
+    can't adopt a uid-conforming but login-capable ``_aisrv``)."""
+    shell = _dscl_value(name, "UserShell")
+    if shell != "/usr/bin/false":
+        raise BootstrapError(f"{name}: UserShell={shell!r}, expected /usr/bin/false (non-login)")
+    home = _dscl_value(name, "NFSHomeDirectory")
+    if home not in ("/var/empty", "/dev/null"):
+        raise BootstrapError(f"{name}: NFSHomeDirectory={home!r}, expected /var/empty")
+    if _dscl_value(name, "IsHidden") != "1":
+        raise BootstrapError(f"{name}: IsHidden not 1 (must be hidden from the login screen)")
+    if _has_auth_authority(name):
+        raise BootstrapError(f"{name}: has an AuthenticationAuthority (a login) — must be absent")
+    if _in_admin_group(name):  # fail-closed: an indeterminate membership raises, not adopts
+        raise BootstrapError(f"{name}: is in the admin group — the daemon account must not be")
+
+
+def _free_role_uid() -> int:
+    """First unused uid in [450, 499] (sysadminctl -roleAccount requires an explicit uid there)."""
+    proc = _run_ro([_DSCL, ".", "-list", "/Users", "UniqueID"])
+    if proc.returncode != 0:
+        raise BootstrapError(f"cannot enumerate uids (dscl -list rc={proc.returncode})")
+    taken: set[int] = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+            taken.add(int(parts[1]))
+    for uid in range(_ROLE_UID_MIN, _ROLE_UID_MAX + 1):
+        if uid not in taken:
+            return uid
+    raise BootstrapError(f"no free uid in [{_ROLE_UID_MIN}, {_ROLE_UID_MAX}] for {DEDICATED_USER}")
+
+
+def create_dedicated_user(name: str = DEDICATED_USER, *, dry_run: bool = False) -> dict:
+    """NFR12: ensure a hidden, non-login, non-admin role account (uid 450-499) for engine daemons.
+
+    ``sysadminctl -addUser <name> -UID <uid> -roleAccount`` (the uid is REQUIRED in 450-499 —
+    verified on macOS 26) sets ``UserShell=/usr/bin/false``, ``NFSHomeDirectory=/var/empty``,
+    ``IsHidden=1``, group ``staff``, and NO ``AuthenticationAuthority`` by default — exactly
+    NFR12, no extra dscl steps. :func:`_assert_role_account` re-reads and ENFORCES that full shape
+    (not just the uid) both after creation and before adopting a pre-existing account.
+
+    Idempotent + safe-fail: an existing account that already has the role-account shape is a
+    no-op; one that does NOT (uid 0/>=500, admin, wrong shell/home/hidden, or any login authority)
+    is REFUSED, never modified — the operator decides. Reversible via ``sysadminctl -deleteUser``.
+    Privileged + interactive (raw sudo password; sysadminctl is not in the NOPASSWD helper).
+    """
+    if not _ACCOUNT_NAME_RE.fullmatch(name):
+        raise BootstrapError(f"invalid account name: {name!r}")
+
+    if dry_run:
+        print(
+            f"[dry-run] ensure role account {name!r} "
+            f"(uid {_ROLE_UID_MIN}-{_ROLE_UID_MAX}, hidden, /usr/bin/false, no password, non-admin)"
+        )
+        return {"user": name, "created": None, "dry_run": True}
+
+    if not sys.stdin.isatty():
+        raise BootstrapError(
+            "aisctl bootstrap --install --dedicated-user requires an interactive terminal "
+            "(sudo password is needed to create the role account)."
+        )
+
+    existing = _account_uid(name)
+    if existing is not None:
+        if existing == 0 or existing >= 500:
+            raise BootstrapError(
+                f"refusing to reuse existing account {name!r}: uid={existing} is outside the "
+                f"role range [{_ROLE_UID_MIN}, {_ROLE_UID_MAX}] — remove it or choose another name."
+            )
+        _assert_role_account(name)  # full NFR12 shape (incl. non-admin, no login) or refuse
+        return {"user": name, "created": False, "uid": existing}  # idempotent no-op
+
+    uid = _free_role_uid()
+    try:
+        subprocess.run(
+            ["sudo", _SYSADMINCTL, "-addUser", name, "-UID", str(uid), "-roleAccount"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise BootstrapError(
+            f"sysadminctl failed to create {name} (uid {uid}): {(e.stderr or '').strip() or e}"
+        ) from e
+    # sysadminctl can exit 0 on partial failures — verify the uid AND the full role-account shape.
+    if _account_uid(name) != uid:
+        raise BootstrapError(f"{name} was not created as expected (uid {uid})")
+    _assert_role_account(name)
+    return {"user": name, "created": True, "uid": uid}

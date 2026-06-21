@@ -619,7 +619,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     if args.verify:
         return _bootstrap_verify()
     if args.install:
-        return _bootstrap_full(dry_run=args.dry_run)
+        return _bootstrap_full(dedicated_user=args.dedicated_user, dry_run=args.dry_run)
     if args.install_sudoers:
         return _bootstrap_sudoers_only(dry_run=args.dry_run)
     print(
@@ -633,30 +633,33 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
-def _bootstrap_full(*, dry_run: bool) -> int:
+def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
     """One-time idempotent bootstrap in the strict order: I0 chain check -> install helper
-    (root:wheel 0755, invariant #3) -> install the helper-only sudoers fragment (visudo-c'd).
-
-    Signature (NFR11) and the optional dedicated ``_aisrv`` account (NFR12) are not yet wired
-    here — they slot between the helper copy and the sudoers install, and are co-designed with
-    the security reviewer.
+    (root:wheel 0755, invariant #3) -> sign helper (NFR11 sidecar) -> [opt create the dedicated
+    _aisrv account, NFR12] -> install the helper-only sudoers fragment (visudo-c'd).
     """
     if dry_run:
         bootstrap.install_helper(dry_run=True)
         bootstrap.write_helper_signature(dry_run=True)
+        if dedicated_user:
+            bootstrap.create_dedicated_user(dry_run=True)
         sudoers.install_sudoers(dry_run=True)
         return 0
     try:
         # I0 first: refuse if ANY root-write target's chain is unlocked, before any write.
         bootstrap.assert_fleet_chain_locked()
         helper_path = bootstrap.install_helper()
-        sidecar_path = bootstrap.write_helper_signature()  # NFR11, after the copy, before sudoers
+        sidecar_path = bootstrap.write_helper_signature()  # NFR11, after the copy
+        user_info = bootstrap.create_dedicated_user() if dedicated_user else None  # NFR12, opt-in
         sudoers_path = sudoers.install_sudoers()
     except (bootstrap.BootstrapError, sudoers.SudoersError) as e:
         print(f"\n{e}", file=sys.stderr)
         return 2
     print(f"installed helper:    {helper_path}")
     print(f"wrote signature:     {sidecar_path}")
+    if user_info is not None:
+        state = "created" if user_info["created"] else "already present"
+        print(f"dedicated user:      {user_info['user']} (uid {user_info.get('uid')}, {state})")
     print(f"installed sudoers:   {sudoers_path}")
     print("bootstrap complete. Engine lifecycle now routes through the helper (NOPASSWD).")
     return 0
