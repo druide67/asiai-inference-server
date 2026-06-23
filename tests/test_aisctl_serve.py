@@ -104,6 +104,18 @@ class TestBuildArgv:
         with pytest.raises(ValueError, match="unknown command"):
             serve._build_argv("drop_db", {})
 
+    @pytest.mark.parametrize(
+        "command",
+        ["install-service", "uninstall-service", "install-reserved-service", "bootstrap"],
+    )
+    def test_install_family_never_routable(self, command):
+        """The loopback hop forwards only the fleet lifecycle whitelist (COMMAND_TIMEOUTS).
+        Service provisioning / bootstrap is operator-only (privileged); it must NEVER be
+        reachable over :8898, so a compromised asiai-web edge cannot drive an install."""
+        assert command not in serve.COMMAND_TIMEOUTS
+        with pytest.raises(ValueError, match="unknown command"):
+            serve._build_argv(command, {"service": "asiai-web", "engine": "ollama"})
+
     def test_upgrade_routes_through_aisctl(self):
         # Routed via `aisctl upgrade` so the OperationsLock + JSON envelope
         # apply (a direct brew argv used to skip both).

@@ -9,6 +9,7 @@ hardcoded value is the production value.
 
 from __future__ import annotations
 
+import grp
 import importlib.util
 import json
 import os
@@ -1014,3 +1015,493 @@ def test_install_rolls_back_on_bootstrap_failure(helper, monkeypatch):
     assert rc == mod.EXIT_INTERNAL
     assert unlinked == ["com.asiai.aux-1"]  # rolled back
     assert not any(r.get("verdict") == "accepted" for r in _read_audit(audit))  # no false accept
+
+
+# ===========================================================================
+# Reserved-service content-validated install (story 2.2). The action GENERATES
+# the whole argv from _RESERVED_SERVICE_SPECS; the caller supplies only a service
+# enum, a bounded port, and (web only) a host from a closed set.
+# ===========================================================================
+
+
+class _FakeStat:
+    """Minimal stat-like object: _resolve_reserved_binary only reads st_mode/st_uid,
+    and stat.S_ISLNK/S_ISREG are pure functions of the mode int."""
+
+    def __init__(self, mode: int, uid: int) -> None:
+        self.st_mode = mode
+        self.st_uid = uid
+
+
+def _make_reserved_binary(tmp_path, basename: str = "asiai"):
+    """Build a clean ``<home>/.local/bin/<basename>`` chain owned by us, 0755, no symlink.
+
+    Returns ``(home, binpath, owner_pw)`` where owner_pw.pw_dir == home and
+    owner_pw.pw_uid == our uid (so the {root, owner} ownership check passes)."""
+    home = tmp_path / "home"
+    bindir = home / ".local" / "bin"
+    bindir.mkdir(parents=True)
+    binpath = bindir / basename
+    binpath.write_text("#!/bin/sh\nexec true\n")
+    for p in (home, home / ".local", bindir, binpath):
+        p.chmod(0o755)
+    pw = pwd.struct_passwd(("owner", "*", os.getuid(), os.getgid(), "owner", str(home), "/bin/zsh"))
+    return home, binpath, pw
+
+
+# --- _resolve_reserved_binary ----------------------------------------------
+
+
+def test_resolve_reserved_binary_accepts_clean_chain(helper, tmp_path):
+    mod, _ = helper
+    _home, binpath, pw = _make_reserved_binary(tmp_path)
+    assert mod._resolve_reserved_binary("asiai", pw) == str(binpath)
+
+
+def test_resolve_reserved_binary_rejects_symlink_leaf(helper, tmp_path):
+    mod, _ = helper
+    _home, binpath, pw = _make_reserved_binary(tmp_path)
+    binpath.unlink()
+    real = tmp_path / "real_target"
+    real.write_text("#!/bin/sh\n")
+    binpath.symlink_to(real)  # leaf is now a symlink -> lateral-write redirection primitive
+    with pytest.raises(mod._Refused, match="symlink"):
+        mod._resolve_reserved_binary("asiai", pw)
+
+
+def test_resolve_reserved_binary_rejects_group_writable_component(helper, tmp_path):
+    mod, _ = helper
+    home, _binpath, pw = _make_reserved_binary(tmp_path)
+    (home / ".local" / "bin").chmod(0o775)  # group-writable dir in the chain
+    with pytest.raises(mod._Refused, match="group/other-writable"):
+        mod._resolve_reserved_binary("asiai", pw)
+
+
+def test_resolve_reserved_binary_rejects_other_writable_leaf(helper, tmp_path):
+    mod, _ = helper
+    _home, binpath, pw = _make_reserved_binary(tmp_path)
+    binpath.chmod(0o757)  # world-writable binary
+    with pytest.raises(mod._Refused, match="group/other-writable"):
+        mod._resolve_reserved_binary("asiai", pw)
+
+
+def test_resolve_reserved_binary_rejects_foreign_owner(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    _home, binpath, pw = _make_reserved_binary(tmp_path)
+    real_lstat = mod.os.lstat
+    foreign = os.getuid() + 99999
+
+    def fake_lstat(p):
+        st = real_lstat(p)
+        if str(p) == str(binpath):  # the binary itself is owned by a third party
+            return _FakeStat(st.st_mode, foreign)
+        return st
+
+    monkeypatch.setattr(mod.os, "lstat", fake_lstat)
+    with pytest.raises(mod._Refused, match="not owned by"):
+        mod._resolve_reserved_binary("asiai", pw)
+
+
+@pytest.mark.parametrize("bad", ["ais/ctl", "..", ".", "", "sub/dir/asiai"])
+def test_resolve_reserved_binary_rejects_bad_basename(helper, tmp_path, bad):
+    mod, _ = helper
+    _home, _binpath, pw = _make_reserved_binary(tmp_path)
+    with pytest.raises(mod._Refused):
+        mod._resolve_reserved_binary(bad, pw)
+
+
+@pytest.mark.parametrize("home", ["/var/empty", "/dev/null", "", "relative/home"])
+def test_resolve_reserved_binary_rejects_non_home(helper, home):
+    mod, _ = helper
+    pw = pwd.struct_passwd(("svc", "*", os.getuid(), os.getgid(), "svc", home, "/usr/bin/false"))
+    with pytest.raises(mod._Refused):
+        mod._resolve_reserved_binary("asiai", pw)
+
+
+def test_resolve_reserved_binary_rejects_missing(helper, tmp_path):
+    mod, _ = helper
+    _home, binpath, pw = _make_reserved_binary(tmp_path)
+    binpath.unlink()  # nothing at ~/.local/bin/asiai
+    with pytest.raises(mod._Refused, match="missing"):
+        mod._resolve_reserved_binary("asiai", pw)
+
+
+# --- _validate_host --------------------------------------------------------
+
+
+def test_validate_host_web_default_is_lan(helper):
+    mod, _ = helper
+    spec = mod._RESERVED_SERVICE_SPECS["asiai-web"]
+    assert mod._validate_host(spec, None) == "0.0.0.0"
+    assert mod._validate_host(spec, "127.0.0.1") == "127.0.0.1"
+
+
+def test_validate_host_web_rejects_outside_set(helper):
+    mod, _ = helper
+    spec = mod._RESERVED_SERVICE_SPECS["asiai-web"]
+    with pytest.raises(mod._Refused, match="not allowed"):
+        mod._validate_host(spec, "10.0.0.1")
+
+
+def test_validate_host_serve_pinned_loopback(helper):
+    mod, _ = helper
+    spec = mod._RESERVED_SERVICE_SPECS["aisctl-serve"]
+    assert mod._validate_host(spec, None) == "127.0.0.1"
+    with pytest.raises(mod._Refused, match="not allowed"):
+        mod._validate_host(spec, "0.0.0.0")  # loopback companion can never be LAN-facing
+
+
+# --- _resolve_reserved_runas -----------------------------------------------
+
+
+def test_resolve_reserved_runas_dedicated_fail_closed_when_absent(helper, monkeypatch):
+    mod, _ = helper
+
+    def no_such_user(name):
+        raise KeyError(name)
+
+    monkeypatch.setattr(mod.pwd, "getpwnam", no_such_user)
+    spec = mod._RESERVED_SERVICE_SPECS["asiai-web"]
+    with pytest.raises(mod._Refused, match="dedicated non-admin account"):
+        mod._resolve_reserved_runas(spec)  # never an admin fallback
+
+
+def test_resolve_reserved_runas_dedicated_rejects_root(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setattr(
+        mod.pwd,
+        "getpwnam",
+        lambda name: pwd.struct_passwd((name, "*", 0, 0, name, "/var/empty", "/usr/bin/false")),
+    )
+    spec = mod._RESERVED_SERVICE_SPECS["asiai-web"]
+    with pytest.raises(mod._Refused, match="must not be root"):
+        mod._resolve_reserved_runas(spec)
+
+
+def test_resolve_reserved_runas_invoker_uses_sudo_uid(helper, monkeypatch):
+    mod, _ = helper
+    sentinel = _real_pw()
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: sentinel)
+    spec = mod._RESERVED_SERVICE_SPECS["aisctl-serve"]
+    assert mod._resolve_reserved_runas(spec) is sentinel
+
+
+# --- install-reserved-service (integration) --------------------------------
+
+
+def _run_reserved_install(
+    mod, monkeypatch, service, extra_argv=(), *, binary="/Users/owner/.local/bin/asiai"
+):
+    captured: dict = {}
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_runas", lambda spec: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_binary", lambda basename, pw: binary)
+
+    def fake_write(label, xml, **_k):
+        captured["label"] = label
+        captured["plist"] = plistlib.loads(xml)
+        return f"/Library/LaunchDaemons/{label}.plist"
+
+    monkeypatch.setattr(mod, "_write_plist_atomic", fake_write)
+    monkeypatch.setattr(mod, "_precreate_log_leaves", lambda *a, **k: None)
+    runs: list = []
+    monkeypatch.setattr(mod, "_run", lambda argv, *, check: runs.append(tuple(argv)))
+    captured["rc"] = mod.main(["install-reserved-service", "--service", service, *extra_argv])
+    captured["runs"] = runs
+    return captured
+
+
+def test_install_reserved_web_generates_full_argv(helper, monkeypatch):
+    mod, audit = helper
+    binary = "/Users/owner/.local/bin/asiai"
+    cap = _run_reserved_install(mod, monkeypatch, "asiai-web", binary=binary)
+    assert cap["rc"] == mod.EXIT_OK
+    plist = cap["plist"]
+    assert plist["Label"] == "com.asiai.web"
+    assert plist["ProgramArguments"] == [binary, "web", "--host", "0.0.0.0", "--port", "8899"]
+    assert plist["UserName"] == _real_pw().pw_name
+    # D2/D3 hardening: GroupName + WorkingDirectory dropped; ThrottleInterval present.
+    assert "GroupName" not in plist
+    assert "WorkingDirectory" not in plist
+    assert plist["ThrottleInterval"] == mod._RESERVED_THROTTLE_INTERVAL
+    # PATH must NOT carry the user-writable ~/.local/bin.
+    assert ".local/bin" not in plist["EnvironmentVariables"]["PATH"]
+    # bootstrap (not load), and audited accepted.
+    assert cap["runs"] == [
+        ("/bin/launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.asiai.web.plist")
+    ]
+    assert any(
+        r["action"] == "install-reserved-service" and r["verdict"] == "accepted"
+        for r in _read_audit(audit)
+    )
+
+
+def test_install_reserved_serve_omits_host(helper, monkeypatch):
+    mod, _ = helper
+    binary = "/Users/owner/.local/bin/aisctl"
+    cap = _run_reserved_install(mod, monkeypatch, "aisctl-serve", binary=binary)
+    assert cap["rc"] == mod.EXIT_OK
+    # serve binds loopback itself -> NO --host emitted.
+    assert cap["plist"]["ProgramArguments"] == [binary, "serve", "--port", "8898"]
+    assert cap["plist"]["Label"] == "com.asiai.aisctl-serve"
+
+
+def test_install_reserved_custom_port(helper, monkeypatch):
+    mod, _ = helper
+    cap = _run_reserved_install(mod, monkeypatch, "asiai-web", ["--port", "9000"])
+    assert cap["plist"]["ProgramArguments"][-1] == "9000"
+
+
+def test_install_reserved_rejects_extra_program_arg(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    # argparse on the closed surface has no --program-arg -> parse error -> EXIT_REFUSED.
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["install-reserved-service", "--service", "asiai-web", "--program-arg", "x"])
+    assert exc.value.code == mod.EXIT_REFUSED
+
+
+@pytest.mark.parametrize("flag", ["--label", "--binary", "--env"])
+def test_install_reserved_rejects_free_form_flags(helper, flag):
+    mod, _ = helper
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["install-reserved-service", "--service", "asiai-web", flag, "x"])
+    assert exc.value.code == mod.EXIT_REFUSED
+
+
+def test_install_reserved_web_bad_host_refused(helper, monkeypatch):
+    mod, audit = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_runas", lambda spec: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_binary", lambda b, pw: "/Users/o/.local/bin/asiai")
+    wrote: list = []
+    monkeypatch.setattr(mod, "_write_plist_atomic", lambda *a, **k: wrote.append(1) or "/x")
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: wrote.append("run"))
+    rc = mod.main(["install-reserved-service", "--service", "asiai-web", "--host", "10.0.0.1"])
+    assert rc == mod.EXIT_REFUSED
+    assert not wrote  # refused before any write/launchctl
+    assert any(r["verdict"] == "refused" for r in _read_audit(audit))
+
+
+def test_install_reserved_serve_lan_host_refused(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_runas", lambda spec: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_binary", lambda b, pw: "/Users/o/.local/bin/aisctl")
+    wrote: list = []
+    monkeypatch.setattr(mod, "_write_plist_atomic", lambda *a, **k: wrote.append(1) or "/x")
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: wrote.append("run"))
+    rc = mod.main(["install-reserved-service", "--service", "aisctl-serve", "--host", "0.0.0.0"])
+    assert rc == mod.EXIT_REFUSED
+    assert not wrote
+
+
+def test_install_reserved_unknown_service_refused(helper):
+    mod, _ = helper
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["install-reserved-service", "--service", "com.asiai.evil"])
+    assert exc.value.code == mod.EXIT_REFUSED
+
+
+def test_install_reserved_fails_closed_without_dedicated_account(helper, monkeypatch):
+    mod, _ = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+    monkeypatch.setattr(mod.pwd, "getpwnam", lambda name: (_ for _ in ()).throw(KeyError(name)))
+    wrote: list = []
+    monkeypatch.setattr(mod, "_write_plist_atomic", lambda *a, **k: wrote.append(1) or "/x")
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: wrote.append("run"))
+    rc = mod.main(["install-reserved-service", "--service", "asiai-web"])
+    assert rc == mod.EXIT_REFUSED
+    assert not wrote
+
+
+# --- uninstall-reserved-service --------------------------------------------
+
+
+def test_uninstall_reserved_service_bootout_then_unlink(helper, monkeypatch):
+    mod, audit = helper
+    seq: list = []
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_run", lambda argv, *, check: seq.append(("run", tuple(argv), check)))
+    monkeypatch.setattr(mod, "_unlink_plist", lambda label, **_k: seq.append(("unlink", label)))
+    rc = mod.main(["uninstall-reserved-service", "--service", "asiai-web"])
+    assert rc == mod.EXIT_OK
+    assert seq[0] == ("run", ("/bin/launchctl", "bootout", "system/com.asiai.web"), False)
+    assert seq[1] == ("unlink", "com.asiai.web")
+    assert any(
+        r["action"] == "uninstall-reserved-service" and r["verdict"] == "accepted"
+        for r in _read_audit(audit)
+    )
+
+
+# --- invariants: generic path unchanged, PLIST_KEYS frozen, PATH flag -------
+
+
+def test_generic_install_daemon_still_refuses_reserved_labels(helper, monkeypatch):
+    """The content-validated path must NOT weaken the I9 blanket refusal on install-daemon."""
+    mod, _ = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    did: list = []
+    monkeypatch.setattr(mod, "_write_plist_atomic", lambda *a, **k: did.append(1) or "/x")
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: did.append("run"))
+    rc = mod.main(
+        ["install-daemon", "--label", "com.asiai.web", "--binary", "/opt/homebrew/bin/llama-server"]
+    )
+    assert rc == mod.EXIT_REFUSED
+    assert not did
+
+
+def test_plist_keys_allowlist_frozen():
+    """A drift in the emitted-key allowlist must be a deliberate, reviewed change (no GroupName,
+    no WorkingDirectory, no RootDirectory)."""
+    mod = _load_helper()
+    assert mod._PLIST_KEYS == (
+        "Label",
+        "ProgramArguments",
+        "UserName",
+        "EnvironmentVariables",
+        "StandardOutPath",
+        "StandardErrorPath",
+        "RunAtLoad",
+        "KeepAlive",
+        "ThrottleInterval",
+        "TimeOut",
+        "Nice",
+    )
+
+
+def test_build_plist_omits_binary_dir_when_flag_false(helper):
+    mod, _ = helper
+    plist = mod._build_plist_dict(
+        label="com.asiai.web",
+        binary="/Users/owner/.local/bin/asiai",
+        user_pw=_real_pw(),
+        include_binary_dir_in_path=False,
+    )
+    assert ".local/bin" not in plist["EnvironmentVariables"]["PATH"]
+
+
+def test_build_plist_includes_binary_dir_by_default(helper, monkeypatch, tmp_path):
+    mod, _ = helper
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    target = bindir / "llama-server"
+    target.write_text("x")
+    monkeypatch.setattr(mod, "_BINARY_PREFIXES", (str(bindir) + "/",))
+    plist = mod._build_plist_dict(
+        label="com.asiai.aux-1",
+        binary=str(target),
+        user_pw=_real_pw(),
+    )
+    assert str(bindir) in plist["EnvironmentVariables"]["PATH"]  # engines keep binary_dir
+
+
+# --- post-review F6/F3/F5 fixes (auto-review wf_62e97817-146) -----------------
+
+
+def test_resolve_reserved_binary_rejects_intermediate_foreign_owner(helper, monkeypatch, tmp_path):
+    """F6: the per-component ownership walk must refuse a third-party-owned INTERMEDIATE
+    component (~/.local), not only the leaf binary."""
+    mod, _ = helper
+    home, _binpath, pw = _make_reserved_binary(tmp_path)
+    intermediate = str(home / ".local")
+    real_lstat = mod.os.lstat
+    foreign = os.getuid() + 99999
+
+    def fake_lstat(p):
+        st = real_lstat(p)
+        if str(p) == intermediate:  # a parent dir owned by someone else
+            return _FakeStat(st.st_mode, foreign)
+        return st
+
+    monkeypatch.setattr(mod.os, "lstat", fake_lstat)
+    with pytest.raises(mod._Refused, match="not owned by"):
+        mod._resolve_reserved_binary("asiai", pw)
+
+
+@pytest.mark.parametrize("port", ["80", "1023", "70000", "0"])
+def test_install_reserved_rejects_out_of_range_port(helper, monkeypatch, port):
+    """F6: a privileged/out-of-range --port is refused before any plist write or launchctl."""
+    mod, audit = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_runas", lambda spec: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_binary", lambda b, pw: "/Users/o/.local/bin/asiai")
+    wrote: list = []
+    monkeypatch.setattr(mod, "_write_plist_atomic", lambda *a, **k: wrote.append(1) or "/x")
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: wrote.append("run"))
+    rc = mod.main(["install-reserved-service", "--service", "asiai-web", "--port", port])
+    assert rc == mod.EXIT_REFUSED
+    assert not wrote
+    assert any(r["verdict"] == "refused" for r in _read_audit(audit))
+
+
+def test_install_reserved_serve_rejects_host_flag(helper, monkeypatch):
+    """F5: --host is a web-only knob; the loopback companion refuses it outright (even
+    127.0.0.1) rather than silently dropping it."""
+    mod, _ = helper
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_runas", lambda spec: _real_pw())
+    monkeypatch.setattr(mod, "_resolve_reserved_binary", lambda b, pw: "/Users/o/.local/bin/aisctl")
+    wrote: list = []
+    monkeypatch.setattr(mod, "_write_plist_atomic", lambda *a, **k: wrote.append(1) or "/x")
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: wrote.append("run"))
+    rc = mod.main(["install-reserved-service", "--service", "aisctl-serve", "--host", "127.0.0.1"])
+    assert rc == mod.EXIT_REFUSED
+    assert not wrote
+
+
+def _fake_pwnam(name: str, uid: int, gid: int):
+    return lambda n: pwd.struct_passwd((n, "*", uid, gid, n, "/var/empty", "/usr/bin/false"))
+
+
+def _fake_admin_group(gid: int = 80, members=()):
+    return lambda g: grp.struct_group((g, "*", gid, list(members)))
+
+
+def test_resolve_reserved_runas_dedicated_rejects_admin_primary_gid(helper, monkeypatch):
+    """F3: a dedicated account whose PRIMARY gid is admin (80) is refused at the choke point."""
+    mod, _ = helper
+    monkeypatch.setattr(mod.pwd, "getpwnam", _fake_pwnam("_aisweb", 460, 80))
+    monkeypatch.setattr(mod.grp, "getgrnam", _fake_admin_group(gid=80, members=[]))
+    spec = mod._RESERVED_SERVICE_SPECS["asiai-web"]
+    with pytest.raises(mod._Refused, match="must not be admin"):
+        mod._resolve_reserved_runas(spec)
+
+
+def test_resolve_reserved_runas_dedicated_rejects_admin_supplementary(helper, monkeypatch):
+    """F3: admin membership via the supplementary member list is also refused."""
+    mod, _ = helper
+    monkeypatch.setattr(mod.pwd, "getpwnam", _fake_pwnam("_aisweb", 460, 20))  # primary staff
+    monkeypatch.setattr(mod.grp, "getgrnam", _fake_admin_group(gid=80, members=["_aisweb"]))
+    spec = mod._RESERVED_SERVICE_SPECS["asiai-web"]
+    with pytest.raises(mod._Refused, match="must not be admin"):
+        mod._resolve_reserved_runas(spec)
+
+
+def test_resolve_reserved_runas_dedicated_accepts_nonadmin(helper, monkeypatch):
+    """F3: a non-root, non-admin dedicated account is accepted (the happy path)."""
+    mod, _ = helper
+    monkeypatch.setattr(mod.pwd, "getpwnam", _fake_pwnam("_aisweb", 460, 20))
+    monkeypatch.setattr(mod.grp, "getgrnam", _fake_admin_group(gid=80, members=[]))
+    spec = mod._RESERVED_SERVICE_SPECS["asiai-web"]
+    pw = mod._resolve_reserved_runas(spec)
+    assert pw.pw_name == "_aisweb" and pw.pw_uid == 460
+
+
+def test_is_admin_fail_closed_when_group_unresolvable(helper, monkeypatch):
+    """F3: if the admin group cannot be resolved we cannot prove non-admin -> refuse."""
+    mod, _ = helper
+
+    def boom(_g):
+        raise KeyError(_g)
+
+    monkeypatch.setattr(mod.grp, "getgrnam", boom)
+    pw = pwd.struct_passwd(("x", "*", 460, 20, "x", "/var/empty", "/usr/bin/false"))
+    with pytest.raises(mod._Refused, match="cannot resolve"):
+        mod._is_admin(pw)

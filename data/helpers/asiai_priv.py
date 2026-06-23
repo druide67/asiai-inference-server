@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import grp
 import json
 import os
 import plistlib
@@ -137,10 +138,64 @@ _RESERVED_LABELS: tuple[str, ...] = ("com.asiai.web", "com.asiai.aisctl-serve")
 # SIGTERM keeps it down). Matches the legacy aisrv plist (KeepAlive parity).
 _DEFAULT_KEEP_ALIVE = {"Crashed": True, "SuccessfulExit": False}
 
+# I9 / reserved-service content-validated install (story 2.2). The generic install-daemon path
+# keeps ``_refuse_reserved`` (a reserved label there is STILL a hard refusal); the two services
+# below are reachable ONLY through the dedicated ``install-reserved-service`` action, which
+# GENERATES the entire argv from this CLOSED map — no caller token ever reaches
+# ProgramArguments, so a bounded ``--label`` can never hijack the control plane (the threat that
+# killed the basename+subcommand-pin proposal). Each spec PINS the binary basename + subcommand
+# and declares how host/port resolve and which account the daemon runs as:
+#   * ``host_allowed`` — the closed set the daemon may bind (web=LAN+loopback, serve=loopback).
+#     The web=LAN / serve=loopback distinction lives HERE, in root: a buggy/compromised
+#     user-space caller cannot make the loopback companion LAN-facing.
+#   * ``runas`` — ``invoker`` forces the SUDO_UID admin (aisctl-serve MUST be admin: it calls
+#     this helper); ``dedicated`` forces the non-admin role account (asiai-web is the LAN/mesh
+#     edge and must NOT be admin — a web RCE in admin would be a one-hop pivot to this root
+#     helper). ``dedicated`` is fail-closed: absent account => refuse, never an admin fallback.
+_RESERVED_SERVICE_SPECS: dict[str, dict] = {
+    "asiai-web": {
+        "label": "com.asiai.web",
+        "basename": "asiai",
+        "subcommand": "web",
+        "host_allowed": ("0.0.0.0", "127.0.0.1"),
+        "host_default": "0.0.0.0",
+        "port_default": 8899,
+        "runas": "dedicated",
+    },
+    "aisctl-serve": {
+        "label": "com.asiai.aisctl-serve",
+        "basename": "aisctl",
+        "subcommand": "serve",
+        "host_allowed": ("127.0.0.1",),
+        "host_default": "127.0.0.1",  # serve binds loopback itself; --host is NOT emitted
+        "port_default": 8898,
+        "runas": "invoker",
+    },
+}
+
+# Dedicated non-admin role account asiai-web runs as (created by ``aisctl bootstrap``; the same
+# NFR12 role-account shape as ``_aisrv``). Fixed in root, never caller-supplied: the caller
+# cannot make the LAN edge run as admin.
+_WEB_RUNAS_ACCOUNT = "_aisweb"
+
+# macOS local admin group (gid 80). Used to re-assert the dedicated web account is NON-admin at
+# this privileged choke point (not only at bootstrap): the whole point of the LAN/mesh edge is
+# that a web RCE must NOT be a one-hop pivot to this root helper.
+_ADMIN_GROUP = "admin"
+
+# Reserved-service binaries live under ``~/.local/bin`` (the standard ``uv tool`` install dir).
+_LOCAL_BIN_SUBDIRS = (".local", "bin")
+
+# Anti-busy-loop floor for the reserved services: launchd waits this long between KeepAlive
+# restarts so a crash-on-start cannot spin the process.
+_RESERVED_THROTTLE_INTERVAL = 10
+
 # Closed allowlist of actions. Handlers are stubs in story 1.1.
 _ACTIONS: tuple[str, ...] = (
     "install-daemon",
     "uninstall-daemon",
+    "install-reserved-service",
+    "uninstall-reserved-service",
     "start-daemon",
     "stop-daemon",
     "enable-daemon",
@@ -420,6 +475,153 @@ def _resolve_user_path(raw: str, home: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Reserved-service resolution (story 2.2). These feed the content-validated
+# ``install-reserved-service`` action, which GENERATES the whole argv from
+# ``_RESERVED_SERVICE_SPECS`` — the caller supplies only a service enum, a bounded
+# port, and (web only) a host from a closed set.
+# ---------------------------------------------------------------------------
+
+
+def _validate_host(spec: dict, value: str | None) -> str:
+    """Resolve a reserved service's bind host against its CLOSED allowlist (I9 host invariant).
+
+    None => the spec default. The web=LAN / serve=loopback policy lives in root: serve's
+    ``host_allowed`` is ``("127.0.0.1",)`` so the loopback companion can never be coerced
+    LAN-facing, even by a buggy or hostile user-space caller.
+    """
+    allowed = spec["host_allowed"]
+    if value is None:
+        return spec["host_default"]
+    if value not in allowed:
+        raise _Refused(f"host {value!r} not allowed for {spec['label']}: must be one of {allowed}")
+    return value
+
+
+def _is_admin(pw: pwd.struct_passwd) -> bool:
+    """True iff the account is in the macOS admin group (primary gid OR supplementary member).
+
+    FAIL-CLOSED: if the admin group cannot be resolved, raise ``_Refused`` (we cannot prove the
+    account is non-admin, so we refuse rather than assume). Pure stdlib (``grp``), no subprocess.
+    """
+    try:
+        admin = grp.getgrnam(_ADMIN_GROUP)
+    except KeyError:
+        raise _Refused(
+            f"cannot resolve the {_ADMIN_GROUP!r} group to verify non-admin status"
+        ) from None
+    return pw.pw_gid == admin.gr_gid or pw.pw_name in admin.gr_mem
+
+
+def _resolve_reserved_runas(spec: dict) -> pwd.struct_passwd:
+    """Resolve the account a reserved service runs as. Fixed in root, never caller-supplied.
+
+    ``invoker`` => the SUDO_UID admin (aisctl-serve MUST be admin — it calls this helper).
+    ``dedicated`` => the fixed non-admin role account ``_aisweb`` (asiai-web is the LAN/mesh
+    edge and must NOT be admin). FAIL-CLOSED: a missing/root/admin ``_aisweb`` is refused, never
+    an admin fallback — the caller can never make the LAN edge run privileged. The full NFR12
+    role-account shape (hidden, non-login) is enforced at bootstrap; here we re-assert the two
+    security-load-bearing properties at this privileged choke point — non-root AND non-admin —
+    so a bootstrap that mis-created an admin ``_aisweb`` is still refused (defence-in-depth;
+    ``_build_plist_dict`` re-resolves the name and refuses root again too).
+    """
+    if spec["runas"] == "invoker":
+        return _resolve_user(None)  # SUDO_UID, non-root (raises otherwise)
+    name = _WEB_RUNAS_ACCOUNT
+    try:
+        pw = pwd.getpwnam(name)
+    except KeyError:
+        raise _Refused(
+            f"reserved service requires the dedicated non-admin account {name!r} "
+            "(create it first: `aisctl bootstrap --install --dedicated-user`)"
+        ) from None
+    if pw.pw_uid == 0:
+        raise _Refused(f"reserved web run-as account must not be root (uid 0): {name!r}")
+    if _is_admin(pw):
+        raise _Refused(f"reserved web run-as account must not be admin: {name!r}")
+    return pw
+
+
+def _resolve_reserved_binary(basename: str, owner_pw: pwd.struct_passwd) -> str:
+    """Resolve a reserved-service binary under the INVOKER's ``~/.local/bin`` and prove no
+    OTHER account can rewrite it. Returns the absolute path to emit as ``ProgramArguments[0]``.
+
+    This is NOT ``_resolve_binary`` (engines): those live under admin-writable brew prefixes
+    where the allowlist is only defence-in-depth and the real barrier is the non-root run-as
+    (I2). Here the file sits in a HOME a non-root account can write, and launchd re-execs
+    ``argv[0]`` at EVERY KeepAlive restart — so "who can replace this file" IS the trust
+    boundary: a lateral attacker who rewrites it pivots to the daemon's account at the next
+    restart (the lateral-write a security review must refuse). The barrier is the residence
+    being writable only by {root, owner}.
+
+    ``owner_pw`` is the account that OWNS the binary — the sudo invoker (SUDO_UID), NOT
+    necessarily the daemon run-as: asiai-web runs as the dedicated non-admin account but still
+    executes the ONE ``asiai`` the admin installed in their ``~/.local/bin``. Guarantees:
+      * the path is BUILT here from ``owner_pw.pw_dir`` (never a caller string);
+      * ``basename`` is pinned to the spec (no ``/``, ``.``, ``..``);
+      * the final component is a regular file and NOT a symlink (a symlink is a lateral-write
+        redirection primitive — and the brew-upgrade rationale that allows symlinks for engines
+        is null for a stable ``uv tool`` install in HOME);
+      * EVERY component from the binary up to and including the owner HOME is a non-symlink
+        owned by {root, owner} and not group/other-writable. Phase-scoped to {root, invoker}
+        in v1; story 2.5 relocates aisctl-serve's binary out of the home and re-scopes.
+
+    The walk stops AT the owner HOME: the ancestors of HOME (``/Users``, ``/``) are assumed
+    root-controlled — the same trust as the filesystem root, which the whole helper already
+    relies on. A symlinked or third-party-writable ancestor of HOME would require root or a
+    broken mount to set up, i.e. outside the non-root lateral-attacker model this guard closes.
+    """
+    if basename != os.path.basename(basename) or basename in ("", ".", ".."):
+        raise _Refused(f"invalid reserved binary basename: {basename!r}")
+    home = owner_pw.pw_dir.rstrip(os.sep)
+    if not home.startswith("/") or home in ("", "/var/empty", "/dev/null"):
+        raise _Refused(f"refusing to resolve a reserved binary under a non-home: {home!r}")
+    path = os.path.join(home, *_LOCAL_BIN_SUBDIRS, basename)
+
+    allowed_owners = (0, owner_pw.pw_uid)
+    cur = path
+    is_leaf = True
+    while True:
+        try:
+            st = os.lstat(cur)
+        except OSError as exc:
+            raise _Refused(f"reserved binary chain missing: {cur!r} ({exc.strerror})") from None
+        if stat.S_ISLNK(st.st_mode):
+            raise _Refused(f"reserved binary chain has a symlink component: {cur!r}")
+        if is_leaf and not stat.S_ISREG(st.st_mode):
+            raise _Refused(f"reserved binary is not a regular file: {path!r}")
+        if st.st_uid not in allowed_owners:
+            raise _Refused(
+                f"reserved binary chain component not owned by {allowed_owners}: "
+                f"{cur!r} (uid={st.st_uid})"
+            )
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise _Refused(
+                f"reserved binary chain component is group/other-writable: "
+                f"{cur!r} (mode={st.st_mode:#o})"
+            )
+        if cur == home:
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:  # reached "/" without hitting home -> not contained in it
+            raise _Refused(f"reserved binary {path!r} is not contained in home {home!r}")
+        cur = parent
+        is_leaf = False
+    return path
+
+
+def _build_reserved_program_args(spec: dict, host: str, port: int) -> list[str]:
+    """Generate the FULL trailing argv for a reserved service from its spec (no caller echo).
+
+    web  -> ``[web, --host, <host>, --port, <port>]`` (LAN-facing, host from the closed set).
+    serve-> ``[serve, --port, <port>]`` — serve binds 127.0.0.1 internally, so ``--host`` is
+    deliberately NOT emitted.
+    """
+    if spec["subcommand"] == "web":
+        return ["web", "--host", host, "--port", str(port)]
+    return ["serve", "--port", str(port)]
+
+
+# ---------------------------------------------------------------------------
 # Plist generation (story 1.3) — generate-don't-validate (I1). The helper never
 # receives a plist; it BUILDS one from bounded fields. Dangerous keys cannot be
 # emitted because they are not in ``_PLIST_KEYS``. The install handler that wires
@@ -457,6 +659,7 @@ def _build_plist_dict(
     throttle_interval: int | None = None,
     timeout: int | None = None,
     nice: int | None = None,
+    include_binary_dir_in_path: bool = True,
 ) -> dict:
     """I1/I2/I3/I8: build a daemon plist from bounded inputs (never a caller-supplied one).
 
@@ -512,15 +715,14 @@ def _build_plist_dict(
     # usr-local — where binary_dir itself always lives, per I5) cannot mask a system
     # binary a daemon subprocess calls. The daemon's own binary is found via the absolute
     # ProgramArguments[0], so binary_dir need not lead. dict.fromkeys dedups, order-preserving.
-    path_dirs = [
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-        binary_dir,
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-    ]
+    # include_binary_dir_in_path=False (reserved services, story 2.2) keeps the user-writable
+    # ``~/.local/bin`` OFF the daemon's PATH entirely: the daemon binary is reached by the
+    # absolute ProgramArguments[0], and injecting a home dir on PATH would widen the surface
+    # its subprocesses see for no benefit.
+    path_dirs = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    if include_binary_dir_in_path:
+        path_dirs.append(binary_dir)
+    path_dirs += ["/opt/homebrew/bin", "/usr/local/bin"]
     # dict.fromkeys dedups order-preserving, collapsing binary_dir when it equals a literal
     # prefix. (Assumes realpath did not cross a symlinked prefix parent — the I5 prefixes are
     # stable and non-symlinked on the fleet; a stale duplicate would be harmless, system leads.)
@@ -760,6 +962,68 @@ def _uninstall_daemon(args: argparse.Namespace) -> None:
     _audit("uninstall-daemon", "accepted", label=label)
 
 
+def _install_reserved_service(args: argparse.Namespace) -> None:
+    """Content-validated install of a fixed asiai service (story 2.2).
+
+    Reachable ONLY through this enum-driven action (generic install-daemon still hard-refuses
+    the reserved labels via ``_refuse_reserved``). The ENTIRE argv is generated from the
+    hardcoded spec — the caller supplies only the service enum, a bounded port, and (web only)
+    a host from a closed set — so a bounded ``--label`` can never hijack the control plane.
+    """
+    _require_root()
+    spec = _RESERVED_SERVICE_SPECS[args.service]  # argparse `choices` guarantees membership
+    label = _validate_label(spec["label"])  # hardcoded, but composes the log path — re-check
+    # --host is a web-only knob (the spec's "host for web only"); the loopback companion is
+    # 127.0.0.1-pinned and never emits --host, so reject it outright rather than silently drop.
+    if args.host is not None and spec["subcommand"] != "web":
+        raise _Refused(f"--host is not accepted for {args.service} (loopback-pinned)")
+    owner_pw = _resolve_user(None)  # the SUDO_UID invoker: owns the binary, non-root
+    runas_pw = _resolve_reserved_runas(spec)  # web -> _aisweb (non-admin); serve -> invoker
+    binary = _resolve_reserved_binary(spec["basename"], owner_pw)
+    host = _validate_host(spec, args.host)
+    port = _validate_port(args.port) if args.port is not None else spec["port_default"]
+    program_args = _build_reserved_program_args(spec, host, port)
+    plist = _build_plist_dict(
+        label=label,
+        binary=binary,
+        user_pw=runas_pw,
+        program_args=program_args,
+        keep_alive=_DEFAULT_KEEP_ALIVE,
+        throttle_interval=_RESERVED_THROTTLE_INTERVAL,
+        include_binary_dir_in_path=False,  # never put the user-writable ~/.local/bin on PATH
+    )
+    path = _write_plist_atomic(label, _render_plist_xml(plist))
+    try:
+        _precreate_log_leaves(label, runas_pw)
+        _run([_LAUNCHCTL, "bootstrap", "system", path], check=True)
+    except BaseException:
+        _run([_LAUNCHCTL, "bootout", f"system/{label}"], check=False)  # undo a partial load
+        _unlink_plist(label)
+        raise
+    _audit(
+        "install-reserved-service",
+        "accepted",
+        service=args.service,
+        label=label,
+        binary=binary,
+        user=runas_pw.pw_name,
+        host=host,
+        port=port,
+    )
+
+
+def _uninstall_reserved_service(args: argparse.Namespace) -> None:
+    """Remove a fixed asiai service (story 2.2). The legitimate counterpart to the install
+    above — the generic uninstall-daemon still refuses reserved labels (I9); this enum-driven
+    path is the only sanctioned way to tear one down."""
+    _require_root()
+    spec = _RESERVED_SERVICE_SPECS[args.service]
+    label = _validate_label(spec["label"])
+    _run([_LAUNCHCTL, "bootout", f"system/{label}"], check=False)  # best-effort unload
+    _unlink_plist(label)
+    _audit("uninstall-reserved-service", "accepted", service=args.service, label=label)
+
+
 def _start_daemon(args: argparse.Namespace) -> None:
     _require_root()
     label = _validate_label(args.label)
@@ -800,6 +1064,8 @@ def _purge(_args: argparse.Namespace) -> None:
 _DISPATCH = {
     "install-daemon": _install_daemon,
     "uninstall-daemon": _uninstall_daemon,
+    "install-reserved-service": _install_reserved_service,
+    "uninstall-reserved-service": _uninstall_reserved_service,
     "start-daemon": _start_daemon,
     "stop-daemon": _stop_daemon,
     "enable-daemon": _enable_daemon,
@@ -841,6 +1107,18 @@ def _build_parser() -> argparse.ArgumentParser:
     ):
         p = sub.add_parser(action, allow_abbrev=False)
         p.add_argument("--label", required=True)
+
+    # Reserved services (story 2.2): a CLOSED surface — only a service enum, a bounded port,
+    # and (web only) a host. No --label/--binary/--program-arg/--env: the helper generates the
+    # whole argv from _RESERVED_SERVICE_SPECS so no caller token can reach ProgramArguments.
+    reserved_services = tuple(_RESERVED_SERVICE_SPECS)
+    install_reserved = sub.add_parser("install-reserved-service", allow_abbrev=False)
+    install_reserved.add_argument("--service", required=True, choices=reserved_services)
+    install_reserved.add_argument("--host", default=None)
+    install_reserved.add_argument("--port", default=None)
+
+    uninstall_reserved = sub.add_parser("uninstall-reserved-service", allow_abbrev=False)
+    uninstall_reserved.add_argument("--service", required=True, choices=reserved_services)
 
     sub.add_parser("purge", allow_abbrev=False)
     return parser

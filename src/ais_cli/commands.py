@@ -289,7 +289,15 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"'--preset {record.preset}' explicitly, or --force to install the base manifest."
         )
     m = _resolve_manifest(args.engine, preset=preset)
-    user = args.user or os.environ.get("USER") or "root"
+    # D4 (story 2.2): never fall back to "root". An engine daemon must run under a non-root
+    # account (I2); the helper would refuse uid 0 anyway, but we fail closed in the CLI rather
+    # than hand the helper a "root" it has to reject.
+    user = args.user or os.environ.get("SUDO_USER") or os.environ.get("USER")
+    if not user or user == "root":
+        raise SystemExit(
+            "refusing to install as root: pass --user <name> or run as a regular user "
+            "(engine daemons must run under a non-root account)."
+        )
     enable_fw = args.firewall == "lan-only"
 
     with memory.OperationsLock(force=args.force):
