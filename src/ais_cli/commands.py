@@ -275,6 +275,24 @@ def cmd_status(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_install_user(requested: str | None) -> str:
+    """Resolve the account an engine daemon runs as, failing CLOSED on root (D4, story 2.2).
+
+    ``--user`` wins, then ``$SUDO_USER`` (the human behind ``sudo``), then ``$USER``; NEVER a
+    ``"root"`` fallback. An engine daemon must run under a non-root account (I2); the root helper
+    would refuse uid 0 anyway, but we fail closed in the CLI with a friendly message rather than
+    hand the helper a ``"root"`` it has to reject. Shared by ``cmd_install`` and ``cmd_reinstall``
+    so both install entry points behave identically.
+    """
+    user = requested or os.environ.get("SUDO_USER") or os.environ.get("USER")
+    if not user or user == "root":
+        raise SystemExit(
+            "refusing to install as root: pass --user <name> or run as a regular user "
+            "(engine daemons must run under a non-root account)."
+        )
+    return user
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     preset = getattr(args, "preset", None)
     record = install_state.read_install(args.engine)
@@ -289,15 +307,7 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"'--preset {record.preset}' explicitly, or --force to install the base manifest."
         )
     m = _resolve_manifest(args.engine, preset=preset)
-    # D4 (story 2.2): never fall back to "root". An engine daemon must run under a non-root
-    # account (I2); the helper would refuse uid 0 anyway, but we fail closed in the CLI rather
-    # than hand the helper a "root" it has to reject.
-    user = args.user or os.environ.get("SUDO_USER") or os.environ.get("USER")
-    if not user or user == "root":
-        raise SystemExit(
-            "refusing to install as root: pass --user <name> or run as a regular user "
-            "(engine daemons must run under a non-root account)."
-        )
+    user = _resolve_install_user(args.user)  # D4: fail closed on root (no "root" fallback)
     enable_fw = args.firewall == "lan-only"
 
     with memory.OperationsLock(force=args.force):
@@ -335,7 +345,7 @@ def cmd_reinstall(args: argparse.Namespace) -> int:
             f"'aisctl install {args.engine} [--preset <name>]' once to create one."
         )
     m = _resolve_manifest(args.engine, preset=record.preset)
-    user = args.user or os.environ.get("USER") or "root"
+    user = _resolve_install_user(args.user)  # D4: fail closed on root (was: ... or "root")
     firewall_mode = args.firewall or record.firewall
     enable_fw = firewall_mode == "lan-only"
 
