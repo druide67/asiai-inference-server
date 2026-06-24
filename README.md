@@ -46,7 +46,8 @@ became obvious:
 | v0.1 | Install/uninstall/start/stop/restart + **unload + purge memory**, pf firewall anchor, sudoers bootstrap | shipped |
 | v0.2 | `aisctl upgrade` (brew, whitelisted), `asiai versions` provider, fleet Phase 2 (loopback `serve` + orchestrator `fleet` push) | shipped |
 | v0.3 | `status --deep` (generation probe, catches GPU-OOM zombies), install records + `reinstall`, single preset location, `disable`/`enable` (cold standby) | shipped |
-| v0.4 | SMAppService app bundle + `asiai-launch` (named entry with custom icon in Background Items) | in review |
+| v0.4 | **`asiai-priv` privileged helper** — a root-owned, content-validating helper replaces the wildcard sudoers: generate-don't-validate plists, a closed action allowlist, forced non-root run-as, and an append-only audit log; NOPASSWD is reduced to the helper alone | shipped |
+| v0.5 | SMAppService app bundle + `asiai-launch` (named entry with custom icon in Background Items) | in review |
 | later | Profile switching (apply/rollback), fleet inventory, web cockpit, MCP write tools | planned |
 
 ## Architecture (high level)
@@ -59,8 +60,8 @@ became obvious:
   Optional extras: `mcp` (for future write tools).
 - **macOS Apple Silicon only**. We rely on `launchctl`, `vm_stat`,
   `sudo purge`, `pfctl`, `iogpu.wired_limit_mb`.
-- **SSH-first** for fleet operations. Optional HTTP agent in v0.4 for
-  agent-to-agent orchestration.
+- **HTTP agent** for fleet operations (loopback `serve` + `fleet push`
+  orchestrator, shipped v0.2).
 - **TOML** for human-edited files (engine manifests, profiles, fleet
   inventory). JSON for runtime state.
 
