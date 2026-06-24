@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ais_core import memory
+from ais_core import memory, privhelper
 from ais_core.memory import (
     OperationsLock,
     PurgeReport,
@@ -120,32 +120,48 @@ def test_memory_pressure_unknown_when_binary_missing() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_purge_memory_runs_sudo_purge() -> None:
+def test_purge_memory_runs_helper_purge() -> None:
     fake_vm = VmStat(16384, 1000, 5000, 0, 1000, 2000)
     with (
         patch("ais_core.memory.vm_stat_parse", return_value=fake_vm),
-        patch("ais_core.memory.subprocess.run") as mock_run,
+        patch("ais_core.memory.privhelper.run") as mock_run,
         patch("ais_core.memory.memory_pressure", return_value="normal"),
     ):
         rep = memory.purge_memory()
 
-    assert mock_run.call_args.args[0] == ["sudo", "/usr/sbin/purge"]
+    # Routed through the helper (NOPASSWD on the helper only), not raw `sudo /usr/sbin/purge`.
+    assert mock_run.call_args.args[0] == "purge"
+    assert mock_run.call_args.kwargs.get("timeout") == 30
     assert rep.before == fake_vm
     assert rep.after == fake_vm
     assert rep.pressure_after == "normal"
 
 
-def test_purge_memory_dry_run_skips_subprocess() -> None:
+def test_purge_memory_dry_run_uses_helper_dry_run() -> None:
     fake_vm = VmStat(16384, 1000, 5000, 0, 1000, 2000)
     with (
         patch("ais_core.memory.vm_stat_parse", return_value=fake_vm),
-        patch("ais_core.memory.subprocess.run") as mock_run,
+        patch("ais_core.memory.privhelper.run") as mock_run,
         patch("ais_core.memory.memory_pressure", return_value="normal"),
     ):
         rep = memory.purge_memory(dry_run=True)
 
-    mock_run.assert_not_called()
+    mock_run.assert_called_once_with("purge", dry_run=True)
     assert isinstance(rep, PurgeReport)
+
+
+def test_purge_memory_wraps_helper_failure() -> None:
+    fake_vm = VmStat(16384, 1000, 5000, 0, 1000, 2000)
+    with (
+        patch("ais_core.memory.vm_stat_parse", return_value=fake_vm),
+        patch(
+            "ais_core.memory.privhelper.run",
+            side_effect=privhelper.PrivHelperError("asiai-priv purge failed — refused"),
+        ),
+        patch("ais_core.memory.memory_pressure", return_value="normal"),
+        pytest.raises(memory.MemoryError_, match="helper purge failed"),
+    ):
+        memory.purge_memory()
 
 
 # ---------------------------------------------------------------------------

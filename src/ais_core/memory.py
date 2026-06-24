@@ -45,7 +45,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ais_core import lifecycle, plist
+from ais_core import lifecycle, plist, privhelper
 from ais_core.manifest import EngineManifest, list_manifests, load_manifest
 
 logger = logging.getLogger(__name__)
@@ -190,22 +190,24 @@ class PurgeReport:
 
 
 def purge_memory(*, dry_run: bool = False) -> PurgeReport:
-    """Run ``sudo /usr/sbin/purge`` and report the measured delta.
+    """Run the memory purge through the privileged helper and report the measured delta.
 
-    The before/after snapshots bracket the privileged call so a slow purge
-    on a busy system doesn't skew the elapsed time we report.
+    Routed via ``asiai-priv purge`` (NOPASSWD on the helper only) rather than a raw
+    ``sudo /usr/sbin/purge`` wildcard — the post-AEP-01 sudoers fragment no longer grants
+    the latter. The before/after snapshots bracket the privileged call so a slow purge on a
+    busy system doesn't skew the elapsed time we report.
     """
     before = vm_stat_parse()
     t0 = time.monotonic()
 
     if dry_run:
-        print("[dry-run] sudo /usr/sbin/purge")
+        privhelper.run("purge", dry_run=True)
     else:
         try:
-            subprocess.run(["sudo", "/usr/sbin/purge"], check=True, timeout=30)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            privhelper.run("purge", timeout=30)
+        except privhelper.PrivHelperError as e:
             raise MemoryError_(
-                f"sudo purge failed: {e} — check the sudoers fragment "
+                f"helper purge failed: {e} — check the sudoers fragment "
                 "(aisctl bootstrap --install-sudoers) and system load"
             ) from e
 

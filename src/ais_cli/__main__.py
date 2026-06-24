@@ -224,12 +224,40 @@ def build_parser() -> argparse.ArgumentParser:
     # bootstrap
     p_boot = sub.add_parser(
         "bootstrap",
-        help="One-shot setup. Currently: install /etc/sudoers.d/asiai-inference.",
+        help="One-time setup: install the privileged helper + helper-only sudoers fragment.",
     )
-    p_boot.add_argument(
+    # The four verbs are mutually exclusive: this is a root- and sudoers-mutating command, so a
+    # fat-fingered `--rollback --install` must error loudly, never silently run one and drop the
+    # other. --dedicated-user / --dry-run are modifiers and stay outside the group.
+    p_boot_verb = p_boot.add_mutually_exclusive_group()
+    p_boot_verb.add_argument(
+        "--install",
+        action="store_true",
+        help="Full one-time bootstrap: I0 chain check -> install helper "
+        "(/Library/PrivilegedHelperTools/asiai-priv root:wheel 0755) -> install sudoers. "
+        "Idempotent.",
+    )
+    p_boot_verb.add_argument(
         "--install-sudoers",
         action="store_true",
-        help="Write the sudoers fragment after visudo validation.",
+        help="Install only the sudoers fragment (granular/legacy), after visudo validation.",
+    )
+    p_boot_verb.add_argument(
+        "--verify",
+        action="store_true",
+        help="Recompute the installed helper's SHA-256 and compare it to its sidecar (NFR11).",
+    )
+    p_boot_verb.add_argument(
+        "--rollback",
+        action="store_true",
+        help="Revert (FR8): restore the pre-bootstrap sudoers fragment (anti-lockout, "
+        "visudo-validated), then remove the helper and its signature sidecar.",
+    )
+    p_boot.add_argument(
+        "--dedicated-user",
+        action="store_true",
+        help="With --install: also create the hidden non-admin role account engines run as "
+        "(_aisrv, uid 450-499). Recommended; confines an engine RCE to a powerless uid.",
     )
     p_boot.add_argument("--dry-run", action="store_true")
     p_boot.set_defaults(func=commands.cmd_bootstrap)

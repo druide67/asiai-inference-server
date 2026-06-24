@@ -6,9 +6,16 @@ Ports ``lib-engine.sh:540-622`` (``engine_setup_firewall`` /
 Concretely we generate a small pf anchor file under ``/etc/pf.anchors/`` that
 allows the engine port from localhost + RFC1918 subnets and blocks everything
 else, then we add a single ``anchor "<name>" all`` line to ``/etc/pf.conf``
-and reload pf. ``com.asiai.*`` is the only label pattern accepted, paired with
-the strict-scope sudoers rule that whitelists ``/sbin/pfctl -f
-/etc/pf.anchors/com.asiai.*`` only.
+and reload pf. ``com.asiai.*`` is the only label pattern accepted.
+
+Password-gated, NOT in the helper (AEP-01)
+------------------------------------------
+These pf operations deliberately stay raw ``sudo`` (no ``-n``) and are NOT in the
+NOPASSWD ``asiai-priv`` surface: firewall setup is opt-in (``enable_firewall``,
+off by default), install-time, and operator-present, so prompting for a password
+is acceptable. Editing ``/etc/pf.conf`` is root-equivalent and delicate (cf. the
+2026-06-11 load-anchor audit), so it is kept out of a generate-don't-validate
+helper. No autonomous path (cron / Hermes) ever triggers it.
 
 Atomic write
 ------------

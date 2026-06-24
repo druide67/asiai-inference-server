@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import getpass
+import importlib.util
 import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,7 +20,21 @@ from ais_core.lifecycle import (
     process_alive,
     wait_for_health,
 )
-from ais_core.manifest import load_manifest
+from ais_core.manifest import list_manifests, load_manifest
+
+# The privileged helper is a standalone ``python3 -I`` binary (not an importable package
+# module); load it via importlib so the composition tests below can feed _install_args output
+# through its REAL argparse — the seam the per-layer mocks skip.
+_HELPER_PATH = Path(__file__).resolve().parents[1] / "data" / "helpers" / "asiai_priv.py"
+
+
+def _load_priv_helper():
+    spec = importlib.util.spec_from_file_location("asiai_priv_compose", _HELPER_PATH)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
 
 # ---------------------------------------------------------------------------
 # probe_health / wait_for_health — real HTTP server, no mocks
@@ -178,66 +194,44 @@ def test_current_state_not_installed_when_plist_absent(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_start_invokes_launchctl_load_w() -> None:
+def test_start_enables_then_kickstarts() -> None:
+    """Modern model: start = enable-daemon (clear any disable, parity with legacy load -w)
+    then start-daemon (kickstart -k), both via the helper."""
     m = load_manifest("ollama")
-    with patch("ais_core.lifecycle.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0)
+    with patch("ais_core.lifecycle.privhelper.run") as mock_run:
         lifecycle.start(m)
-    cmd = mock_run.call_args.args[0]
-    assert cmd[:5] == [
-        "sudo",
-        "/bin/launchctl",
-        "load",
-        "-w",
-        "/Library/LaunchDaemons/com.asiai.ollama.plist",
+    actions = [c.args[0] for c in mock_run.call_args_list]
+    assert actions == ["enable-daemon", "start-daemon"]
+    for call in mock_run.call_args_list:
+        assert "--label" in call.args and m.plist.name in call.args
+
+
+def test_stop_kills_via_helper_no_pkill() -> None:
+    """stop = stop-daemon (kill SIGTERM), best-effort (check=False), and crucially NO pkill —
+    a SIGKILL on a still-bootstrapped KeepAlive daemon would be read as a crash and respawned."""
+    m = load_manifest("ollama")
+    with (
+        patch("ais_core.lifecycle.privhelper.run") as mock_run,
+        patch("ais_core.lifecycle.subprocess.run") as mock_sub,
+    ):
+        lifecycle.stop(m)
+    assert mock_run.call_count == 1
+    assert mock_run.call_args.args[0] == "stop-daemon"
+    assert mock_run.call_args.kwargs.get("check") is False
+    # No pkill (nor any raw subprocess) — the whole point of the lean stop.
+    pkills = [
+        c for c in mock_sub.call_args_list if c.args and c.args[0] and c.args[0][0] == "pkill"
     ]
+    assert pkills == []
 
 
-def test_stop_calls_stop_then_unload_then_pkill_only_if_alive() -> None:
+def test_restart_is_enable_then_kickstart() -> None:
+    """restart = start (kickstart -k restarts atomically: kill current + start fresh)."""
     m = load_manifest("ollama")
-    calls = []
-
-    def fake_run(cmd, **_kwargs):
-        calls.append(cmd)
-        # Every subprocess call (launchctl stop, unload, pgrep, pkill) returns 0
-        # so the test exercises the full happy path including the pkill branch.
-        return MagicMock(returncode=0, stdout=b"", stderr=b"")
-
-    with (
-        patch("ais_core.lifecycle.subprocess.run", side_effect=fake_run),
-        patch("ais_core.lifecycle.time.sleep"),
-    ):
-        lifecycle.stop(m)
-
-    unload_prefix = ["sudo", "/bin/launchctl", "unload"]
-    idx_stop = calls.index(["sudo", "/bin/launchctl", "stop", "com.asiai.ollama"])
-    idx_unload = next(i for i, c in enumerate(calls) if c[:3] == unload_prefix)
-    # No -w on stop's unload: that flag writes the durable disabled
-    # override, which is disable()'s contract, not stop's.
-    assert "-w" not in calls[idx_unload]
-    idx_pgrep = next(i for i, c in enumerate(calls) if c[0] == "pgrep")
-    idx_pkill = next(i for i, c in enumerate(calls) if c[0] == "pkill")
-    assert idx_stop < idx_unload < idx_pgrep < idx_pkill
-
-
-def test_stop_skips_pkill_when_no_process_alive() -> None:
-    m = load_manifest("ollama")
-    calls = []
-
-    def fake_run(cmd, **_kwargs):
-        calls.append(cmd)
-        # pgrep finds nothing (rc=1) — the pkill branch must not run.
-        rc = 1 if cmd[0] == "pgrep" else 0
-        return MagicMock(returncode=rc, stdout=b"", stderr=b"")
-
-    with (
-        patch("ais_core.lifecycle.subprocess.run", side_effect=fake_run),
-        patch("ais_core.lifecycle.time.sleep"),
-    ):
-        lifecycle.stop(m)
-
-    assert any(c[0] == "pgrep" for c in calls)
-    assert not any(c[0] == "pkill" for c in calls)
+    with patch("ais_core.lifecycle.privhelper.run") as mock_run:
+        lifecycle.restart(m)
+    actions = [c.args[0] for c in mock_run.call_args_list]
+    assert actions == ["enable-daemon", "start-daemon"]
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +245,7 @@ def test_install_dry_run_does_not_require_binary_present() -> None:
     with (
         patch("ais_core.manifest.BinarySpec.resolve", return_value=None),
         patch("ais_core.lifecycle.stop_existing"),
-        patch("ais_core.lifecycle.plist.write_plist", return_value="/fake/plist"),
+        patch("ais_core.lifecycle.privhelper.run"),
     ):
         result = lifecycle.install(m, user=getpass.getuser(), dry_run=True)
     assert result["dry_run"] is True
@@ -259,24 +253,28 @@ def test_install_dry_run_does_not_require_binary_present() -> None:
     assert result["health_ok"] is None
 
 
-def test_install_creates_log_dir_before_launchctl(tmp_path) -> None:
-    """US-015: log dir must be created (user-space, no sudo) before start."""
+def test_install_invokes_helper_install_daemon() -> None:
+    """Install routes through the helper (generate-don't-validate): it no longer writes the
+    plist or mkdir's a user log dir — the helper generates the plist + creates the root-owned
+    /Library/Logs/asiai leaves + bootstraps (which starts it), so no separate start() either."""
     m = load_manifest("ollama")
-    fake_logs_dir = tmp_path / "Library" / "Logs" / "asiai" / "ollama"
-
     with (
-        patch(
-            "ais_core.manifest.LogSpec.expanded_dir",
-            new_callable=lambda: property(lambda self: str(fake_logs_dir)),
-        ),
         patch("ais_core.manifest.BinarySpec.resolve", return_value="/opt/homebrew/bin/ollama"),
         patch("ais_core.lifecycle.stop_existing"),
-        patch("ais_core.lifecycle.plist.write_plist", return_value="/fake/plist"),
-        patch("ais_core.lifecycle.start"),
+        patch("ais_core.lifecycle.privhelper.run") as mock_run,
+        patch("ais_core.lifecycle.start") as mock_start,
         patch("ais_core.lifecycle.wait_for_health", return_value=True),
     ):
         lifecycle.install(m, user=getpass.getuser(), dry_run=False)
-    assert fake_logs_dir.is_dir()
+    assert mock_run.call_count == 1
+    flags = mock_run.call_args.args
+    assert flags[0] == "install-daemon"
+    # flags are joined as --flag=value (so argparse never reads a value as an option)
+    assert f"--label={m.plist.name}" in flags
+    assert "--binary=/opt/homebrew/bin/ollama" in flags
+    assert any(f.startswith("--user=") for f in flags)
+    # bootstrap already starts it — no separate start() call
+    mock_start.assert_not_called()
 
 
 def test_current_state_running_when_health_ok_even_if_launchctl_silent() -> None:
@@ -466,61 +464,43 @@ class TestDeepState:
 
 
 class TestDisableEnable:
-    def test_disable_writes_override_then_stops(self) -> None:
+    def test_disable_disables_then_stops(self) -> None:
         m = load_manifest("ollama")
-        # Override BEFORE stop is the safety property of disable(): a
-        # KeepAlive daemon must not respawn in the gap. Attach both mocks
-        # to one parent so the relative order is asserted, not just the calls.
-        parent = MagicMock()
-        with (
-            patch("ais_core.lifecycle.subprocess.run") as mock_run,
-            patch("ais_core.lifecycle.stop") as mock_stop,
-        ):
-            mock_run.return_value = MagicMock(returncode=0)
-            parent.attach_mock(mock_run, "run")
-            parent.attach_mock(mock_stop, "stop")
+        # disable-daemon (persistent override) BEFORE stop-daemon (SIGTERM) is the safety
+        # property: a KeepAlive daemon must not respawn in the gap.
+        with patch("ais_core.lifecycle.privhelper.run") as mock_run:
             result = lifecycle.disable(m)
-        argv = mock_run.call_args_list[0].args[0]
-        assert argv == ["sudo", "/bin/launchctl", "disable", f"system/{m.plist.name}"]
-        mock_stop.assert_called_once_with(m)
-        call_names = [name for name, _args, _kwargs in parent.mock_calls]
-        assert call_names.index("run") < call_names.index("stop")
+        actions = [c.args[0] for c in mock_run.call_args_list]
+        assert actions == ["disable-daemon", "stop-daemon"]
+        for call in mock_run.call_args_list:
+            assert "--label" in call.args and m.plist.name in call.args
+        # stop is best-effort (kill on an already-down service is a no-op, not a failure)
+        assert mock_run.call_args_list[1].kwargs.get("check") is False
         assert result["disabled"] is True
 
-    def test_disable_dry_run_touches_nothing(self) -> None:
+    def test_disable_dry_run_forwards_dry_run(self) -> None:
         m = load_manifest("ollama")
-        with (
-            patch("ais_core.lifecycle.subprocess.run") as mock_run,
-            patch("ais_core.lifecycle.stop") as mock_stop,
-        ):
+        with patch("ais_core.lifecycle.privhelper.run") as mock_run:
             result = lifecycle.disable(m, dry_run=True)
-        mock_run.assert_not_called()
-        mock_stop.assert_not_called()
+        assert mock_run.call_count == 2
+        assert all(c.kwargs.get("dry_run") is True for c in mock_run.call_args_list)
         assert result["dry_run"] is True
 
     def test_enable_without_start_does_not_start(self) -> None:
         m = load_manifest("ollama")
-        with (
-            patch("ais_core.lifecycle.subprocess.run") as mock_run,
-            patch("ais_core.lifecycle.start") as mock_start,
-        ):
-            mock_run.return_value = MagicMock(returncode=0)
+        with patch("ais_core.lifecycle.privhelper.run") as mock_run:
             result = lifecycle.enable(m)
-        argv = mock_run.call_args_list[0].args[0]
-        assert argv == ["sudo", "/bin/launchctl", "enable", f"system/{m.plist.name}"]
-        mock_start.assert_not_called()
+        actions = [c.args[0] for c in mock_run.call_args_list]
+        assert actions == ["enable-daemon"]  # no start-daemon
         assert result["enabled"] is True
         assert result["started"] is False
 
     def test_enable_with_start_starts(self) -> None:
         m = load_manifest("ollama")
-        with (
-            patch("ais_core.lifecycle.subprocess.run") as mock_run,
-            patch("ais_core.lifecycle.start") as mock_start,
-        ):
-            mock_run.return_value = MagicMock(returncode=0)
+        with patch("ais_core.lifecycle.privhelper.run") as mock_run:
             result = lifecycle.enable(m, start_now=True)
-        mock_start.assert_called_once_with(m)
+        actions = [c.args[0] for c in mock_run.call_args_list]
+        assert actions == ["enable-daemon", "start-daemon"]
         assert result["started"] is True
 
 
@@ -595,3 +575,52 @@ class TestWaitForHealthGenCheck:
         _GenHandler.mode = "zombie"  # gen broken, but gen_check is off
         m = _manifest_pointing_to_port(gen_server)
         assert wait_for_health(m, timeout=3) is True
+
+
+# ---------------------------------------------------------------------------
+# Composition guard: _install_args output MUST parse through the REAL helper
+# argparse. The per-layer unit tests mock privhelper.run (asserting only the
+# flag list) and the helper tests pass hand-built argv — neither feeds one into
+# the other, which let a parse-fatal bug ship green. This closes that seam.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", list_manifests())
+def test_install_args_parse_through_real_helper(name: str) -> None:
+    """For every bundled manifest, lifecycle._install_args(...) must parse cleanly through the
+    real asiai-priv parser (no SystemExit) — catching the dash-prefixed program-arg class
+    (--flash-attn, --mlock, --host…) that action='append' rejects unless joined with '='."""
+    m = load_manifest(name)
+    argv = lifecycle._install_args(m, user="someuser", binary_path="/opt/homebrew/bin/engine")
+    ns = _load_priv_helper()._build_parser().parse_args(["install-daemon", *argv])
+
+    assert ns.action == "install-daemon"
+    assert ns.label == m.plist.name
+    expected_binary = m.wrapper.install_path if m.wrapper.needed else "/opt/homebrew/bin/engine"
+    assert ns.binary == expected_binary
+    if not m.wrapper.needed:
+        # every manifest program-arg round-trips verbatim, dash-prefixed flags included
+        for pa in m.binary.program_args:
+            assert pa in ns.program_arg
+        # --host/--port emitted together iff the manifest binds (parity with the old plist)
+        if m.network.bind:
+            assert ns.port == str(m.network.port)
+            assert "--host" in ns.program_arg and m.network.bind in ns.program_arg
+        else:
+            assert ns.port is None
+
+
+def test_install_args_ollama_no_port_llamacpp_has_port_and_dash_flags() -> None:
+    """Pin the two reproduced regressions: ollama (bind='') must get NO --port (else
+    'ollama serve --port' crash-loops); llamacpp must get --port AND its dash-prefixed flags
+    joined with '=' so the helper parser accepts them."""
+    args_o = lifecycle._install_args(
+        load_manifest("ollama"), user="u", binary_path="/opt/homebrew/bin/ollama"
+    )
+    assert not any(a.startswith("--port") for a in args_o)
+
+    args_l = lifecycle._install_args(
+        load_manifest("llamacpp"), user="u", binary_path="/opt/homebrew/bin/llama-server"
+    )
+    assert any(a.startswith("--port=") for a in args_l)
+    assert any(a.startswith("--program-arg=--") for a in args_l)  # dash-prefixed flag, joined

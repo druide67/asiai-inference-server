@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ais_core import install_state, lifecycle, memory, sudoers
+from ais_core import bootstrap, install_state, lifecycle, memory, sudoers
 from ais_core.manifest import (
     EngineManifest,
     list_manifests,
@@ -275,6 +275,24 @@ def cmd_status(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_install_user(requested: str | None) -> str:
+    """Resolve the account an engine daemon runs as, failing CLOSED on root (D4, story 2.2).
+
+    ``--user`` wins, then ``$SUDO_USER`` (the human behind ``sudo``), then ``$USER``; NEVER a
+    ``"root"`` fallback. An engine daemon must run under a non-root account (I2); the root helper
+    would refuse uid 0 anyway, but we fail closed in the CLI with a friendly message rather than
+    hand the helper a ``"root"`` it has to reject. Shared by ``cmd_install`` and ``cmd_reinstall``
+    so both install entry points behave identically.
+    """
+    user = requested or os.environ.get("SUDO_USER") or os.environ.get("USER")
+    if not user or user == "root":
+        raise SystemExit(
+            "refusing to install as root: pass --user <name> or run as a regular user "
+            "(engine daemons must run under a non-root account)."
+        )
+    return user
+
+
 def cmd_install(args: argparse.Namespace) -> int:
     preset = getattr(args, "preset", None)
     record = install_state.read_install(args.engine)
@@ -289,7 +307,7 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"'--preset {record.preset}' explicitly, or --force to install the base manifest."
         )
     m = _resolve_manifest(args.engine, preset=preset)
-    user = args.user or os.environ.get("USER") or "root"
+    user = _resolve_install_user(args.user)  # D4: fail closed on root (no "root" fallback)
     enable_fw = args.firewall == "lan-only"
 
     with memory.OperationsLock(force=args.force):
@@ -327,7 +345,7 @@ def cmd_reinstall(args: argparse.Namespace) -> int:
             f"'aisctl install {args.engine} [--preset <name>]' once to create one."
         )
     m = _resolve_manifest(args.engine, preset=record.preset)
-    user = args.user or os.environ.get("USER") or "root"
+    user = _resolve_install_user(args.user)  # D4: fail closed on root (was: ... or "root")
     firewall_mode = args.firewall or record.firewall
     enable_fw = firewall_mode == "lan-only"
 
@@ -616,26 +634,99 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
-    if not args.install_sudoers:
-        print(
-            "bootstrap: nothing to do without --install-sudoers.\n"
-            "Run with --install-sudoers to write /etc/sudoers.d/asiai-inference\n"
-            "(validated via visudo -cf before any sudo move into place)."
-        )
-        return 0
+    if args.verify:
+        return _bootstrap_verify()
+    if args.rollback:
+        return _bootstrap_rollback(dry_run=args.dry_run)
+    if args.install:
+        return _bootstrap_full(dedicated_user=args.dedicated_user, dry_run=args.dry_run)
+    if args.install_sudoers:
+        return _bootstrap_sudoers_only(dry_run=args.dry_run)
+    print(
+        "bootstrap: nothing to do.\n"
+        "  --install          full one-time setup: install the privileged helper "
+        "(/Library/PrivilegedHelperTools/asiai-priv, root:wheel 0755) THEN the helper-only\n"
+        "                     sudoers fragment. I0-checked, strict order, idempotent.\n"
+        "  --install-sudoers  install only the sudoers fragment (granular/legacy).\n"
+        "  --rollback         revert: restore the pre-bootstrap sudoers, then remove the helper.\n"
+        "  --verify           recompute the helper SHA-256 and compare to its sidecar.\n"
+        "Add --dry-run to preview without touching the system."
+    )
+    return 0
 
+
+def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
+    """One-time idempotent bootstrap in the strict order: I0 chain check -> install helper
+    (root:wheel 0755, invariant #3) -> sign helper (NFR11 sidecar) -> [opt create the dedicated
+    _aisrv account, NFR12] -> install the helper-only sudoers fragment (visudo-c'd).
+    """
+    if dry_run:
+        bootstrap.install_helper(dry_run=True)
+        bootstrap.write_helper_signature(dry_run=True)
+        if dedicated_user:
+            bootstrap.create_dedicated_user(dry_run=True)
+        sudoers.backup_existing_sudoers(dry_run=True)
+        sudoers.install_sudoers(dry_run=True)
+        return 0
+    try:
+        # I0 first: refuse if ANY root-write target's chain is unlocked, before any write.
+        bootstrap.assert_fleet_chain_locked()
+        helper_path = bootstrap.install_helper()
+        sidecar_path = bootstrap.write_helper_signature()  # NFR11, after the copy
+        user_info = bootstrap.create_dedicated_user() if dedicated_user else None  # NFR12, opt-in
+        # FR8: record the pre-bootstrap sudoers state ONCE, BEFORE the helper-only fragment
+        # overwrites it, so `--rollback` can restore exactly what was there (the rollback net).
+        backup_path = sudoers.backup_existing_sudoers()
+        sudoers_path = sudoers.install_sudoers()
+    except (bootstrap.BootstrapError, sudoers.SudoersError) as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 2
+    print(f"installed helper:    {helper_path}")
+    print(f"wrote signature:     {sidecar_path}")
+    if user_info is not None:
+        state = "created" if user_info["created"] else "already present"
+        print(f"dedicated user:      {user_info['user']} (uid {user_info.get('uid')}, {state})")
+    if backup_path is not None:
+        print(f"backed up sudoers:   {backup_path} (for --rollback)")
+    print(f"installed sudoers:   {sudoers_path}")
+    print("bootstrap complete. Engine lifecycle now routes through the helper (NOPASSWD).")
+    return 0
+
+
+def _bootstrap_verify() -> int:
+    """``aisctl bootstrap --verify`` — recompute the helper's SHA-256 and compare to its sidecar."""
+    try:
+        ok = bootstrap.verify_helper()
+    except bootstrap.BootstrapError as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 2
+    if ok:
+        print(f"helper integrity OK: {sudoers.PRIVILEGED_HELPER_PATH} matches its SHA-256 sidecar")
+        return 0
+    print(
+        f"helper integrity MISMATCH: {sudoers.PRIVILEGED_HELPER_PATH} does not match "
+        f"{bootstrap.HELPER_SHA256_PATH} — the helper was modified or the sidecar is stale",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _bootstrap_sudoers_only(*, dry_run: bool) -> int:
     content = sudoers.generate_sudoers_content()
-    if args.dry_run:
+    if dry_run:
+        # mirror the live order: backup-before-install
+        sudoers.backup_existing_sudoers(dry_run=True)
         print(content)
         return 0
-
     try:
         sudoers.validate_content(content)
     except sudoers.SudoersError as e:
         print(f"sudoers validation FAILED: {e}", file=sys.stderr)
         return 2
-
     try:
+        # FR8: record the prior state ONCE before overwriting, so --rollback stays possible even
+        # via the granular path (no-op if already recorded by a prior install).
+        sudoers.backup_existing_sudoers()
         path = sudoers.install_sudoers(content)
     except sudoers.SudoersError as e:
         # US-004: non-TTY guard surfaces clear instructions; print them
@@ -643,4 +734,32 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         print(f"\n{e}", file=sys.stderr)
         return 2
     print(f"installed {path}")
+    return 0
+
+
+def _bootstrap_rollback(*, dry_run: bool) -> int:
+    """``aisctl bootstrap --rollback`` (FR8) — revert the helper model, never locking out sudo.
+
+    Order matters: restore the sudoers FIRST (raw sudo / the pre-bootstrap state is back, and the
+    restore itself is anti-lockout — visudo-validated, never publishes broken content), THEN remove
+    the helper + its signature sidecar. The dedicated ``_aisrv`` account is intentionally NOT
+    removed (out of scope, harmless, reversible by the operator via ``sysadminctl -deleteUser``).
+    """
+    if dry_run:
+        sudoers.restore_sudoers(dry_run=True)
+        bootstrap.remove_helper(dry_run=True)
+        return 0
+    try:
+        desc = sudoers.restore_sudoers()  # sudoers first — re-establish a working sudo
+        removed = bootstrap.remove_helper()  # then the helper, after sudo is healthy
+    except (bootstrap.BootstrapError, sudoers.SudoersError) as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 2
+    print(f"sudoers:             {desc}")
+    print(f"removed helper:      {removed[0]}")
+    print(f"removed signature:   {removed[1]}")
+    print(
+        "rollback complete. Raw sudo is restored; re-run `aisctl bootstrap --install` to "
+        "re-apply the helper model."
+    )
     return 0

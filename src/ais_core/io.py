@@ -1,25 +1,21 @@
-"""Secure tempfile staging for privileged ``sudo /bin/mv`` operations.
+"""Secure tempfile staging for privileged operations that read an invoker-staged source.
 
-The default tempfile directory ``/tmp`` is world-writable. Between the moment
-``NamedTemporaryFile`` creates the staging file and the moment ``sudo /bin/mv``
-moves it to a privileged destination, a local attacker can substitute the
-file with a symlink, redirecting the privileged move's source.
+A privileged step run as root (``sudo /usr/bin/install`` for the sudoers fragment,
+``sudo /bin/mv`` for a plist) reads a source file the non-root invoker wrote. If that
+source lived directly in world-writable ``/tmp``, a local attacker could symlink-swap it
+between the write and the moment root reads it, redirecting what root copies/moves.
 
-To collapse that TOCTOU window, every privileged write goes through a
-per-invocation directory ``/tmp/asiai-<random>/`` created by ``mkdtemp``,
-which sets mode 0700 by default. The attacker has no write access to that
-directory, so no symlink swap is possible. The sudoers rules are scoped to
-``/tmp/asiai-*/...`` accordingly (see :mod:`ais_core.sudoers`).
+To collapse that window, every such write goes through a per-invocation directory
+``/tmp/asiai-<random>/`` created by ``mkdtemp`` (mode 0700, owned by the invoker). No other
+local user can write there, so the source cannot be swapped before root consumes it.
 
-Why ``/tmp`` and not ``~/.local/share``
----------------------------------------
-The sudoers fragment matches absolute paths via wildcards. A path under
-``~/.local/share`` would either need a ``/Users/*/.local/share/asiai/...``
-wildcard (broad enough to be abused by any local account named to look
-plausible) or per-user generation (fragile across machines with different
-``$USER``). Staying under ``/tmp`` with a per-process random suffix gives
-us a stable sudoers wildcard ``/tmp/asiai-*/...`` whose only writers are
-the original ``aisctl`` process and root.
+Historical note
+---------------
+An earlier design also relied on a ``/tmp/asiai-*`` *sudoers wildcard* so the privileged
+move was NOPASSWD. The helper-only sudoers model (AEP-01) removed every wildcard rule — the
+staging dir's sole remaining job is the 0700 anti-swap protection above, and the privileged
+step is now an interactive (password) ``sudo``. Do NOT reintroduce a ``/tmp/asiai-*`` sudoers
+rule.
 """
 
 from __future__ import annotations
@@ -40,7 +36,7 @@ def secure_staging_dir() -> Iterator[Path]:
     The directory is created with ``mkdtemp`` (mode 0700, ownership = caller)
     and recursively removed on context exit, regardless of whether the body
     raised. Files written inside are protected from local-user TOCTOU swaps
-    until the privileged ``mv`` consumes them.
+    until the privileged step (``install``/``mv``) run as root reads them.
     """
     d = Path(tempfile.mkdtemp(prefix=_PREFIX, dir="/tmp"))
     try:
