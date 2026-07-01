@@ -29,6 +29,7 @@ NOPASSWD on that one binary only). The helper uses the modern launchctl model
 from __future__ import annotations
 
 import enum
+import os
 import subprocess
 import time
 import urllib.error
@@ -110,6 +111,15 @@ def install(
         raise firewall.FirewallError(
             f"{manifest.name}: firewall.supported=false — refusing to install anchor"
         )
+    # Same fail-fast for the sudo password: if the pf write WILL be needed (anchor
+    # missing or stale) and sudo cannot prompt (no TTY, no ticket), refuse now —
+    # not after the daemon was stopped and the plist rewritten (2026-07-01 retex).
+    if (
+        enable_firewall
+        and not dry_run
+        and not firewall.anchor_up_to_date(manifest, subnets=subnets)
+    ):
+        firewall.preflight_sudo(f"{manifest.name}: installing the pf anchor")
 
     if binary_path is None:
         resolved = manifest.binary.resolve()
@@ -161,6 +171,25 @@ def install(
     }
 
 
+def _resolve_user_file(raw: str) -> str:
+    """Resolve symlinks in an absolute model/template/mmproj path before the helper call.
+
+    Audit finding #1: the helper refuses a symlink final component on these paths
+    (anti swap-TOCTOU inside a user-writable home — a deliberate hardening we keep),
+    which broke the ``active.gguf``/``active.jinja`` switch convention. Resolving the
+    symlink client-side pins the plist to the real target of the moment; switching
+    models = re-point the symlink + reinstall.
+
+    Tilde paths pass through untouched: they expand against the DAEMON account's home
+    inside the helper — realpath'ing here would wrongly expand against the INVOKER's.
+    A non-existing path also passes through: the helper owns the existence refusal
+    and its message.
+    """
+    if raw.startswith("~"):
+        return raw
+    return os.path.realpath(raw)
+
+
 def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> list[str]:
     """Translate a manifest into ``asiai-priv install-daemon`` flags.
 
@@ -177,9 +206,13 @@ def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> l
     old ``plist.build_plist_dict`` (ollama has ``bind=''`` and sets its port via the
     ``OLLAMA_HOST`` env var; ``ollama serve --port N`` is a fatal unknown-flag).
 
-    Tilde model/template/mmproj paths are passed raw — the helper expands them against the
-    DAEMON account's home and confines them there (paths outside it are refused: a deliberate
-    hardening). ``binary_path`` is the manifest's resolved candidate (the STABLE
+    Absolute model/template/mmproj paths are realpath'd HERE (audit #1): the helper refuses a
+    symlink final component (anti swap-TOCTOU — its target home is user-writable), which broke
+    the ``active.gguf`` switch mechanism. Resolving client-side keeps both: the plist is pinned
+    to the real target of the moment (re-switch = re-point the symlink + reinstall) and the
+    helper's hardening stays intact. Tilde paths are still passed raw — the helper expands them
+    against the DAEMON account's home (not ours) and confines them there.
+    ``binary_path`` is the manifest's resolved candidate (the STABLE
     ``/opt/homebrew/bin/<engine>`` symlink for brew engines — survives ``brew upgrade``); the
     helper re-validates it (I5: realpath under an allowlisted prefix; the symlink is accepted).
     """
@@ -190,11 +223,11 @@ def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> l
         for pa in manifest.binary.program_args:
             args.append(f"--program-arg={pa}")
         if manifest.binary.model_path:
-            args.append(f"--model-path={manifest.binary.model_path}")
+            args.append(f"--model-path={_resolve_user_file(manifest.binary.model_path)}")
         if manifest.binary.template_path:
-            args.append(f"--template-path={manifest.binary.template_path}")
+            args.append(f"--template-path={_resolve_user_file(manifest.binary.template_path)}")
         if manifest.binary.mmproj_path:
-            args.append(f"--mmproj-path={manifest.binary.mmproj_path}")
+            args.append(f"--mmproj-path={_resolve_user_file(manifest.binary.mmproj_path)}")
         if manifest.network.bind:
             # --host/--port only when bound (parity): ollama (bind='') must NOT get --port.
             args.append("--program-arg=--host")
@@ -207,26 +240,41 @@ def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> l
     return args
 
 
-def uninstall(manifest: EngineManifest, *, dry_run: bool = False) -> dict:
+def uninstall(
+    manifest: EngineManifest, *, keep_firewall: bool = False, dry_run: bool = False
+) -> dict:
     """Tear down an engine: boot out the daemon, remove plist, remove pf anchor.
+
+    ``keep_firewall=True`` leaves the anchor and pf.conf untouched — for a reinstall
+    that will need the identical anchor right back (skipping the password-gated pf
+    path entirely).
+
+    The pf preflight runs BEFORE the daemon is touched: ``remove_anchor`` is raw
+    password-gated sudo, and failing it mid-sequence leaves the engine half-removed
+    (daemon gone, anchor behind — 2026-07-01 retex on a helper-only host without a TTY).
 
     Log files under /Library/Logs/asiai are left untouched. If a future user needs log
     purging on uninstall, surface it as a separate command rather than a flag on
     ``uninstall`` (irreversible side effects don't belong on a removal verb the operator
     may run by reflex).
     """
+    fw_removal_needed = (
+        manifest.firewall.supported and not keep_firewall and firewall.anchor_present(manifest)
+    )
+    if fw_removal_needed and not dry_run:
+        firewall.preflight_sudo(f"{manifest.name}: removing the pf anchor")
+
     existed = Path(plist.plist_path(manifest)).exists()
     # The helper boots out the daemon AND unlinks the plist in one idempotent action (a
     # missing label/plist still exits 0). Replaces the old stop()+remove_plist() pair.
     privhelper.run("uninstall-daemon", "--label", manifest.plist.name, dry_run=dry_run)
-    fw_changed = (
-        firewall.remove_anchor(manifest, dry_run=dry_run) if manifest.firewall.supported else False
-    )
+    fw_changed = firewall.remove_anchor(manifest, dry_run=dry_run) if fw_removal_needed else False
 
     return {
         "engine": manifest.name,
         "plist_removed": existed,
         "firewall_removed": fw_changed,
+        "firewall_kept": keep_firewall,
         "dry_run": dry_run,
     }
 

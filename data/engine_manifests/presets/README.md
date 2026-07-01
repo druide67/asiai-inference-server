@@ -80,6 +80,25 @@ matches the engine the operator asked for. A preset that targets
 `llamacpp-aux-3` cannot be installed on `llamacpp-aux-1` — `aisctl`
 rejects the mismatch before touching the system.
 
+## Where model and template files must live (security constraint)
+
+`model_path`, `template_path` and `mmproj_path` must reside **under the
+home directory of the account the daemon runs as**, on a volume with
+real POSIX permissions (APFS). The privileged helper enforces this and
+refuses anything else. Two practical consequences:
+
+- **No external/network volumes.** A GGUF on an exFAT/FAT USB disk or
+  an SMB/NFS share has no enforced ownership: "readable by the daemon"
+  would not imply "not modifiable by another local user", which reopens
+  the very content-swap window the helper closes. Keep weights under
+  `~/llms/` (or any home subdirectory) on the internal volume.
+- **Symlinks are resolved at install time, client-side.** The
+  `active.gguf` → real-file switch convention still works: `aisctl
+  install`/`reinstall` resolves the symlink and pins the plist to the
+  real target of the moment (the helper refuses a symlink final
+  component by design — anti swap-TOCTOU). To switch models, re-point
+  the symlink and run `aisctl reinstall <engine>`.
+
 ## Files in this directory
 
 | Preset | Engine target | Notes |

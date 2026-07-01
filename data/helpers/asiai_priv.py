@@ -274,7 +274,12 @@ def _audit(action: str | None, verdict: str, reason: str = "", **fields: object)
         }
         data = (json.dumps(skeleton, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
     try:
-        fd = os.open(AUDIT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        # 0o640: the admin GROUP may read the log without sudo; write stays root-only.
+        # The canonical file is pre-created 0640 root:admin by `aisctl bootstrap`; this
+        # O_CREAT mode only matters in the degraded re-create case (log deleted), where
+        # the group falls back to root's primary (wheel) — the hot path deliberately
+        # never chowns/getgrnams (O_APPEND atomicity, no directory lookups).
+        fd = os.open(AUDIT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o640)
     except OSError as exc:
         _syslog_fallback(action, verdict, reason, exc)
         return
@@ -783,7 +788,27 @@ def _precreate_log_leaves(
     so this stays unit-testable non-root.
     """
     _validate_label(label)
-    dir_fd = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        dir_fd = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except (FileNotFoundError, NotADirectoryError):
+        # NARROW diagnostic (finding #3): a genuinely missing log dir — or a stray
+        # regular file where it should be — gets a clear refusal (the path is a
+        # hardcoded non-secret literal) instead of the opaque EXIT_INTERNAL it used
+        # to become. CAVEAT: on macOS a SYMLINKED dir also surfaces as ENOTDIR under
+        # O_DIRECTORY|O_NOFOLLOW, so re-check with lstat and keep the symlink case
+        # OPAQUE — that is a potential attack signal, not an operator mistake. The
+        # lstat is message-selection only (no TOCTOU surface: the open already
+        # failed, nothing is written on any of these paths). EACCES and other
+        # errnos stay unexpected — abnormal under root — and remain opaque.
+        try:
+            st_diag = os.lstat(log_dir)
+        except OSError:
+            raise _Refused(f"log dir missing: {log_dir!r} — run `aisctl bootstrap`") from None
+        if stat.S_ISLNK(st_diag.st_mode):
+            raise  # symlinked log dir: keep the opaque internal-error path
+        raise _Refused(
+            f"log dir missing or not a directory: {log_dir!r} — run `aisctl bootstrap`"
+        ) from None
     try:
         dst = os.fstat(dir_fd)
         if not (

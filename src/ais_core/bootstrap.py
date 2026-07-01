@@ -25,6 +25,11 @@ from ais_core.io import secure_staging_dir
 # The helper's audit log + Standard*Path live here; no other ais_core module owns this path.
 LOG_DIR = "/Library/Logs/asiai"
 
+# The helper's audit log (mirrors AUDIT_LOG in data/helpers/asiai_priv.py). Pre-created by the
+# bootstrap 0640 root:admin so an operator can READ refusals without sudo (write stays
+# root-only); the helper's hot path never chowns — group ownership is set here, once.
+AUDIT_LOG_PATH = f"{LOG_DIR}/asiai-priv-audit.log"
+
 # Directory chain whose permissions must be verified locked BEFORE any root write (I0). A
 # group/other-writable, non-root, setuid/setgid or symlinked ancestor would let a non-root
 # party swap or tamper with what root writes below it — making every downstream perms check
@@ -308,6 +313,63 @@ def remove_helper(*, dry_run: bool = False) -> list[str]:
     except subprocess.CalledProcessError as e:
         raise BootstrapError(f"Failed to remove the helper at {dest}: {e}") from e
     return targets
+
+
+def ensure_log_dir(*, dry_run: bool = False) -> str:
+    """Ensure ``/Library/Logs/asiai`` exists root:wheel 0755 (audit finding #3b).
+
+    The helper deliberately does not create its own log dir (a root process
+    mkdir'ing on demand would blur the bootstrap/runtime split); a host where it
+    is missing used to fail ``install-daemon`` opaquely. The bootstrap owns it:
+    I0-check the chain, ``mkdir -p`` (idempotent), pin root:wheel 0755, re-assert.
+    """
+    if dry_run:
+        print(f"[dry-run] ensure log dir {LOG_DIR} (root:wheel 0755)")
+        return LOG_DIR
+    if not sys.stdin.isatty():
+        raise BootstrapError(
+            "aisctl bootstrap --install requires an interactive terminal (sudo password)."
+        )
+    assert_chain_locked(LOG_DIR)
+    try:
+        subprocess.run(["sudo", "/bin/mkdir", "-p", LOG_DIR], check=True)
+        subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", LOG_DIR], check=True)
+        subprocess.run(["sudo", "/bin/chmod", "0755", LOG_DIR], check=True)
+    except subprocess.CalledProcessError as e:
+        raise BootstrapError(f"Failed to create log dir {LOG_DIR}: {e}") from e
+    # Re-assert AFTER the mkdir: the pre-check returns early at a missing dir, so a
+    # freshly created one was never inspected (same pattern as install_helper).
+    assert_chain_locked(LOG_DIR)
+    return LOG_DIR
+
+
+def ensure_audit_log(*, dry_run: bool = False) -> str:
+    """Pre-create/normalize the helper's audit log **0640 root:admin** (audit finding #2).
+
+    Write stays root-only (no group/other write bit); the admin GROUP gains read so an
+    operator can diagnose helper refusals without sudo. Group ownership is set HERE, once —
+    the helper's ``_audit`` hot path deliberately never chowns/getgrnams (O_APPEND
+    atomicity, no lookups), and its degraded ``O_CREAT`` re-create falls back to
+    root:wheel 0640 until the next bootstrap run re-normalizes it.
+
+    Idempotent and never truncates: ``touch`` only updates mtime on an existing log.
+    Must run AFTER :func:`ensure_log_dir` (the chain check requires the dir).
+    """
+    if dry_run:
+        print(f"[dry-run] ensure audit log {AUDIT_LOG_PATH} (root:admin 0640)")
+        return AUDIT_LOG_PATH
+    if not sys.stdin.isatty():
+        raise BootstrapError(
+            "aisctl bootstrap --install requires an interactive terminal (sudo password)."
+        )
+    assert_chain_locked(AUDIT_LOG_PATH)
+    try:
+        subprocess.run(["sudo", "/usr/bin/touch", AUDIT_LOG_PATH], check=True)
+        subprocess.run(["sudo", "/usr/sbin/chown", "root:admin", AUDIT_LOG_PATH], check=True)
+        subprocess.run(["sudo", "/bin/chmod", "0640", AUDIT_LOG_PATH], check=True)
+    except subprocess.CalledProcessError as e:
+        raise BootstrapError(f"Failed to prepare audit log {AUDIT_LOG_PATH}: {e}") from e
+    return AUDIT_LOG_PATH
 
 
 # Dedicated daemon account (NFR12, opt-in via --dedicated-user). A hidden, non-login, non-admin

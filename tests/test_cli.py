@@ -645,6 +645,14 @@ def test_bootstrap_full_install_runs_in_strict_order(capsys: pytest.CaptureFixtu
         order.append("sig")
         return "/Library/PrivilegedHelperTools/asiai-priv.sha256"
 
+    def _logdir() -> str:
+        order.append("logdir")
+        return "/Library/Logs/asiai"
+
+    def _auditlog() -> str:
+        order.append("auditlog")
+        return "/Library/Logs/asiai/asiai-priv-audit.log"
+
     def _backup() -> str:
         order.append("backup")
         return "/etc/sudoers.d/.asiai-inference.pre-bootstrap.bak"
@@ -657,13 +665,16 @@ def test_bootstrap_full_install_runs_in_strict_order(capsys: pytest.CaptureFixtu
         patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked", side_effect=_i0),
         patch("ais_cli.commands.bootstrap.install_helper", side_effect=_helper),
         patch("ais_cli.commands.bootstrap.write_helper_signature", side_effect=_sig),
+        patch("ais_cli.commands.bootstrap.ensure_log_dir", side_effect=_logdir),
+        patch("ais_cli.commands.bootstrap.ensure_audit_log", side_effect=_auditlog),
         patch("ais_cli.commands.sudoers.backup_existing_sudoers", side_effect=_backup),
         patch("ais_cli.commands.sudoers.install_sudoers", side_effect=_sud),
     ):
         rc = main(["bootstrap", "--install"])
     assert rc == 0
-    # I0 before any write; signature after the copy; backup (FR8) right before the sudoers overwrite
-    assert order == ["i0", "helper", "sig", "backup", "sud"]
+    # I0 before any write; signature after the copy; helper runtime (log dir + audit log,
+    # findings #3b/#2) after the helper exists; backup (FR8) right before the sudoers overwrite
+    assert order == ["i0", "helper", "sig", "logdir", "auditlog", "backup", "sud"]
     assert "/Library/PrivilegedHelperTools/asiai-priv" in capsys.readouterr().out
 
 
@@ -708,6 +719,14 @@ def test_bootstrap_full_install_dedicated_user_runs_create_before_sudoers(
             side_effect=_step("sig", "/h.sha256"),
         ),
         patch(
+            "ais_cli.commands.bootstrap.ensure_log_dir",
+            side_effect=_step("logdir", "/Library/Logs/asiai"),
+        ),
+        patch(
+            "ais_cli.commands.bootstrap.ensure_audit_log",
+            side_effect=_step("auditlog", "/Library/Logs/asiai/asiai-priv-audit.log"),
+        ),
+        patch(
             "ais_cli.commands.bootstrap.create_dedicated_user",
             side_effect=_step("user", {"user": "_aisrv", "created": True, "uid": 450}),
         ) as m_user,
@@ -719,7 +738,7 @@ def test_bootstrap_full_install_dedicated_user_runs_create_before_sudoers(
     ):
         rc = main(["bootstrap", "--install", "--dedicated-user"])
     assert rc == 0
-    assert order == ["i0", "helper", "sig", "user", "backup", "sud"]
+    assert order == ["i0", "helper", "sig", "logdir", "auditlog", "user", "backup", "sud"]
     m_user.assert_called_once()
 
 
@@ -728,6 +747,11 @@ def test_bootstrap_full_install_without_dedicated_user_skips_create() -> None:
         patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked"),
         patch("ais_cli.commands.bootstrap.install_helper", return_value="/h"),
         patch("ais_cli.commands.bootstrap.write_helper_signature", return_value="/h.sha256"),
+        patch("ais_cli.commands.bootstrap.ensure_log_dir", return_value="/Library/Logs/asiai"),
+        patch(
+            "ais_cli.commands.bootstrap.ensure_audit_log",
+            return_value="/Library/Logs/asiai/asiai-priv-audit.log",
+        ),
         patch("ais_cli.commands.bootstrap.create_dedicated_user") as m_user,
         patch("ais_cli.commands.sudoers.backup_existing_sudoers", return_value=None),
         patch("ais_cli.commands.sudoers.install_sudoers", return_value="/s"),

@@ -644,3 +644,70 @@ def test_has_auth_authority_rc0_but_empty_is_indeterminate(monkeypatch):
     monkeypatch.setattr(bootstrap_mod, "_run_ro", _ro(0, stdout="", stderr=""))
     with pytest.raises(BootstrapError, match="cannot read AuthenticationAuthority"):
         bootstrap_mod._has_auth_authority("x")
+
+
+# ---------------------------------------------------------------------------
+# SA audit #3b/#2: bootstrap owns the helper's log dir + audit log
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_log_dir_dry_run_touches_nothing(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda *a, **k: calls.append(a))
+    assert bootstrap_mod.ensure_log_dir(dry_run=True) == bootstrap_mod.LOG_DIR
+    assert calls == []
+
+
+def test_ensure_log_dir_non_tty_raises(monkeypatch):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(bootstrap_mod.BootstrapError, match="interactive terminal"):
+        bootstrap_mod.ensure_log_dir()
+
+
+def test_ensure_log_dir_sequence(monkeypatch):
+    """I0 before AND after the mkdir (freshly created dir re-verified), root:wheel 0755."""
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    checks: list[str] = []
+    monkeypatch.setattr(bootstrap_mod, "assert_chain_locked", lambda p: checks.append(p))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda argv, **k: calls.append(argv))
+
+    assert bootstrap_mod.ensure_log_dir() == bootstrap_mod.LOG_DIR
+    assert checks == [bootstrap_mod.LOG_DIR, bootstrap_mod.LOG_DIR]
+    assert calls == [
+        ["sudo", "/bin/mkdir", "-p", bootstrap_mod.LOG_DIR],
+        ["sudo", "/usr/sbin/chown", "root:wheel", bootstrap_mod.LOG_DIR],
+        ["sudo", "/bin/chmod", "0755", bootstrap_mod.LOG_DIR],
+    ]
+
+
+def test_ensure_audit_log_dry_run_touches_nothing(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda *a, **k: calls.append(a))
+    assert bootstrap_mod.ensure_audit_log(dry_run=True) == bootstrap_mod.AUDIT_LOG_PATH
+    assert calls == []
+
+
+def test_ensure_audit_log_non_tty_raises(monkeypatch):
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(bootstrap_mod.BootstrapError, match="interactive terminal"):
+        bootstrap_mod.ensure_audit_log()
+
+
+def test_ensure_audit_log_sequence_0640_root_admin(monkeypatch):
+    """Finding #2: touch (never truncates), then root:admin 0640 — group READ without
+    sudo, write stays root-only. Group ownership set here, once; the helper's hot
+    path never chowns."""
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+    checks: list[str] = []
+    monkeypatch.setattr(bootstrap_mod, "assert_chain_locked", lambda p: checks.append(p))
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda argv, **k: calls.append(argv))
+
+    assert bootstrap_mod.ensure_audit_log() == bootstrap_mod.AUDIT_LOG_PATH
+    assert checks == [bootstrap_mod.AUDIT_LOG_PATH]
+    assert calls == [
+        ["sudo", "/usr/bin/touch", bootstrap_mod.AUDIT_LOG_PATH],
+        ["sudo", "/usr/sbin/chown", "root:admin", bootstrap_mod.AUDIT_LOG_PATH],
+        ["sudo", "/bin/chmod", "0640", bootstrap_mod.AUDIT_LOG_PATH],
+    ]
