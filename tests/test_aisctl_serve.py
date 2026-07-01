@@ -109,10 +109,11 @@ class TestBuildArgv:
         ["install-service", "uninstall-service", "install-reserved-service", "bootstrap"],
     )
     def test_install_family_never_routable(self, command):
-        """The loopback hop forwards only the fleet lifecycle whitelist (COMMAND_TIMEOUTS).
-        Service provisioning / bootstrap is operator-only (privileged); it must NEVER be
-        reachable over :8898, so a compromised asiai-web edge cannot drive an install."""
-        assert command not in serve.COMMAND_TIMEOUTS
+        """The loopback hop forwards only the fleet lifecycle whitelist (the shared
+        ALLOWED_COMMANDS). Service provisioning / bootstrap is operator-only (privileged);
+        it must NEVER be reachable over :8898, so a compromised asiai-web edge cannot
+        drive an install."""
+        assert command not in serve.ALLOWED_COMMANDS
         with pytest.raises(ValueError, match="unknown command"):
             serve._build_argv(command, {"service": "asiai-web", "engine": "ollama"})
 
@@ -123,6 +124,14 @@ class TestBuildArgv:
         assert argv[0].endswith("aisctl")
         assert argv[1:3] == ["upgrade", "ollama"]
         assert "--json" in argv
+        # Inner tool deadline is derived from the shared spec (work budget - headroom),
+        # under the loopback subprocess-kill so aisctl reports its own timeout.
+        from asiai.fleet.command_spec import inner_tool_timeout, loopback_timeout
+
+        assert "--timeout" in argv
+        inner = int(argv[argv.index("--timeout") + 1])
+        assert inner == int(inner_tool_timeout("upgrade"))
+        assert inner < loopback_timeout("upgrade")
 
     def test_upgrade_rejects_unknown_engine(self):
         with pytest.raises(ValueError, match="not whitelisted"):

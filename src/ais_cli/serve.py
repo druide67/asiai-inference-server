@@ -46,6 +46,7 @@ import time
 from typing import Any
 
 from asiai.auth import loopback as asiai_loopback
+from asiai.fleet.command_spec import ALLOWED_COMMANDS, inner_tool_timeout, loopback_timeout
 
 logger = logging.getLogger("aisctl.serve")
 
@@ -54,21 +55,12 @@ DEFAULT_PORT = 8898
 MAX_CONCURRENT = 4
 SHUTDOWN_GRACE_SECONDS = 5.0
 
-# Commands the loopback server forwards to the local ``aisctl`` binary.
-# Values are upstream subprocess timeouts (seconds). Must stay in sync
-# with ``asiai.web.routes.fleet.COMMAND_TIMEOUTS`` (the LAN-facing
-# timeout there is intentionally tighter so we fail fast at the edge).
-COMMAND_TIMEOUTS: dict[str, float] = {
-    "purge": 30.0,
-    "load": 300.0,
-    "unload": 60.0,
-    "stop": 60.0,
-    "start": 120.0,
-    "restart": 120.0,
-    "install": 300.0,
-    "uninstall": 120.0,
-    "upgrade": 600.0,
-}
+# Command whitelist + subprocess-kill timeouts come from the single shared
+# source (``asiai.fleet.command_spec``). This loopback layer is the INNERMOST /
+# authoritative budget: ``loopback_timeout(cmd)`` == the work budget itself. The
+# edge and client derive LONGER deadlines from it (budget + margin per hop), so
+# no outer layer abandons a command still running here. Replaces the old
+# hand-synced map + the "edge is intentionally tighter" note that was the SB bug.
 
 
 def _aisctl_binary() -> str:
@@ -98,7 +90,7 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
     Strict whitelist; anything unexpected raises ValueError so the
     handler can return 400 without invoking subprocess.
     """
-    if command not in COMMAND_TIMEOUTS:
+    if command not in ALLOWED_COMMANDS:
         raise ValueError(f"unknown command: {command}")
     argv = [_aisctl_binary(), command, "--json"]
     engine = args.get("engine")
@@ -132,7 +124,11 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
         from ais_core.upgrade import upgrade_argv
 
         upgrade_argv(engine)  # validation only — raises ValueError if not whitelisted
-        argv = [_aisctl_binary(), "upgrade", engine, "--json", "--timeout", "540"]
+        # Inner tool deadline derived from the shared spec (work budget - headroom)
+        # so ``aisctl upgrade`` reports its own failure before this server's
+        # subprocess-kill fires. Single-sourced with the loopback budget.
+        inner = int(inner_tool_timeout("upgrade"))
+        argv = [_aisctl_binary(), "upgrade", engine, "--json", "--timeout", str(inner)]
     return argv
 
 
@@ -272,7 +268,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._json(503, {"error": "busy", "detail": "all workers in use"})
             return
         try:
-            timeout = COMMAND_TIMEOUTS.get(command, 60.0)
+            timeout = loopback_timeout(command)
             result = _execute(argv, timeout=timeout)
         finally:
             sem.release()
