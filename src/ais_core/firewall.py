@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from ais_core.io import secure_staging_dir
@@ -51,6 +52,84 @@ class FirewallError(RuntimeError):
 
 def anchor_path(manifest: EngineManifest) -> str:
     return f"{PF_ANCHORS_DIR}/{manifest.firewall.anchor_name}"
+
+
+def preflight_sudo(what: str) -> None:
+    """Fail fast when a pf operation will need sudo but sudo cannot prompt.
+
+    pf operations are deliberately raw ``sudo`` (password-gated, see the module
+    docstring). That contract assumes an operator at a terminal. Without a TTY,
+    ``sudo`` cannot prompt and fails midway — 2026-07-01 retex: ``uninstall`` had
+    already booted out the daemon when the anchor ``rm`` died, leaving the engine
+    half-removed. Callers MUST run this BEFORE any daemon mutation whose sequence
+    later includes a pf write.
+
+    A cached sudo timestamp (or blanket NOPASSWD) satisfies ``sudo -nv`` and is
+    accepted; so is an interactive stdin. Anything else raises with instructions.
+    """
+    if sys.stdin.isatty():
+        return  # sudo can prompt the operator
+    proc = subprocess.run(["sudo", "-n", "-v"], capture_output=True)
+    if proc.returncode == 0:
+        return  # valid cached ticket / NOPASSWD — no prompt needed
+    raise FirewallError(
+        f"{what} needs an interactive sudo password and there is no terminal to "
+        "prompt on. Re-run from an interactive terminal, or skip firewall changes "
+        "(--firewall none)."
+    )
+
+
+def anchor_is_current(
+    manifest: EngineManifest,
+    *,
+    subnets: tuple[str, ...] = DEFAULT_SUBNETS,
+) -> bool:
+    """True iff the installed anchor file byte-matches what we would generate now.
+
+    Pure read (the anchor file is root:wheel 0644 — world-readable): lets callers
+    skip the whole password-gated pf sequence when a reinstall would rewrite the
+    identical anchor (same port/subnets — the nominal flag-change reinstall).
+    """
+    try:
+        installed = Path(anchor_path(manifest)).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return installed == build_anchor_content(manifest, subnets=subnets)
+
+
+def anchor_present(manifest: EngineManifest) -> bool:
+    """True iff any trace of this engine's anchor exists (file or pf.conf lines).
+
+    Used to decide whether an uninstall will need the password-gated pf path at
+    all — ``remove_anchor`` also scrubs pf.conf, so a missing file alone does not
+    mean there is nothing to do.
+    """
+    if Path(anchor_path(manifest)).exists():
+        return True
+    name = manifest.firewall.anchor_name
+    stripped = {line.strip() for line in _read_pf_conf().splitlines()}
+    return any(line in stripped for line in _anchor_conf_lines(name))
+
+
+def _pf_conf_wired(name: str) -> bool:
+    """True iff BOTH pf.conf lines (anchor declaration + load directive) are present."""
+    stripped = {line.strip() for line in _read_pf_conf().splitlines()}
+    return all(line in stripped for line in _anchor_conf_lines(name))
+
+
+def anchor_up_to_date(
+    manifest: EngineManifest,
+    *,
+    subnets: tuple[str, ...] = DEFAULT_SUBNETS,
+) -> bool:
+    """True iff the anchor byte-matches AND both pf.conf lines are wired.
+
+    The "nothing privileged to do" predicate — pure reads, callers use it to
+    decide whether an install/reinstall will need the password-gated pf path.
+    """
+    return anchor_is_current(manifest, subnets=subnets) and _pf_conf_wired(
+        manifest.firewall.anchor_name
+    )
 
 
 def build_anchor_content(
@@ -124,12 +203,22 @@ def install_anchor(
     content = build_anchor_content(manifest, subnets=subnets)
     dst = anchor_path(manifest)
 
+    # Idempotence: when the installed anchor already byte-matches AND both pf.conf
+    # lines are wired, there is nothing privileged to do — return without touching
+    # sudo. This is what makes the nominal reinstall (flags change, port/subnets
+    # don't) run password-free end to end.
+    if anchor_up_to_date(manifest, subnets=subnets):
+        if dry_run:
+            print(f"[dry-run] anchor {dst} already current + wired — nothing to do")
+        return dst
+
     if dry_run:
         print(f"--- anchor {dst} ---")
         print(content, end="")
         print("--- end anchor ---")
         return dst
 
+    preflight_sudo(f"installing the pf anchor {dst}")
     validate_anchor(content)
 
     with secure_staging_dir() as staging:

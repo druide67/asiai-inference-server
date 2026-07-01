@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ais_core import bootstrap, install_state, lifecycle, memory, sudoers
+from ais_core import bootstrap, firewall, install_state, lifecycle, memory, sudoers
 from ais_core.manifest import (
     EngineManifest,
     list_manifests,
@@ -356,8 +356,15 @@ def cmd_reinstall(args: argparse.Namespace) -> int:
         and install_state.manifest_digest(src) != record.manifest_sha256
     )
 
+    # When the reinstall will regenerate the IDENTICAL anchor (same port/subnets —
+    # the nominal flag-change reinstall), keep it across the uninstall: the whole
+    # password-gated pf path is skipped (install_anchor detects up-to-date and
+    # no-ops). Without this, a reinstall on a helper-only host without a TTY died
+    # mid-sequence with the daemon already removed (2026-07-01 retex).
+    fw_unchanged = enable_fw and firewall.anchor_up_to_date(m)
+
     with memory.OperationsLock(force=args.force):
-        lifecycle.uninstall(m, dry_run=args.dry_run)
+        lifecycle.uninstall(m, keep_firewall=fw_unchanged, dry_run=args.dry_run)
         result = lifecycle.install(
             m,
             user=user,
@@ -657,12 +664,15 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
     """One-time idempotent bootstrap in the strict order: I0 chain check -> install helper
-    (root:wheel 0755, invariant #3) -> sign helper (NFR11 sidecar) -> [opt create the dedicated
-    _aisrv account, NFR12] -> install the helper-only sudoers fragment (visudo-c'd).
+    (root:wheel 0755, invariant #3) -> sign helper (NFR11 sidecar) -> log dir + audit log
+    (helper runtime, findings #3b/#2) -> [opt create the dedicated _aisrv account, NFR12] ->
+    install the helper-only sudoers fragment (visudo-c'd).
     """
     if dry_run:
         bootstrap.install_helper(dry_run=True)
         bootstrap.write_helper_signature(dry_run=True)
+        bootstrap.ensure_log_dir(dry_run=True)
+        bootstrap.ensure_audit_log(dry_run=True)
         if dedicated_user:
             bootstrap.create_dedicated_user(dry_run=True)
         sudoers.backup_existing_sudoers(dry_run=True)
@@ -673,6 +683,10 @@ def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
         bootstrap.assert_fleet_chain_locked()
         helper_path = bootstrap.install_helper()
         sidecar_path = bootstrap.write_helper_signature()  # NFR11, after the copy
+        # Helper runtime: the log dir the helper refuses to create itself (#3b), then the
+        # audit log 0640 root:admin so refusals are operator-readable without sudo (#2).
+        log_dir_path = bootstrap.ensure_log_dir()
+        audit_log_path = bootstrap.ensure_audit_log()
         user_info = bootstrap.create_dedicated_user() if dedicated_user else None  # NFR12, opt-in
         # FR8: record the pre-bootstrap sudoers state ONCE, BEFORE the helper-only fragment
         # overwrites it, so `--rollback` can restore exactly what was there (the rollback net).
@@ -683,6 +697,8 @@ def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
         return 2
     print(f"installed helper:    {helper_path}")
     print(f"wrote signature:     {sidecar_path}")
+    print(f"log dir:             {log_dir_path} (root:wheel 0755)")
+    print(f"audit log:           {audit_log_path} (root:admin 0640 — operator-readable)")
     if user_info is not None:
         state = "created" if user_info["created"] else "already present"
         print(f"dedicated user:      {user_info['user']} (uid {user_info.get('uid')}, {state})")

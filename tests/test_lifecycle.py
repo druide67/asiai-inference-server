@@ -624,3 +624,101 @@ def test_install_args_ollama_no_port_llamacpp_has_port_and_dash_flags() -> None:
     )
     assert any(a.startswith("--port=") for a in args_l)
     assert any(a.startswith("--program-arg=--") for a in args_l)  # dash-prefixed flag, joined
+
+
+# ---------------------------------------------------------------------------
+# S0 (2026-07-01 half-uninstall retex): pf preflight ordering + keep_firewall
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_preflight_fails_before_daemon_teardown() -> None:
+    """The retex bug: pf removal died AFTER the daemon was booted out. The preflight
+    must raise BEFORE the helper is invoked, leaving the engine untouched."""
+    from ais_core.firewall import FirewallError
+
+    m = load_manifest("llamacpp")
+    with (
+        patch("ais_core.lifecycle.firewall.anchor_present", return_value=True),
+        patch(
+            "ais_core.lifecycle.firewall.preflight_sudo",
+            side_effect=FirewallError("no TTY"),
+        ),
+        patch("ais_core.lifecycle.privhelper.run") as mock_helper,
+        patch("ais_core.lifecycle.firewall.remove_anchor") as mock_remove,
+        pytest.raises(FirewallError),
+    ):
+        lifecycle.uninstall(m)
+    mock_helper.assert_not_called()
+    mock_remove.assert_not_called()
+
+
+def test_uninstall_keep_firewall_skips_pf_entirely() -> None:
+    """keep_firewall=True (reinstall with an unchanged anchor): no preflight, no removal."""
+    m = load_manifest("llamacpp")
+    with (
+        patch("ais_core.lifecycle.firewall.preflight_sudo") as mock_pre,
+        patch("ais_core.lifecycle.privhelper.run") as mock_helper,
+        patch("ais_core.lifecycle.firewall.remove_anchor") as mock_remove,
+    ):
+        result = lifecycle.uninstall(m, keep_firewall=True)
+    mock_pre.assert_not_called()
+    mock_remove.assert_not_called()
+    mock_helper.assert_called_once()
+    assert result["firewall_kept"] is True
+    assert result["firewall_removed"] is False
+
+
+def test_uninstall_without_anchor_needs_no_preflight() -> None:
+    """No anchor trace on disk/pf.conf → the password-gated path is never consulted."""
+    m = load_manifest("llamacpp")
+    with (
+        patch("ais_core.lifecycle.firewall.anchor_present", return_value=False),
+        patch("ais_core.lifecycle.firewall.preflight_sudo") as mock_pre,
+        patch("ais_core.lifecycle.privhelper.run") as mock_helper,
+        patch("ais_core.lifecycle.firewall.remove_anchor") as mock_remove,
+    ):
+        lifecycle.uninstall(m)
+    mock_pre.assert_not_called()
+    mock_remove.assert_not_called()
+    mock_helper.assert_called_once()
+
+
+def test_install_preflight_fails_before_any_mutation_when_anchor_stale() -> None:
+    """enable_firewall + stale/missing anchor + no sudo → refuse before stop/install."""
+    from ais_core.firewall import FirewallError
+
+    m = load_manifest("llamacpp")
+    with (
+        patch("ais_core.manifest.BinarySpec.resolve", return_value="/opt/homebrew/bin/x"),
+        patch("ais_core.lifecycle.firewall.anchor_up_to_date", return_value=False),
+        patch(
+            "ais_core.lifecycle.firewall.preflight_sudo",
+            side_effect=FirewallError("no TTY"),
+        ),
+        patch("ais_core.lifecycle.stop_existing") as mock_stop,
+        patch("ais_core.lifecycle.privhelper.run") as mock_helper,
+        pytest.raises(FirewallError),
+    ):
+        lifecycle.install(m, user=getpass.getuser(), enable_firewall=True)
+    mock_stop.assert_not_called()
+    mock_helper.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# SA audit #1: client-side symlink resolution of model/template paths
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_user_file_resolves_absolute_symlink(tmp_path) -> None:
+    """The active.gguf convention: the symlink is resolved HERE so the helper (which
+    refuses a symlink final component by design) receives the pinned real target."""
+    real = tmp_path / "real-model.gguf"
+    real.write_bytes(b"gguf")
+    link = tmp_path / "active.gguf"
+    link.symlink_to(real)
+    assert lifecycle._resolve_user_file(str(link)) == str(real.resolve())
+
+
+def test_resolve_user_file_passes_tilde_through_untouched() -> None:
+    """Tilde paths expand against the DAEMON home inside the helper, never ours."""
+    assert lifecycle._resolve_user_file("~/llms/gguf/active.gguf") == "~/llms/gguf/active.gguf"

@@ -1505,3 +1505,45 @@ def test_is_admin_fail_closed_when_group_unresolvable(helper, monkeypatch):
     pw = pwd.struct_passwd(("x", "*", 460, 20, "x", "/var/empty", "/usr/bin/false"))
     with pytest.raises(mod._Refused, match="cannot resolve"):
         mod._is_admin(pw)
+
+
+# ---------------------------------------------------------------------------
+# SA audit #3: missing log dir is a CLEAR refusal, not an opaque internal error
+# ---------------------------------------------------------------------------
+
+
+def test_precreate_log_leaves_missing_dir_refused_with_bootstrap_hint(helper, tmp_path):
+    """ENOENT on the log dir → _Refused naming the dir and `aisctl bootstrap` (finding #3).
+    Used to bubble as a bare FileNotFoundError → generic EXIT_INTERNAL ('internal error')."""
+    mod, _ = helper
+    pw = pwd.getpwuid(os.getuid())
+    with pytest.raises(mod._Refused, match="aisctl bootstrap"):
+        mod._precreate_log_leaves("com.asiai.test", pw, log_dir=str(tmp_path / "absent"))
+
+
+def test_precreate_log_leaves_notadir_refused(helper, tmp_path):
+    """ENOTDIR (a FILE at the log-dir path) also gets the clear refusal, same narrow catch."""
+    mod, _ = helper
+    pw = pwd.getpwuid(os.getuid())
+    not_a_dir = tmp_path / "file"
+    not_a_dir.write_text("x")
+    with pytest.raises(mod._Refused, match="log dir missing"):
+        mod._precreate_log_leaves("com.asiai.test", pw, log_dir=str(not_a_dir / "leaf"))
+
+
+# ---------------------------------------------------------------------------
+# SA audit #2 (degraded path): _audit O_CREAT mode is 0640, never wider
+# ---------------------------------------------------------------------------
+
+
+def test_audit_creates_file_0640(helper):
+    """The degraded re-create (log deleted): group-readable 0640, no group/other write.
+    The canonical root:admin group is set by the bootstrap, not here (hot path never chowns)."""
+    mod, audit = helper
+    old_umask = os.umask(0o022)
+    try:
+        mod._audit("purge", "accepted")
+    finally:
+        os.umask(old_umask)
+    mode = stat.S_IMODE(os.stat(audit).st_mode)
+    assert mode == 0o640
