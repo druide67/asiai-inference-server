@@ -39,22 +39,16 @@ import urllib.request
 from typing import Any
 
 from asiai.fleet import config as fleet_config
+from asiai.fleet.command_spec import ALLOWED_COMMANDS, client_timeout
 
 _BROADCAST_MAX_WORKERS = 16
 
-# Mirror of ``asiai.web.routes.fleet.COMMAND_TIMEOUTS`` (LAN-facing).
-# Tighter than the upstream loopback timeouts so the client fails fast.
-COMMAND_TIMEOUTS: dict[str, float] = {
-    "purge": 20.0,
-    "load": 240.0,
-    "unload": 45.0,
-    "stop": 45.0,
-    "start": 90.0,
-    "restart": 90.0,
-    "install": 240.0,
-    "uninstall": 90.0,
-    "upgrade": 420.0,
-}
+# Command whitelist + timeouts come from the single shared source
+# (``asiai.fleet.command_spec``). This client is the OUTERMOST hop: it waits
+# ``client_timeout(cmd)`` = work budget + two hop margins, so it outlasts the
+# edge, which outlasts the loopback. Replaces the old "mirror ... tighter so the
+# client fails fast" map — that inversion (client 420 < loopback 600) was the SB
+# bug: the client abandoned a live upgrade the loopback was still running.
 
 _MAX_RESPONSE_BYTES = 1 * 1024 * 1024  # 1 MB cap on response body
 
@@ -128,7 +122,7 @@ def _do_push(
             "User-Agent": "aisctl-fleet-push/1",
         },
     )
-    eff_timeout = timeout if timeout is not None else COMMAND_TIMEOUTS.get(command, 60.0)
+    eff_timeout = timeout if timeout is not None else client_timeout(command)
     try:
         # nosec B310 — URL is built from validated fleet.json (http/https scheme enforced).
         with urllib.request.urlopen(req, timeout=eff_timeout) as resp:
@@ -187,8 +181,8 @@ def _cmd_push(args: argparse.Namespace) -> int:
 
     ``target`` may be a literal nickname, ``@all``, or ``@role:<value>``.
     """
-    if args.command not in COMMAND_TIMEOUTS:
-        allowed = ", ".join(sorted(COMMAND_TIMEOUTS))
+    if args.command not in ALLOWED_COMMANDS:
+        allowed = ", ".join(sorted(ALLOWED_COMMANDS))
         msg = f"unknown command '{args.command}' (allowed: {allowed})"
         if args.json:
             print(json.dumps({"ok": False, "error": msg}))
@@ -335,7 +329,7 @@ def add_fleet_subparser(subparsers: argparse._SubParsersAction) -> None:
     p_push.add_argument("nickname", help="Node nickname (from fleet.json).")
     p_push.add_argument(
         "command",
-        choices=sorted(COMMAND_TIMEOUTS),
+        choices=sorted(ALLOWED_COMMANDS),
         help="Write command to execute on the remote.",
     )
     p_push.add_argument("--engine", help="Engine name (required for everything except purge).")

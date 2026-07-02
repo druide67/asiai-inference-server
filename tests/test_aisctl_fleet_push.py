@@ -220,7 +220,7 @@ class TestArgparse:
         from ais_cli.__main__ import build_parser
 
         parser = build_parser()
-        for cmd in fleet_cli.COMMAND_TIMEOUTS:
+        for cmd in fleet_cli.ALLOWED_COMMANDS:
             args = parser.parse_args(["fleet", "push", "alpha", cmd])
             assert args.command == cmd
 
