@@ -697,7 +697,8 @@ def test_ensure_audit_log_non_tty_raises(monkeypatch):
 def test_ensure_audit_log_sequence_0640_root_admin(monkeypatch):
     """Finding #2: touch (never truncates), then root:admin 0640 — group READ without
     sudo, write stays root-only. Group ownership set here, once; the helper's hot
-    path never chowns."""
+    path never chowns. The I0 check targets the PARENT chain (LOG_DIR), not the leaf
+    whose admin group is intentional (see idempotence regression below)."""
     monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
     checks: list[str] = []
     monkeypatch.setattr(bootstrap_mod, "assert_chain_locked", lambda p: checks.append(p))
@@ -705,9 +706,50 @@ def test_ensure_audit_log_sequence_0640_root_admin(monkeypatch):
     monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda argv, **k: calls.append(argv))
 
     assert bootstrap_mod.ensure_audit_log() == bootstrap_mod.AUDIT_LOG_PATH
-    assert checks == [bootstrap_mod.AUDIT_LOG_PATH]
+    assert checks == [bootstrap_mod.LOG_DIR]
     assert calls == [
         ["sudo", "/usr/bin/touch", bootstrap_mod.AUDIT_LOG_PATH],
         ["sudo", "/usr/sbin/chown", "root:admin", bootstrap_mod.AUDIT_LOG_PATH],
         ["sudo", "/bin/chmod", "0640", bootstrap_mod.AUDIT_LOG_PATH],
     ]
+
+
+def test_ensure_audit_log_idempotent_over_existing_admin_leaf(monkeypatch):
+    """Regression (M5 cutover rehearsal, 2026-07-03): re-running ``bootstrap --install``
+    over an audit log that ALREADY exists as root:admin (gid 80, by design) must NOT be
+    rejected. ensure_audit_log verifies the parent chain (LOG_DIR, root:wheel), never the
+    leaf — otherwise the leaf's own admin group trips the root:wheel-only I0 check, making
+    bootstrap non-idempotent and breaking the rollback→reinstall recovery path. Uses the
+    REAL assert_chain_locked so a revert to checking the leaf would fail this test."""
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+
+    def fake_lstat(p):
+        # The exact leftover state: a prior bootstrap left the audit log root:ADMIN and
+        # rollback does not remove it. If the leaf were (wrongly) walked, gid 80 != 0 aborts.
+        if str(p) == bootstrap_mod.AUDIT_LOG_PATH:
+            return _st(0, 0o640, kind=stat.S_IFREG, gid=80)
+        return _st(0, 0o755)  # every parent-chain component is a root:wheel dir
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda argv, **k: calls.append(argv))
+
+    assert bootstrap_mod.ensure_audit_log() == bootstrap_mod.AUDIT_LOG_PATH  # must not raise
+    assert ["sudo", "/usr/sbin/chown", "root:admin", bootstrap_mod.AUDIT_LOG_PATH] in calls
+
+
+def test_ensure_audit_log_still_rejects_tampered_parent(monkeypatch):
+    """The fix must not weaken I0: a group-writable LOG_DIR parent still aborts before any write."""
+    monkeypatch.setattr(bootstrap_mod.sys.stdin, "isatty", lambda: True)
+
+    def fake_lstat(p):
+        if str(p) == bootstrap_mod.LOG_DIR:
+            return _st(0, 0o775)  # group-writable parent → must be caught
+        return _st(0, 0o755)
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    ran: list = []
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", lambda *a, **k: ran.append(a))
+    with pytest.raises(bootstrap_mod.BootstrapError, match="group/other-writable"):
+        bootstrap_mod.ensure_audit_log()
+    assert ran == []  # aborted before any sudo write

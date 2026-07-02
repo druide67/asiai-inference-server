@@ -362,7 +362,17 @@ def ensure_audit_log(*, dry_run: bool = False) -> str:
         raise BootstrapError(
             "aisctl bootstrap --install requires an interactive terminal (sudo password)."
         )
-    assert_chain_locked(AUDIT_LOG_PATH)
+    # I0: verify the PARENT chain (LOG_DIR), NOT the audit-log leaf. The leaf is
+    # deliberately root:ADMIN (gid 80, so an operator reads refusals without sudo) —
+    # checking it with assert_chain_locked, which requires root:wheel (gid 0) on every
+    # component, rejected the very group ownership this function sets. On a FRESH host the
+    # leaf is absent so the check returned early and install passed; on a RE-install over an
+    # existing audit log it failed, making `bootstrap --install` non-idempotent and breaking
+    # the rollback→reinstall recovery path (caught by the M5 cutover rehearsal, 2026-07-03).
+    # LOG_DIR is created + verified root:wheel non-group/other-writable by ensure_log_dir
+    # (which runs first), so a non-root party cannot plant or swap the leaf inside it — the
+    # parent-chain check is the real, sufficient guard; the leaf's admin group is by design.
+    assert_chain_locked(LOG_DIR)
     try:
         subprocess.run(["sudo", "/usr/bin/touch", AUDIT_LOG_PATH], check=True)
         subprocess.run(["sudo", "/usr/sbin/chown", "root:admin", AUDIT_LOG_PATH], check=True)
