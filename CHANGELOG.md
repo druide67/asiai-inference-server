@@ -6,6 +6,50 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0](https://github.com/druide67/asiai-inference-server/compare/v0.4.0...v0.5.0) — 2026-07-02
+
+Fleet groundwork + hardening on top of the privileged-helper model. This is
+the release whose packaged helper matches the security-reviewed sources —
+pin `>=0.5.0` when bootstrapping a new machine.
+
+### Added
+
+- The loopback server (`aisctl serve`) and the fleet client (`aisctl fleet
+  push`) now consume the shared `asiai.fleet.command_spec` (single source of
+  truth for the write-command whitelist and timeouts). The nesting invariant
+  `client > edge > loopback` holds by construction; the wrapped `upgrade`
+  passes an inner tool deadline so the operator sees the tool's real error,
+  not a timeout kill. Requires `asiai>=1.15.0`.
+
+### Fixed
+
+- **Firewall:** `aisctl reinstall`/`uninstall` no longer tears the daemon
+  down before discovering it cannot touch pf — a sudo/TTY preflight runs
+  first, and anchor installation is idempotent (no-op when already current).
+- **Bootstrap:** the helper's log directory is created root:wheel `0755` and
+  the audit log is pre-created `0640 root:admin`, so refusal entries are
+  operator-readable without sudo.
+- **Helper:** a missing log directory now yields a clear refusal pointing at
+  `aisctl bootstrap` instead of an opaque internal error; the audit log is
+  created group-readable.
+- **Lifecycle:** user-supplied model/template paths are resolved
+  (`realpath`) before reaching the helper, so a symlinked model file (e.g.
+  an `active.gguf` pointer) installs again.
+
+## [0.4.0](https://github.com/druide67/asiai-inference-server/compare/v0.3.2...v0.4.0) — 2026-06-24
+
+Privileged-helper release (retro-added entry).
+
+### Added
+
+- Root-owned privileged helper (`asiai-priv`) replacing wildcard sudoers
+  rules: closed action allowlist, plist content validation at load,
+  refuse-by-default, append-only audit log, `aisctl bootstrap
+  --install/--verify/--rollback` with a recorded pre-bootstrap sudoers
+  backup for lossless rollback.
+- Reserved-service installs (`asiai web` / `aisctl serve`) through the
+  helper with content-validated specs.
+
 ## [0.3.2](https://github.com/druide67/asiai-inference-server/compare/v0.3.1...v0.3.2) — 2026-06-13
 
 OSS hygiene. No functional change.

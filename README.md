@@ -56,8 +56,8 @@ became obvious:
   (auto-injected sub-CLI when `asiai-inference-server` is installed
   alongside `asiai`).
 - **Python stdlib only** for the core (consistent with `asiai`). The
-  package depends on `asiai>=1.8.0` (`auth.loopback` for fleet Phase 2).
-  Optional extras: `mcp` (for future write tools).
+  package depends on `asiai>=1.15.0` (`auth.loopback` + the shared
+  `fleet.command_spec`). Optional extras: `mcp` (for future write tools).
 - **macOS Apple Silicon only**. We rely on `launchctl`, `vm_stat`,
   `sudo purge`, `pfctl`, `iogpu.wired_limit_mb`.
 - **HTTP agent** for fleet operations (loopback `serve` + `fleet push`
