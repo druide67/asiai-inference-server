@@ -935,6 +935,36 @@ def _refuse_reserved(action: str, label: str) -> None:
         raise _Refused(f"{action} refused on reserved label: {label}")
 
 
+def _refuse_foreign_loaded(label: str) -> None:
+    """No-double-load, helper side (story 2.6): refuse to install over a label
+    already loaded from OUTSIDE ``/Library/LaunchDaemons`` — i.e. registered
+    through the SMAppService app bundle. The same label driven by two loaders
+    double-loads under launchd, and a helper install silently shadowing a
+    bundle registration would desynchronise the two. The remedy is deliberate:
+    ``aisctl bundle unregister`` first. (``aisctl bundle register`` enforces
+    the mirror-image refusal — legacy plist present/loaded — on its side.)
+
+    Not loaded -> fine. Loaded from our own ``/Library/LaunchDaemons/<label>.plist``
+    -> fine (normal reinstall over the legacy plist, unchanged behaviour).
+    Loaded from anywhere else, or from a source ``launchctl print`` does not
+    name -> refuse (I7, fail closed).
+    """
+    proc = _run([_LAUNCHCTL, "print", f"system/{label}"], check=False)
+    if proc.returncode != 0:
+        return  # not loaded in the system domain
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("path = "):
+            source = stripped[len("path = ") :]
+            if source == f"{_LAUNCH_DAEMONS_DIR}/{label}.plist":
+                return  # our own legacy plist — reinstall path
+            raise _Refused(
+                f"label {label} is loaded from {source!r} (SMAppService bundle?); "
+                "unregister it before installing through the helper"
+            )
+    raise _Refused(f"label {label} is loaded from an unidentified source; refusing double-install")
+
+
 def _install_daemon(args: argparse.Namespace) -> None:
     _require_root()
     label = _validate_label(args.label)
@@ -954,6 +984,9 @@ def _install_daemon(args: argparse.Namespace) -> None:
             program_args.extend([flag, _resolve_user_path(raw, user_pw.pw_dir)])
     if args.port is not None:
         program_args.extend(["--port", str(_validate_port(args.port))])
+    # All caller inputs are validated; last check before the first side effect is
+    # system STATE (story 2.6): never shadow a bundle-registered label.
+    _refuse_foreign_loaded(label)
     plist = _build_plist_dict(
         label=label,
         binary=binary,
@@ -1008,6 +1041,9 @@ def _install_reserved_service(args: argparse.Namespace) -> None:
     host = _validate_host(spec, args.host)
     port = _validate_port(args.port) if args.port is not None else spec["port_default"]
     program_args = _build_reserved_program_args(spec, host, port)
+    # All caller inputs are validated; last check before the first side effect is
+    # system STATE (story 2.6): same no-double-load stance as install-daemon.
+    _refuse_foreign_loaded(label)
     plist = _build_plist_dict(
         label=label,
         binary=binary,

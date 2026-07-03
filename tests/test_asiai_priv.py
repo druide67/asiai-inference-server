@@ -17,6 +17,7 @@ import plistlib
 import pwd
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -43,6 +44,19 @@ def _read_audit(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _not_loaded() -> SimpleNamespace:
+    """CompletedProcess-like: the story-2.6 pre-write state check (``launchctl
+    print system/<label>``) finds the label not loaded."""
+    return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+
+def _loaded_from(path: str) -> SimpleNamespace:
+    """CompletedProcess-like: the label is loaded, bootstrapped from ``path``
+    ('' -> loaded but launchctl names no source plist)."""
+    stdout = f"\tpath = {path}\n" if path else "\tstate = running\n"
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
 
 def _silence_syslog(mod, monkeypatch) -> list:
@@ -849,6 +863,8 @@ def test_install_daemon_order_and_bootstrap(helper, monkeypatch):
         seq.append("precreate")
 
     def fake_run(argv, *, check):
+        if argv[1] == "print":  # story-2.6 no-double-load state check (read-only)
+            return _not_loaded()
         seq.append(("run", tuple(argv)))
 
     monkeypatch.setattr(mod, "_write_plist_atomic", fake_write)
@@ -996,6 +1012,8 @@ def test_install_rolls_back_on_bootstrap_failure(helper, monkeypatch):
     monkeypatch.setattr(mod, "_unlink_plist", lambda label, **_k: unlinked.append(label))
 
     def fake_run(argv, *, check):
+        if argv[1] == "print":  # story-2.6 no-double-load state check (read-only)
+            return _not_loaded()
         if "bootstrap" in argv:
             raise mod.subprocess.CalledProcessError(1, argv)  # bootstrap fails
         # bootout (rollback) succeeds
@@ -1015,6 +1033,91 @@ def test_install_rolls_back_on_bootstrap_failure(helper, monkeypatch):
     assert rc == mod.EXIT_INTERNAL
     assert unlinked == ["com.asiai.aux-1"]  # rolled back
     assert not any(r.get("verdict") == "accepted" for r in _read_audit(audit))  # no false accept
+
+
+# --- no-double-load state check (story 2.6) ---------------------------------
+
+
+def _run_plain_install(mod, monkeypatch, *, print_result):
+    """install-daemon with all input validators mocked; ``launchctl print``
+    answers ``print_result``. Returns (rc, side_effects, audit_path)."""
+    monkeypatch.setattr(mod, "_require_root", lambda: None)
+    monkeypatch.setattr(mod, "_resolve_binary", lambda b: b)
+    monkeypatch.setattr(mod, "_resolve_user", lambda u: _real_pw())
+    effects: list = []
+    monkeypatch.setattr(
+        mod, "_write_plist_atomic", lambda label, xml, **_k: effects.append("write") or "/x"
+    )
+    monkeypatch.setattr(mod, "_precreate_log_leaves", lambda *a, **k: effects.append("precreate"))
+
+    def fake_run(argv, *, check):
+        if argv[1] == "print":
+            return print_result
+        effects.append(("run", tuple(argv)))
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    rc = mod.main(
+        [
+            "install-daemon",
+            "--label",
+            "com.asiai.aux-1",
+            "--binary",
+            "/opt/homebrew/bin/llama-server",
+        ]
+    )
+    return rc, effects
+
+
+def test_install_refused_when_label_bundle_loaded(helper, monkeypatch):
+    """Story 2.6: a label registered through the SMAppService bundle must not be
+    shadowed by a helper install — refuse before any write."""
+    mod, audit = helper
+    rc, effects = _run_plain_install(
+        mod,
+        monkeypatch,
+        print_result=_loaded_from(
+            "/Applications/Asiai.app/Contents/Library/LaunchDaemons/com.asiai.aux-1.plist"
+        ),
+    )
+    assert rc == mod.EXIT_REFUSED
+    assert not effects  # refused before the first side effect
+    assert any(r["verdict"] == "refused" for r in _read_audit(audit))
+
+
+def test_install_refused_when_loaded_source_unidentified(helper, monkeypatch):
+    """I7 fail-closed: loaded but launchctl names no source plist -> refuse."""
+    mod, audit = helper
+    rc, effects = _run_plain_install(mod, monkeypatch, print_result=_loaded_from(""))
+    assert rc == mod.EXIT_REFUSED
+    assert not effects
+    assert any(r["verdict"] == "refused" for r in _read_audit(audit))
+
+
+def test_install_proceeds_over_own_legacy_plist(helper, monkeypatch):
+    """Reinstall over our own /Library/LaunchDaemons plist stays allowed
+    (unchanged behaviour — the check only guards FOREIGN loaders)."""
+    mod, _ = helper
+    rc, effects = _run_plain_install(
+        mod,
+        monkeypatch,
+        print_result=_loaded_from("/Library/LaunchDaemons/com.asiai.aux-1.plist"),
+    )
+    assert rc == mod.EXIT_OK
+    assert "write" in effects  # install went through
+
+
+def test_install_reserved_refused_when_bundle_loaded(helper, monkeypatch):
+    """install-reserved-service takes the same no-double-load stance."""
+    mod, audit = helper
+    cap = _run_reserved_install(
+        mod,
+        monkeypatch,
+        "asiai-web",
+        loaded_from="/Applications/Asiai.app/Contents/Library/LaunchDaemons/com.asiai.web.plist",
+    )
+    assert cap["rc"] == mod.EXIT_REFUSED
+    assert "plist" not in cap  # refused before the write
+    assert any(r["verdict"] == "refused" for r in _read_audit(audit))
 
 
 # ===========================================================================
@@ -1190,7 +1293,13 @@ def test_resolve_reserved_runas_invoker_uses_sudo_uid(helper, monkeypatch):
 
 
 def _run_reserved_install(
-    mod, monkeypatch, service, extra_argv=(), *, binary="/Users/owner/.local/bin/asiai"
+    mod,
+    monkeypatch,
+    service,
+    extra_argv=(),
+    *,
+    binary="/Users/owner/.local/bin/asiai",
+    loaded_from=None,
 ):
     captured: dict = {}
     monkeypatch.setattr(mod, "_require_root", lambda: None)
@@ -1206,7 +1315,13 @@ def _run_reserved_install(
     monkeypatch.setattr(mod, "_write_plist_atomic", fake_write)
     monkeypatch.setattr(mod, "_precreate_log_leaves", lambda *a, **k: None)
     runs: list = []
-    monkeypatch.setattr(mod, "_run", lambda argv, *, check: runs.append(tuple(argv)))
+
+    def fake_run(argv, *, check):
+        if argv[1] == "print":  # story-2.6 no-double-load state check (read-only)
+            return _not_loaded() if loaded_from is None else _loaded_from(loaded_from)
+        runs.append(tuple(argv))
+
+    monkeypatch.setattr(mod, "_run", fake_run)
     captured["rc"] = mod.main(["install-reserved-service", "--service", service, *extra_argv])
     captured["runs"] = runs
     return captured
