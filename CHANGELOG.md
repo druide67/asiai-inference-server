@@ -6,6 +6,44 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0](https://github.com/druide67/asiai-inference-server/compare/v0.5.1...v0.6.0) — 2026-07-04
+
+SMAppService bundle: the fleet's daemons get ONE named, iconed entry in the
+macOS Background Items panel instead of a collection of unidentified Unix
+executables. The packaged helper changes (no-double-load guard) — re-run
+`aisctl bootstrap --install` per node after upgrading.
+
+### Added
+
+- **`asiai-launch`** — secure generic launcher the bundle's embedded
+  LaunchDaemons exec. Confused-deputy guards: the executable comes from a
+  hardcoded basename allowlist (never from the manifest), the per-service
+  active manifest must be owned by root or the daemon user and not
+  group/world-writable, and dynamic-linker env vars (`DYLD_*`/`LD_*`) are
+  refused outright (I3 parity with the helper).
+- **`aisctl bundle build`** — produces a signable `<App>.app` embedding one
+  LaunchDaemon per engine service (sealed-bundle constraint: nothing
+  machine- or tuning-specific inside; tuning lives in the active manifest).
+- **`aisctl bundle activate`** — publishes the active manifest a service
+  execs from (defaults to the preset recorded at install time).
+- **`aisctl bundle register/unregister/status`** — thin wrapper over the
+  bundle's SMAppService Swift helper.
+
+### Security
+
+- **No-double-load, machine-enforced on both sides** (story 2.6 acceptance
+  criteria): `bundle register` hard-refuses while a legacy
+  `/Library/LaunchDaemons` plist for a selected service still exists or its
+  label is still loaded outside an app bundle; the privileged helper's
+  `install-daemon`/`install-reserved-service` refuse a label already loaded
+  from an app bundle (fail closed on unidentified sources). Helper diff
+  security-gated line-by-line.
+- **`bundle register` refuses without a GUI session** (`--allow-headless`
+  opts out): the SMAppService approval toggle is GUI-only; a headless
+  register parks daemons in `requiresApproval`, silently not running.
+- **Bundle daemon user validated**: resolved via `getpwnam`, uid 0 or
+  unknown accounts refused — no `$USER`-or-root fallback.
+
 ## [0.5.1](https://github.com/druide67/asiai-inference-server/compare/v0.5.0...v0.5.1) — 2026-07-03
 
 Bootstrap idempotence fix — pin `>=0.5.1` for cutovers that rely on the
