@@ -6,6 +6,24 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1](https://github.com/druide67/asiai-inference-server/compare/v0.5.0...v0.5.1) — 2026-07-03
+
+Bootstrap idempotence fix — pin `>=0.5.1` for cutovers that rely on the
+re-run-to-converge recovery path.
+
+### Fixed
+
+- **Bootstrap:** re-running `aisctl bootstrap --install` over an existing
+  audit log no longer aborts with `chain component not root:wheel`. The
+  audit log is deliberately `root:admin` (operator-readable refusals) and
+  the I0 chain check now targets its parent directory — which the
+  bootstrap itself pins `root:wheel`, non-group-writable — instead of the
+  leaf. The invariant check itself is unchanged. Caught by a cutover
+  rollback→reinstall rehearsal; covered by a regression test that
+  exercises the real chain check.
+- Refreshed the stale committed `uv.lock` (still resolved `asiai==1.8.0`;
+  reproducible dev/CI now matches `pyproject`'s `asiai>=1.15.0`).
+
 ## [0.5.0](https://github.com/druide67/asiai-inference-server/compare/v0.4.0...v0.5.0) — 2026-07-02
 
 Fleet groundwork + hardening on top of the privileged-helper model. This is
