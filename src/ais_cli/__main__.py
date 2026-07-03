@@ -221,6 +221,79 @@ def build_parser() -> argparse.ArgumentParser:
     p_repair.add_argument("--json", action="store_true")
     p_repair.set_defaults(func=commands.cmd_repair)
 
+    # bundle (SMAppService — Background Items panel identity)
+    p_bundle = sub.add_parser(
+        "bundle",
+        help="Build/manage the SMAppService app bundle (icon + name in Background Items).",
+    )
+    bundle_sub = p_bundle.add_subparsers(dest="bundle_cmd", required=True, metavar="<action>")
+
+    pb_build = bundle_sub.add_parser(
+        "build", help="Build <App>.app embedding one LaunchDaemon per service."
+    )
+    pb_build.add_argument(
+        "--services",
+        required=True,
+        help="Comma-separated engine names to embed (e.g. llamacpp-aux-1,llamacpp-aux-2).",
+    )
+    pb_build.add_argument("--output", default="dist", help="Output directory (default: dist).")
+    pb_build.add_argument("--user", help="macOS user the daemons run as (default: $USER).")
+    pb_build.add_argument(
+        "--launcher",
+        help="Path to asiai-launch baked into the exec stub (default: resolved from PATH).",
+    )
+    pb_build.add_argument(
+        "--bundle-id",
+        default="dev.asiai.engines",
+        help="Reverse-DNS bundle identifier (forks: use your own namespace).",
+    )
+    pb_build.add_argument("--app-name", default="Asiai", help="App bundle name (<name>.app).")
+    pb_build.add_argument(
+        "--display-name",
+        default="asiai Inference Engines",
+        help="Label shown in the Background Items panel.",
+    )
+    pb_build.add_argument(
+        "--sign",
+        help="Code-signing identity (a locally-trusted cert; required for the "
+        "custom icon to show on macOS 26+).",
+    )
+    pb_build.add_argument("--json", action="store_true")
+    pb_build.set_defaults(func=commands.cmd_bundle_build)
+
+    pb_activate = bundle_sub.add_parser(
+        "activate",
+        help="Publish the active manifest asiai-launch reads for an engine.",
+    )
+    pb_activate.add_argument("engine")
+    pb_activate.add_argument(
+        "--preset",
+        help="Preset to activate (default: the preset recorded at install time).",
+    )
+    pb_activate.add_argument("--json", action="store_true")
+    pb_activate.set_defaults(func=commands.cmd_bundle_activate)
+
+    for action, help_text in [
+        ("register", "Register the bundle's daemons with SMAppService."),
+        ("unregister", "Unregister the bundle's daemons."),
+        ("status", "Show SMAppService status per service."),
+    ]:
+        pb = bundle_sub.add_parser(action, help=help_text)
+        pb.add_argument("service", nargs="?", help="Service name (default: all).")
+        pb.add_argument(
+            "--app",
+            default="/Applications/Asiai.app",
+            help="Installed bundle path (default: /Applications/Asiai.app).",
+        )
+        if action == "register":
+            pb.add_argument(
+                "--allow-headless",
+                action="store_true",
+                help="Register without a GUI session (daemons stay in requiresApproval "
+                "until the toggle is flipped in System Settings — know what you do).",
+            )
+        pb.set_defaults(func=commands.cmd_bundle_ctl, action=action)
+
     # bootstrap
     p_boot = sub.add_parser(
         "bootstrap",
