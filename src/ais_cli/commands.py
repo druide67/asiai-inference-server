@@ -800,9 +800,19 @@ def cmd_bundle_build(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # Never fall back to root: engines run as a regular account (I2). With no
+    # resolvable invoker the caller must say who — same doctrine as the helper.
+    user = args.user or os.environ.get("USER")
+    if not user:
+        print(
+            "cannot determine the daemon user ($USER unset); pass --user explicitly "
+            "(bundle daemons never run as root)",
+            file=sys.stderr,
+        )
+        return 2
     spec = bundle.BundleSpec(
         services=tuple(s.strip() for s in args.services.split(",") if s.strip()),
-        user=args.user or os.environ.get("USER") or "root",
+        user=user,
         launcher_path=launcher,
         bundle_id=args.bundle_id,
         app_name=args.app_name,
@@ -842,13 +852,86 @@ def cmd_bundle_activate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _daemon_loaded_from(label: str) -> str | None:
+    """Source plist path launchd loaded ``label`` from, or None if not loaded.
+
+    ``launchctl print system/<label>`` exits non-zero when the service is not
+    in the system domain; when loaded, its output carries a ``path = ...``
+    line naming the plist it was bootstrapped from (a bundle-registered
+    daemon shows a path inside ``<App>.app/Contents/Library/LaunchDaemons``).
+    Returns ``""`` when loaded but the source line is missing (treat as
+    unidentified — callers must fail closed).
+    """
+    proc = subprocess.run(
+        ["launchctl", "print", f"system/{label}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("path = "):
+            return stripped[len("path = ") :]
+    return ""
+
+
+def _gui_session_active() -> bool:
+    """True when running inside a GUI (Aqua) session.
+
+    SMAppService registration needs one: the one-time approval toggle lives in
+    System Settings, and a headless register parks the daemon in
+    ``requiresApproval`` forever — a silent fleet outage (ADR-002).
+    """
+    proc = subprocess.run(["launchctl", "managername"], capture_output=True, text=True, check=False)
+    return proc.returncode == 0 and proc.stdout.strip() == "Aqua"
+
+
+def _register_blockers(
+    names: list[str], *, daemons_dir: Path = Path("/Library/LaunchDaemons")
+) -> list[str]:
+    """Double-load guard: what forbids registering ``names`` with SMAppService.
+
+    A label driven by two loaders (legacy plist AND the bundle) double-loads
+    under launchd. Registration is blocked while, for any selected service,
+    the legacy plist still exists on disk OR the label is still loaded from
+    anywhere outside an app bundle (plist gone but never booted out, or an
+    unidentifiable source — fail closed). Already loaded FROM the bundle is
+    fine: re-registering is idempotent.
+    """
+    blockers: list[str] = []
+    for name in names:
+        try:
+            m = load_manifest(name)
+        except Exception:
+            continue
+        label = m.plist.name
+        legacy = daemons_dir / f"{label}.plist"
+        loaded_from = _daemon_loaded_from(label)
+        in_bundle = loaded_from is not None and "/Contents/Library/LaunchDaemons/" in loaded_from
+        if legacy.exists():
+            blockers.append(f"{name}: legacy plist {legacy} still installed")
+        elif loaded_from is not None and not in_bundle:
+            source = loaded_from or "an unidentified source"
+            blockers.append(f"{name}: label {label} still loaded from {source}")
+    return blockers
+
+
 def cmd_bundle_ctl(args: argparse.Namespace) -> int:
     """register / unregister / status — thin wrapper over <App>Register.
 
     The Swift helper inside the bundle owns the SMAppService calls; this
-    wrapper just locates it and forwards the action. On register, warns if a
-    legacy /Library/LaunchDaemons plist still exists for a selected service
-    (same label registered twice confuses launchd — uninstall first).
+    wrapper locates it and forwards the action. ``register`` is guarded
+    (story 2.6 acceptance criteria, both machine-enforced):
+
+    * HARD refusal while a legacy ``/Library/LaunchDaemons`` plist for a
+      selected service still exists or is still loaded — the same label
+      driven by two loaders double-loads under launchd. Remedy first:
+      ``aisctl uninstall <engine>``.
+    * HARD refusal outside a GUI session (unless ``--allow-headless``): the
+      approval toggle is GUI-only, so a headless register silently parks the
+      daemon in ``requiresApproval``.
     """
     app = Path(args.app).expanduser()
     register_bin = app / "Contents" / "MacOS" / f"{app.stem}Register"
@@ -857,20 +940,28 @@ def cmd_bundle_ctl(args: argparse.Namespace) -> int:
         return 2
 
     if args.action == "register":
+        if not _gui_session_active() and not getattr(args, "allow_headless", False):
+            print(
+                "register refused: no GUI session (launchctl managername != Aqua). "
+                "SMAppService needs the one-time approval toggle in System Settings; "
+                "registering headless would leave the daemons in requiresApproval, "
+                "silently not running. Register from the Mac's console (or Screen "
+                "Sharing) — or pass --allow-headless if you will approve via GUI later.",
+                file=sys.stderr,
+            )
+            return 2
         targets = [args.service] if args.service and args.service != "all" else None
-        for name in targets or list_manifests():
-            try:
-                m = load_manifest(name)
-            except Exception:
-                continue
-            legacy = Path(f"/Library/LaunchDaemons/{m.plist.name}.plist")
-            if legacy.exists():
-                print(
-                    f"warning: legacy plist {legacy} still installed; "
-                    f"run 'aisctl uninstall {name}' before registering the bundle "
-                    "(same label loaded twice)",
-                    file=sys.stderr,
-                )
+        blockers = _register_blockers(targets or list_manifests())
+        if blockers:
+            print(
+                "register refused — the same label driven by two loaders double-loads "
+                "under launchd (story 2.6):",
+                file=sys.stderr,
+            )
+            for b in blockers:
+                print(f"  - {b}", file=sys.stderr)
+            print("run 'aisctl uninstall <engine>' first, then register.", file=sys.stderr)
+            return 2
 
     argv = [str(register_bin), args.action]
     if args.service:

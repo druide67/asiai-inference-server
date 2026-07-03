@@ -25,6 +25,11 @@ aisctl bundle register            # or: aisctl bundle register llamacpp-aux-1
 aisctl bundle status
 ```
 
+`register` enforces both preconditions: it refuses while a legacy
+`/Library/LaunchDaemons` plist for a selected service still exists (or its
+label is still loaded), and it refuses outside a GUI session (the approval
+toggle is GUI-only; `--allow-headless` overrides if you will approve later).
+
 `status: requiresApproval` means registration worked and macOS is waiting for
 you to flip the toggle in Settings > Login Items & Extensions.
 

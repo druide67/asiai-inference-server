@@ -285,6 +285,13 @@ def build_parser() -> argparse.ArgumentParser:
             default="/Applications/Asiai.app",
             help="Installed bundle path (default: /Applications/Asiai.app).",
         )
+        if action == "register":
+            pb.add_argument(
+                "--allow-headless",
+                action="store_true",
+                help="Register without a GUI session (daemons stay in requiresApproval "
+                "until the toggle is flipped in System Settings — know what you do).",
+            )
         pb.set_defaults(func=commands.cmd_bundle_ctl, action=action)
 
     # bootstrap
