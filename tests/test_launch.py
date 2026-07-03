@@ -158,6 +158,17 @@ class TestBuildEnv:
         assert env["TURBO_KV"] == "turbo2"  # manifest overrides inherited
         assert env["GGML_METAL"] == "1"
 
+    @pytest.mark.parametrize("var", ["DYLD_INSERT_LIBRARIES=/tmp/evil.dylib", "LD_PRELOAD=/e.so"])
+    def test_dynamic_linker_vars_refused(self, tmp_path, var):
+        """I3 parity: the helper rejects DYLD_*/LD_* on the plist path; the
+        launcher path must refuse them too, not be the softer route."""
+        binary = _make_bin(tmp_path, "llama-server")
+        body = _manifest_toml(binary_path=binary)
+        body += f'\n[environment]\nvars = ["{var}"]\n'
+        mdir, _ = _write_manifest(tmp_path, "aux1", body)
+        with pytest.raises(LaunchSecurityError, match="dynamic-linker"):
+            resolve_launch("aux1", manifest_dir=mdir)
+
 
 # --- allowlist (binary path never trusted from the manifest) ------------------
 

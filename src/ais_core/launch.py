@@ -144,10 +144,20 @@ def build_env(manifest: EngineManifest) -> dict[str, str]:
     only carry static env (HOME/PATH). Per-machine tuning env lives in the
     active manifest and is applied here at exec time — mirroring what
     :func:`ais_core.plist.build_plist_dict` does on the legacy plist path.
+
+    Dynamic-linker variables (``DYLD_*``/``LD_*``) are refused outright: the
+    asiai-priv helper rejects them on the legacy plist path (invariant I3),
+    and the launcher path must not be the softer of the two. A manifest
+    carrying one is an anomaly worth surfacing, not silently dropping.
     """
     env = dict(os.environ)
     for entry in manifest.env_vars:
         key, _, value = entry.partition("=")
+        if key.startswith(("DYLD_", "LD_")):
+            raise LaunchSecurityError(
+                f"manifest env var {key!r} is a dynamic-linker variable; "
+                "refused (I3 parity with the asiai-priv helper)"
+            )
         env[key] = value
     return env
 
