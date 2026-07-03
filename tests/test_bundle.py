@@ -7,17 +7,25 @@ sips/iconutil) runs as a real end-to-end test when the toolchain is present
 
 from __future__ import annotations
 
+import argparse
+import os
 import plistlib
+import pwd
 import shutil
 import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from ais_core import bundle, install_state
 from ais_core.bundle import BundleError, BundleSpec
 from ais_core.manifest import load_manifest, manifest_source_path
+
+#: An account that actually exists on the test machine (build_bundle resolves
+#: the daemon user via getpwnam and refuses uid 0 / unknown accounts).
+_REAL_USER = pwd.getpwuid(os.getuid()).pw_name
 
 _SPEC = BundleSpec(
     services=("llamacpp-aux-1", "llamacpp-aux-2"),
@@ -87,6 +95,23 @@ class TestServiceValidation:
             bundle.build_bundle(spec, tmp_path)
 
 
+class TestDaemonUserValidation:
+    """I2 parity (story 2.6): embedded plists never carry root or a ghost account."""
+
+    def test_unknown_user_refused(self, tmp_path: Path) -> None:
+        spec = BundleSpec(
+            services=("llamacpp-aux-1",), user="no-such-acct", launcher_path="/bin/true"
+        )
+        with pytest.raises(BundleError, match="unknown daemon user"):
+            bundle.build_bundle(spec, tmp_path)
+
+    def test_root_refused(self, tmp_path: Path) -> None:
+        """Decided on pw_uid (getpwnam is case-insensitive on macOS), not the string."""
+        spec = BundleSpec(services=("llamacpp-aux-1",), user="root", launcher_path="/bin/true")
+        with pytest.raises(BundleError, match="never run as root"):
+            bundle.build_bundle(spec, tmp_path)
+
+
 # --- active manifests ----------------------------------------------------------
 
 
@@ -144,8 +169,135 @@ def test_bundle_subcommands_parse() -> None:
     parser.parse_args(["bundle", "build", "--services", "llamacpp-aux-1", "--sign", "X"])
     parser.parse_args(["bundle", "activate", "llamacpp-aux-1", "--preset", "p"])
     parser.parse_args(["bundle", "register", "llamacpp-aux-1"])
+    parser.parse_args(["bundle", "register", "--allow-headless"])
     parser.parse_args(["bundle", "unregister"])
     parser.parse_args(["bundle", "status"])
+
+
+# --- register guards (story 2.6: hard refusals, machine-enforced) ---------------
+
+
+def _fake_app(tmp_path: Path) -> Path:
+    """A minimal installed bundle: just the Register helper the wrapper locates."""
+    macos = tmp_path / "Asiai.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "AsiaiRegister").write_text("#!/bin/sh\n")
+    return tmp_path / "Asiai.app"
+
+
+def _ctl_args(app: Path, action: str = "register", **kw) -> argparse.Namespace:
+    return argparse.Namespace(
+        app=str(app),
+        action=action,
+        service=kw.get("service"),
+        allow_headless=kw.get("allow_headless", False),
+    )
+
+
+class TestRegisterGuards:
+    def test_headless_register_refused(self, tmp_path, monkeypatch, capsys) -> None:
+        from ais_cli import commands
+
+        monkeypatch.setattr(commands, "_gui_session_active", lambda: False)
+        rc = commands.cmd_bundle_ctl(_ctl_args(_fake_app(tmp_path)))
+        assert rc == 2
+        assert "no GUI session" in capsys.readouterr().err
+
+    def test_allow_headless_bypasses_gui_gate(self, tmp_path, monkeypatch) -> None:
+        from ais_cli import commands
+
+        monkeypatch.setattr(commands, "_gui_session_active", lambda: False)
+        monkeypatch.setattr(commands, "_register_blockers", lambda names: [])
+        forwarded: dict = {}
+
+        def fake_run(argv, check):
+            forwarded["argv"] = argv
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(commands.subprocess, "run", fake_run)
+        rc = commands.cmd_bundle_ctl(_ctl_args(_fake_app(tmp_path), allow_headless=True))
+        assert rc == 0
+        assert forwarded["argv"][1] == "register"
+
+    def test_blockers_hard_refuse(self, tmp_path, monkeypatch, capsys) -> None:
+        """AC story 2.6: legacy plist present -> REFUSAL (was a warning), and the
+        Swift register helper is never invoked."""
+        from ais_cli import commands
+
+        monkeypatch.setattr(commands, "_gui_session_active", lambda: True)
+        monkeypatch.setattr(
+            commands,
+            "_register_blockers",
+            lambda names: ["aux-1: legacy plist /Library/LaunchDaemons/x.plist still installed"],
+        )
+        invoked: list = []
+        monkeypatch.setattr(commands.subprocess, "run", lambda argv, check: invoked.append(argv))
+        rc = commands.cmd_bundle_ctl(_ctl_args(_fake_app(tmp_path)))
+        assert rc == 2
+        assert not invoked  # hard refusal: nothing forwarded to SMAppService
+        err = capsys.readouterr().err
+        assert "register refused" in err
+        assert "aisctl uninstall" in err
+
+
+class TestRegisterBlockers:
+    def _manifest(self, label: str):
+        return SimpleNamespace(plist=SimpleNamespace(name=label))
+
+    def test_legacy_plist_blocks(self, tmp_path, monkeypatch) -> None:
+        from ais_cli import commands
+
+        label = "com.asiai.zz-guard"
+        (tmp_path / f"{label}.plist").write_text("x")
+        monkeypatch.setattr(commands, "load_manifest", lambda n: self._manifest(label))
+        monkeypatch.setattr(commands, "_daemon_loaded_from", lambda lb: None)
+        blockers = commands._register_blockers(["zz-guard"], daemons_dir=tmp_path)
+        assert blockers and "legacy plist" in blockers[0]
+
+    def test_loaded_outside_bundle_blocks(self, tmp_path, monkeypatch) -> None:
+        """Plist file already removed but the label never booted out -> still blocked."""
+        from ais_cli import commands
+
+        label = "com.asiai.zz-guard"
+        monkeypatch.setattr(commands, "load_manifest", lambda n: self._manifest(label))
+        monkeypatch.setattr(
+            commands, "_daemon_loaded_from", lambda lb: f"/Library/LaunchDaemons/{lb}.plist"
+        )
+        blockers = commands._register_blockers(["zz-guard"], daemons_dir=tmp_path)
+        assert blockers and "still loaded" in blockers[0]
+
+    def test_unidentified_source_blocks(self, tmp_path, monkeypatch) -> None:
+        """Fail closed: loaded but launchctl names no source."""
+        from ais_cli import commands
+
+        monkeypatch.setattr(
+            commands, "load_manifest", lambda n: self._manifest("com.asiai.zz-guard")
+        )
+        monkeypatch.setattr(commands, "_daemon_loaded_from", lambda lb: "")
+        blockers = commands._register_blockers(["zz-guard"], daemons_dir=tmp_path)
+        assert blockers and "unidentified source" in blockers[0]
+
+    def test_already_bundle_loaded_is_fine(self, tmp_path, monkeypatch) -> None:
+        """Re-registering an already bundle-loaded label is idempotent, not blocked."""
+        from ais_cli import commands
+
+        label = "com.asiai.zz-guard"
+        monkeypatch.setattr(commands, "load_manifest", lambda n: self._manifest(label))
+        monkeypatch.setattr(
+            commands,
+            "_daemon_loaded_from",
+            lambda lb: f"/Applications/Asiai.app/Contents/Library/LaunchDaemons/{lb}.plist",
+        )
+        assert commands._register_blockers(["zz-guard"], daemons_dir=tmp_path) == []
+
+    def test_not_loaded_no_legacy_is_fine(self, tmp_path, monkeypatch) -> None:
+        from ais_cli import commands
+
+        monkeypatch.setattr(
+            commands, "load_manifest", lambda n: self._manifest("com.asiai.zz-guard")
+        )
+        monkeypatch.setattr(commands, "_daemon_loaded_from", lambda lb: None)
+        assert commands._register_blockers(["zz-guard"], daemons_dir=tmp_path) == []
 
 
 # --- end-to-end build (real toolchain, present on macOS CI) ---------------------
@@ -161,7 +313,7 @@ class TestBuildEndToEnd:
         launcher.write_text("#!/bin/sh\n")
         spec = BundleSpec(
             services=("llamacpp-aux-1",),
-            user="enginerunner",
+            user=_REAL_USER,  # build_bundle resolves via getpwnam (non-root, must exist)
             launcher_path=str(launcher),
             version="9.9.9",
         )

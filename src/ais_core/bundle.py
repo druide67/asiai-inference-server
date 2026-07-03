@@ -40,8 +40,10 @@ bundle unsigned — fully functional, generic icon.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import plistlib
+import pwd
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -261,6 +263,22 @@ def sign_bundle(app_dir: Path, identity: str) -> None:
     )
 
 
+def _resolve_daemon_user(user: str) -> pwd.struct_passwd:
+    """I2 parity: the embedded plists' ``UserName`` must be an existing non-root
+    account. Decided on the resolved object (``pw_uid``), never the string —
+    ``getpwnam`` is case-insensitive on macOS, so ``"Root"`` resolves to uid 0.
+    """
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        raise BundleError(f"unknown daemon user {user!r}") from None
+    if pw.pw_uid == 0:
+        raise BundleError(
+            f"daemon user {user!r} resolves to uid 0; bundle daemons never run as root"
+        )
+    return pw
+
+
 def build_bundle(
     spec: BundleSpec,
     output_dir: Path,
@@ -270,6 +288,10 @@ def build_bundle(
     """Build ``<App>.app`` under ``output_dir``. Returns a summary dict."""
     if not spec.services:
         raise BundleError("no services given; pass at least one engine name")
+    # Canonicalise the run-as account up front (existing, non-root) so every
+    # embedded plist carries the canonical pw_name.
+    pw = _resolve_daemon_user(spec.user)
+    spec = dataclasses.replace(spec, user=pw.pw_name)
     manifests = [_load_service_manifest(s) for s in spec.services]
 
     data_dir = _bundle_data_dir()
