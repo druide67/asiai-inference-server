@@ -183,10 +183,27 @@ def test_process_alive_false_when_pgrep_returns_nonzero() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_current_state_not_installed_when_plist_absent(tmp_path) -> None:
+def test_current_state_not_installed_when_plist_absent_and_unknown_to_launchd(tmp_path) -> None:
+    """No legacy plist AND launchd never heard of the label = genuinely absent."""
     m = load_manifest("ollama")
-    with patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "missing.plist")):
+    with (
+        patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "missing.plist")),
+        patch("ais_core.lifecycle.is_loaded", return_value=False),
+    ):
         assert lifecycle.current_state(m) == EngineState.NOT_INSTALLED
+
+
+def test_current_state_running_when_bundle_managed_without_legacy_plist(tmp_path) -> None:
+    """Bundle-managed engine (SMAppService): no /Library/LaunchDaemons plist,
+    but launchd knows the label and health answers -> RUNNING, not
+    NOT_INSTALLED (deploy-M5 finding: the migrated 27B showed not_installed)."""
+    m = load_manifest("ollama")
+    with (
+        patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "missing.plist")),
+        patch("ais_core.lifecycle.is_loaded", return_value=True),
+        patch("ais_core.lifecycle.probe_health", return_value=True),
+    ):
+        assert lifecycle.current_state(m) == EngineState.RUNNING
 
 
 # ---------------------------------------------------------------------------

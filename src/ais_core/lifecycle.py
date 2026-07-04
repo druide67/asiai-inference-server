@@ -551,7 +551,14 @@ def probe_state(
     keep RUNNING — only the unambiguous zombie marker may raise the alarm.
     The verdict is ``None`` when ``deep`` is False or the engine isn't RUNNING.
     """
-    if not Path(plist.plist_path(manifest)).exists():
+    # No legacy /Library/LaunchDaemons plist — but the daemon may be
+    # bundle-managed: registered via SMAppService, its plist lives inside the
+    # signed .app and launchd loads it from there. launchctl still knows the
+    # label, so fall through to the normal cascade rather than falsely
+    # reporting NOT_INSTALLED (a bundle-migrated engine would show
+    # "not_installed" while it is happily serving). Only when launchd has
+    # never heard of the label is it genuinely not installed.
+    if not Path(plist.plist_path(manifest)).exists() and not is_loaded(manifest):
         return EngineState.NOT_INSTALLED, None
 
     if probe_health(manifest):
