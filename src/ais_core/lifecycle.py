@@ -550,6 +550,21 @@ def is_loaded(manifest: EngineManifest) -> bool:
     return proc.returncode == 0
 
 
+def bundle_provisioned(manifest: EngineManifest) -> bool:
+    """True iff an installed app bundle embeds a LaunchDaemon for this label.
+
+    A bundle-managed service (SMAppService, story 2.6) keeps NO plist under
+    ``/Library/LaunchDaemons`` and its label is UNLOADED while dormant —
+    both provisioning traces the legacy checks rely on. The embedded plist
+    inside the installed ``.app`` is the remaining evidence. The app path
+    follows the build default; forks that renamed the app at build time
+    point ``ASIAI_BUNDLE_APP`` at theirs.
+    """
+    app = Path(os.environ.get("ASIAI_BUNDLE_APP", "/Applications/Asiai.app"))
+    embedded = app / "Contents" / "Library" / "LaunchDaemons" / f"{manifest.plist.name}.plist"
+    return embedded.is_file()
+
+
 def probe_state(
     manifest: EngineManifest, *, deep: bool = False
 ) -> tuple[EngineState, GenVerdict | None]:
@@ -585,13 +600,19 @@ def probe_state(
             return EngineState.RUNNING, verdict
         return EngineState.RUNNING, None
 
-    # Nothing provisioned for this label (no legacy plist, launchd has never
-    # heard of it — a bundle-managed label would still be loaded). Split by
-    # what's on disk: the software being present without a provisioned
-    # service (ollama installed via brew but never ``aisctl install``ed) is
-    # AVAILABLE, not "not installed" — an operator reading the fleet must
-    # not be told to install something that is already there.
-    if not Path(plist.plist_path(manifest)).exists() and not is_loaded(manifest):
+    # Nothing provisioned for this label: no legacy plist, launchd has never
+    # heard of it, and no installed app bundle embeds it (a DORMANT
+    # bundle-managed label is unloaded — only its embedded plist remains as
+    # provisioning evidence). Split by what's on disk: the software being
+    # present without a provisioned service (ollama installed via brew but
+    # never ``aisctl install``ed) is AVAILABLE, not "not installed" — an
+    # operator reading the fleet must not be told to install something that
+    # is already there.
+    if (
+        not Path(plist.plist_path(manifest)).exists()
+        and not is_loaded(manifest)
+        and not bundle_provisioned(manifest)
+    ):
         if manifest.binary.resolve() is not None:
             return EngineState.AVAILABLE, None
         return EngineState.NOT_INSTALLED, None
@@ -613,32 +634,65 @@ def current_state(manifest: EngineManifest, *, deep: bool = False) -> EngineStat
     return probe_state(manifest, deep=deep)[0]
 
 
+def _model_display_name(path: str) -> str | None:
+    """Filename an operator recognizes behind a model path.
+
+    Preset-managed engines load a stable symlink (active.gguf); the
+    operator needs the real filename behind it. Local resolve is
+    legitimate: this code runs on the engine's own host.
+    """
+    try:
+        if os.path.islink(path):
+            path = os.path.realpath(path)
+    except OSError:
+        pass
+    return os.path.basename(path) or None
+
+
+def _active_manifest_model(manifest: EngineManifest) -> str | None:
+    """Model the ACTIVE manifest (what ``asiai-launch`` would exec) declares.
+
+    Bundle-managed services have no legacy plist to read argv from; their
+    tuning lives in the active manifest published by ``aisctl bundle
+    activate``. Best-effort: no active manifest, or one without a
+    ``model_path`` (wrapper engines never get activated), yields None.
+    """
+    import tomllib
+
+    from ais_core.launch import _active_manifest_dir
+
+    active = _active_manifest_dir() / f"{manifest.name}.toml"
+    try:
+        with open(active, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    binary = data.get("binary")
+    raw = binary.get("model_path") if isinstance(binary, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    return _model_display_name(os.path.expanduser(raw))
+
+
 def installed_model(manifest: EngineManifest) -> str | None:
-    """Basename of the ``--model`` argument in the INSTALLED plist, or None.
+    """Basename of the model this provisioned engine would serve, or None.
 
     Answers "what would this engine serve if started" for a provisioned but
     non-running engine — the manifest itself carries no model (that is the
-    preset's job), but the generated plist does. Best-effort: unreadable or
-    model-less plists (wrapper engines) simply yield None.
+    preset's job). Sources, in order: the ``--model`` argument of the
+    INSTALLED legacy plist, then the active manifest for bundle-managed
+    services (no legacy plist on disk). Best-effort: unreadable or
+    model-less sources (wrapper engines) simply yield None.
     """
     try:
         with open(plist.plist_path(manifest), "rb") as f:
             data = plistlib.load(f)
     except (OSError, plistlib.InvalidFileException):
-        return None
+        return _active_manifest_model(manifest)
     args = data.get("ProgramArguments")
     if not isinstance(args, list):
         return None
     for i, arg in enumerate(args):
         if arg == "--model" and i + 1 < len(args):
-            path = str(args[i + 1])
-            # Preset-managed engines load a stable symlink (active.gguf);
-            # the operator needs the real filename behind it. Local resolve
-            # is legitimate: this code runs on the engine's own host.
-            try:
-                if os.path.islink(path):
-                    path = os.path.realpath(path)
-            except OSError:
-                pass
-            return os.path.basename(path) or None
+            return _model_display_name(str(args[i + 1]))
     return None
