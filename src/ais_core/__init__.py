@@ -5,4 +5,4 @@ stop, unload, and memory reclamation. It is intentionally stdlib-only and
 macOS Apple Silicon only.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
