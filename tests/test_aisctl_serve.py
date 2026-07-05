@@ -277,3 +277,102 @@ class TestLoopbackOnly:
         s.close()
         # Assert the address the live server actually bound, not a constant.
         assert server["server"].server_address[0] == "127.0.0.1"
+
+
+class TestEnginesState:
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        # Module-level cache: isolate every test from the previous one.
+        serve._state_cache["ts"] = 0.0
+        serve._state_cache["payload"] = None
+        yield
+        serve._state_cache["ts"] = 0.0
+        serve._state_cache["payload"] = None
+
+    def _url(self, server) -> str:
+        return f"http://127.0.0.1:{server['port']}/internal/v1/engines-state"
+
+    def test_requires_auth_unlike_health(self, server):
+        # States disclose manifest names/ports — same Bearer gate as writes.
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(self._url(server))
+        assert exc.value.code == 401
+
+    def test_returns_probed_states(self, server, monkeypatch):
+        payload = {
+            "engines": [
+                {
+                    "name": "llamacpp-aux-1",
+                    "display": "llama.cpp aux 1",
+                    "port": 8090,
+                    "state": "running",
+                },
+                {"name": "ollama", "display": "Ollama", "port": 11434, "state": "stopped"},
+            ],
+            "ts": 1700000000,
+        }
+        monkeypatch.setattr(serve, "_collect_engines_state", lambda: payload)
+        resp = _get(
+            self._url(server),
+            headers={"Authorization": f"Bearer {server['token']}"},
+        )
+        body = json.loads(resp.read())
+        assert body == payload
+
+    def test_cache_serves_second_call(self, server, monkeypatch):
+        calls = {"n": 0}
+
+        def fake_collect():
+            calls["n"] += 1
+            return {"engines": [], "ts": calls["n"]}
+
+        monkeypatch.setattr(serve, "_collect_engines_state", fake_collect)
+        headers = {"Authorization": f"Bearer {server['token']}"}
+        first = json.loads(_get(self._url(server), headers=headers).read())
+        second = json.loads(_get(self._url(server), headers=headers).read())
+        assert first == second
+        assert calls["n"] == 1
+
+    def test_collection_failure_is_json_500(self, server, monkeypatch):
+        def boom():
+            raise RuntimeError("manifest dir exploded")
+
+        monkeypatch.setattr(serve, "_collect_engines_state", boom)
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(
+                self._url(server),
+                headers={"Authorization": f"Bearer {server['token']}"},
+            )
+        assert exc.value.code == 500
+        assert json.loads(exc.value.read())["error"] == "engines_state_failed"
+
+    def test_collect_skips_broken_manifest(self, monkeypatch):
+        # One corrupt manifest must not hide the healthy ones.
+        from ais_cli import serve as serve_mod
+
+        class FakeManifest:
+            def __init__(self, name, port):
+                self.name = name
+                self.display = name.upper()
+
+                class _Net:
+                    pass
+
+                self.network = _Net()
+                self.network.port = port
+
+        def fake_load(name):
+            if name == "broken":
+                raise ValueError("bad toml")
+            return FakeManifest(name, 8090)
+
+        import ais_core.lifecycle as lifecycle_mod
+        import ais_core.manifest as manifest_mod
+
+        monkeypatch.setattr(manifest_mod, "list_manifests", lambda: ["good", "broken"])
+        monkeypatch.setattr(manifest_mod, "load_manifest", fake_load)
+        monkeypatch.setattr(lifecycle_mod, "probe_state", lambda m, deep=False: ("running", None))
+        result = serve_mod._collect_engines_state()
+        names = [e["name"] for e in result["engines"]]
+        assert names == ["good"]
+        assert result["engines"][0]["state"] == "running"
