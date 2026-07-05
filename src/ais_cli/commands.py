@@ -19,6 +19,7 @@ import argparse
 import dataclasses
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -877,6 +878,51 @@ def _daemon_loaded_from(label: str) -> str | None:
     return ""
 
 
+def _is_bundle_source(loaded_from: str | None) -> bool:
+    """True iff ``loaded_from`` (from :func:`_daemon_loaded_from`) is an
+    SMAppService bundle load, in either form launchctl reports it:
+
+    * a plist path INSIDE an app bundle (``.../Contents/Library/LaunchDaemons/``);
+    * the smd attribution launchctl prints for a registered daemon,
+      ``(submitted by smd.<pid>)`` — no filesystem path at all.
+
+    Recognising the smd form is what makes a re-register idempotent: without
+    it a label already loaded from the bundle looks like a foreign loader and
+    the register guard falsely blocks (deploy-M5 finding, 0.6.1).
+    """
+    if not loaded_from:
+        return False
+    return "/Contents/Library/LaunchDaemons/" in loaded_from or loaded_from.startswith(
+        "(submitted by smd"
+    )
+
+
+def _bundle_service_names(app: Path) -> list[str]:
+    """Engine service names embedded in an installed bundle.
+
+    Each embedded LaunchDaemon runs ``<stub> <service>`` — the service name is
+    ``ProgramArguments[1]``. This is the authoritative "what this bundle
+    manages" list; using it (instead of every manifest on disk) keeps the
+    register guard from tripping on wrapper/legacy engines that are not, and
+    cannot be, in the bundle (deploy-M5 finding: mlx-lm, a wrapper engine,
+    blocked a whole-bundle register).
+    """
+    daemons = app / "Contents" / "Library" / "LaunchDaemons"
+    services: list[str] = []
+    if not daemons.is_dir():
+        return services
+    for pl in sorted(daemons.glob("*.plist")):
+        try:
+            with pl.open("rb") as fh:
+                data = plistlib.load(fh)
+        except (OSError, ValueError):
+            continue
+        argv = data.get("ProgramArguments")
+        if isinstance(argv, list) and len(argv) >= 2 and isinstance(argv[1], str):
+            services.append(argv[1])
+    return services
+
+
 def _gui_session_active() -> bool:
     """True when running inside a GUI (Aqua) session.
 
@@ -909,10 +955,9 @@ def _register_blockers(
         label = m.plist.name
         legacy = daemons_dir / f"{label}.plist"
         loaded_from = _daemon_loaded_from(label)
-        in_bundle = loaded_from is not None and "/Contents/Library/LaunchDaemons/" in loaded_from
         if legacy.exists():
             blockers.append(f"{name}: legacy plist {legacy} still installed")
-        elif loaded_from is not None and not in_bundle:
+        elif loaded_from is not None and not _is_bundle_source(loaded_from):
             source = loaded_from or "an unidentified source"
             blockers.append(f"{name}: label {label} still loaded from {source}")
     return blockers
@@ -950,8 +995,14 @@ def cmd_bundle_ctl(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        targets = [args.service] if args.service and args.service != "all" else None
-        blockers = _register_blockers(targets or list_manifests())
+        # Scope the guard to what the bundle actually manages. A whole-bundle
+        # register ("all") must not be blocked by an unrelated wrapper/legacy
+        # engine that isn't — and can't be — in the bundle (deploy-M5 finding).
+        if args.service and args.service != "all":
+            targets = [args.service]
+        else:
+            targets = _bundle_service_names(app) or list_manifests()
+        blockers = _register_blockers(targets)
         if blockers:
             print(
                 "register refused — the same label driven by two loaders double-loads "

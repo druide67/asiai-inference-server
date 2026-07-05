@@ -299,6 +299,75 @@ class TestRegisterBlockers:
         monkeypatch.setattr(commands, "_daemon_loaded_from", lambda lb: None)
         assert commands._register_blockers(["zz-guard"], daemons_dir=tmp_path) == []
 
+    def test_smd_submitted_is_bundle_loaded_not_blocked(self, tmp_path, monkeypatch) -> None:
+        """0.6.1 finding 2: launchctl reports a bundle-registered daemon as
+        'path = (submitted by smd.<pid>)', with no filesystem path. That must
+        read as bundle-loaded (idempotent re-register), not a foreign loader."""
+        from ais_cli import commands
+
+        label = "com.asiai.zz-guard"
+        monkeypatch.setattr(commands, "load_manifest", lambda n: self._manifest(label))
+        monkeypatch.setattr(commands, "_daemon_loaded_from", lambda lb: "(submitted by smd.347)")
+        assert commands._register_blockers(["zz-guard"], daemons_dir=tmp_path) == []
+
+
+class TestBundleSourceRecognition:
+    """0.6.1 finding 2: _is_bundle_source accepts both forms launchctl uses."""
+
+    def test_in_bundle_path(self) -> None:
+        from ais_cli import commands
+
+        assert commands._is_bundle_source(
+            "/Applications/Asiai.app/Contents/Library/LaunchDaemons/com.asiai.x.plist"
+        )
+
+    def test_smd_attribution(self) -> None:
+        from ais_cli import commands
+
+        assert commands._is_bundle_source("(submitted by smd.42)")
+
+    def test_legacy_path_is_not_bundle(self) -> None:
+        from ais_cli import commands
+
+        assert not commands._is_bundle_source("/Library/LaunchDaemons/com.asiai.x.plist")
+
+    def test_none_and_empty_are_not_bundle(self) -> None:
+        from ais_cli import commands
+
+        assert not commands._is_bundle_source(None)
+        assert not commands._is_bundle_source("")
+
+
+class TestBundleServiceNames:
+    """0.6.1 finding 1: whole-bundle register scopes to the bundle's own
+    services, not every manifest on disk (a wrapper engine blocked it)."""
+
+    def _make_bundle(self, tmp_path, services: list[str]) -> Path:
+        daemons = tmp_path / "Asiai.app" / "Contents" / "Library" / "LaunchDaemons"
+        daemons.mkdir(parents=True)
+        for svc in services:
+            plist_data = {
+                "Label": f"com.asiai.{svc}",
+                "ProgramArguments": [
+                    "/Applications/Asiai.app/Contents/MacOS/Asiai",
+                    svc,
+                ],
+            }
+            with (daemons / f"com.asiai.{svc}.plist").open("wb") as fh:
+                plistlib.dump(plist_data, fh)
+        return tmp_path / "Asiai.app"
+
+    def test_reads_embedded_service_names(self, tmp_path) -> None:
+        from ais_cli import commands
+
+        app = self._make_bundle(tmp_path, ["llamacpp", "ollama"])
+        assert sorted(commands._bundle_service_names(app)) == ["llamacpp", "ollama"]
+
+    def test_missing_daemons_dir_returns_empty(self, tmp_path) -> None:
+        from ais_cli import commands
+
+        assert commands._bundle_service_names(tmp_path / "Nope.app") == []
+
 
 # --- end-to-end build (real toolchain, present on macOS CI) ---------------------
 
