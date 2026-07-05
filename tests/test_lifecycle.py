@@ -815,6 +815,23 @@ def test_installed_model_reads_plist_program_arguments(tmp_path) -> None:
         assert lifecycle.installed_model(m) == "Qwen3-27B-Q8.gguf"
 
 
+def test_installed_model_resolves_preset_symlink(tmp_path) -> None:
+    """A preset's stable active.gguf symlink must resolve to the real file:
+    'preset: active.gguf' tells the operator nothing."""
+    import plistlib as _plistlib
+
+    real = tmp_path / "Qwen3-4B-Instruct-UD-Q5_K_XL.gguf"
+    real.write_bytes(b"gguf")
+    link = tmp_path / "active.gguf"
+    link.symlink_to(real)
+    m = load_manifest("llamacpp")
+    plist_file = tmp_path / "com.asiai.llamacpp.plist"
+    with open(plist_file, "wb") as f:
+        _plistlib.dump({"ProgramArguments": ["bin", "--model", str(link)]}, f)
+    with patch("ais_core.lifecycle.plist.plist_path", return_value=str(plist_file)):
+        assert lifecycle.installed_model(m) == "Qwen3-4B-Instruct-UD-Q5_K_XL.gguf"
+
+
 def test_installed_model_none_for_wrapper_or_missing(tmp_path) -> None:
     m = load_manifest("llamacpp")
     # missing plist

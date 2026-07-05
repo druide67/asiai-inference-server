@@ -631,5 +631,14 @@ def installed_model(manifest: EngineManifest) -> str | None:
         return None
     for i, arg in enumerate(args):
         if arg == "--model" and i + 1 < len(args):
-            return os.path.basename(str(args[i + 1])) or None
+            path = str(args[i + 1])
+            # Preset-managed engines load a stable symlink (active.gguf);
+            # the operator needs the real filename behind it. Local resolve
+            # is legitimate: this code runs on the engine's own host.
+            try:
+                if os.path.islink(path):
+                    path = os.path.realpath(path)
+            except OSError:
+                pass
+            return os.path.basename(path) or None
     return None
