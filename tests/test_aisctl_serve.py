@@ -372,6 +372,7 @@ class TestEnginesState:
         monkeypatch.setattr(manifest_mod, "list_manifests", lambda: ["good", "broken"])
         monkeypatch.setattr(manifest_mod, "load_manifest", fake_load)
         monkeypatch.setattr(lifecycle_mod, "probe_state", lambda m, deep=False: ("running", None))
+        monkeypatch.setattr(lifecycle_mod, "installed_model", lambda m: None)
         result = serve_mod._collect_engines_state()
         names = [e["name"] for e in result["engines"]]
         assert names == ["good"]

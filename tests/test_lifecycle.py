@@ -165,10 +165,32 @@ def test_wait_for_health_succeeds_after_delayed_start() -> None:
 
 def test_process_alive_true_when_pgrep_returns_zero() -> None:
     m = load_manifest("ollama")
-    fake = MagicMock(returncode=0, stdout=b"", stderr=b"")
+    fake = MagicMock(returncode=0, stdout=b"123 ollama serve\n", stderr=b"")
     with patch("ais_core.lifecycle.subprocess.run", return_value=fake) as mock_run:
         assert process_alive(m) is True
-    assert mock_run.call_args.args[0][:2] == ["pgrep", "-f"]
+    assert mock_run.call_args.args[0][:2] == ["pgrep", "-fl"]
+
+
+def test_process_alive_disambiguates_shared_binary_by_port() -> None:
+    """Aux presets share one binary: a neighbour's --port match must not
+    count as OUR process (the weeks-long false UNHEALTHY on turboquant)."""
+    m = load_manifest("llamacpp")  # port 8080
+    neighbours = b"742 llama-server-turboquant --model x --port 8090\n"
+    fake = MagicMock(returncode=0, stdout=neighbours, stderr=b"")
+    with patch("ais_core.lifecycle.subprocess.run", return_value=fake):
+        assert process_alive(m) is False
+
+    ours = neighbours + b"901 llama-server-turboquant --model y --port 8080\n"
+    fake_ours = MagicMock(returncode=0, stdout=ours, stderr=b"")
+    with patch("ais_core.lifecycle.subprocess.run", return_value=fake_ours):
+        assert process_alive(m) is True
+
+    # Port-less matches (wrapper scripts, ollama-style launchers) keep the
+    # historical pattern-only behaviour.
+    portless = neighbours + b"555 turboquant-start\n"
+    fake_mixed = MagicMock(returncode=0, stdout=portless, stderr=b"")
+    with patch("ais_core.lifecycle.subprocess.run", return_value=fake_mixed):
+        assert process_alive(m) is True
 
 
 def test_process_alive_false_when_pgrep_returns_nonzero() -> None:
@@ -183,14 +205,30 @@ def test_process_alive_false_when_pgrep_returns_nonzero() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_current_state_not_installed_when_plist_absent_and_unknown_to_launchd(tmp_path) -> None:
-    """No legacy plist AND launchd never heard of the label = genuinely absent."""
+def test_current_state_not_installed_when_binary_also_absent(tmp_path) -> None:
+    """Nothing provisioned AND the software itself is absent = NOT_INSTALLED."""
     m = load_manifest("ollama")
     with (
         patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "missing.plist")),
         patch("ais_core.lifecycle.is_loaded", return_value=False),
+        patch("ais_core.lifecycle.probe_health", return_value=False),
+        patch.object(type(m.binary), "resolve", return_value=None),
     ):
         assert lifecycle.current_state(m) == EngineState.NOT_INSTALLED
+
+
+def test_current_state_available_when_binary_present_but_unprovisioned(tmp_path) -> None:
+    """Software installed (brew) but never provisioned as a managed service:
+    AVAILABLE, not NOT_INSTALLED — the operator must not be told to install
+    something that is already there (dogfooding report: ollama)."""
+    m = load_manifest("ollama")
+    with (
+        patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "missing.plist")),
+        patch("ais_core.lifecycle.is_loaded", return_value=False),
+        patch("ais_core.lifecycle.probe_health", return_value=False),
+        patch.object(type(m.binary), "resolve", return_value="/opt/homebrew/bin/ollama"),
+    ):
+        assert lifecycle.current_state(m) == EngineState.AVAILABLE
 
 
 def test_current_state_running_when_bundle_managed_without_legacy_plist(tmp_path) -> None:
@@ -739,3 +777,54 @@ def test_resolve_user_file_resolves_absolute_symlink(tmp_path) -> None:
 def test_resolve_user_file_passes_tilde_through_untouched() -> None:
     """Tilde paths expand against the DAEMON home inside the helper, never ours."""
     assert lifecycle._resolve_user_file("~/llms/gguf/active.gguf") == "~/llms/gguf/active.gguf"
+
+
+def test_probe_state_running_via_network_even_without_plist(tmp_path) -> None:
+    """Network first: an engine answering /health is RUNNING even when no
+    plist exists and launchd never heard of it (desktop app, hand-launched
+    server, bundle daemon invisible from a user domain)."""
+    m = load_manifest("ollama")
+    with (
+        patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "missing.plist")),
+        patch("ais_core.lifecycle.is_loaded", return_value=False),
+        patch("ais_core.lifecycle.probe_health", return_value=True),
+    ):
+        assert lifecycle.current_state(m) == EngineState.RUNNING
+
+
+def test_installed_model_reads_plist_program_arguments(tmp_path) -> None:
+    import plistlib as _plistlib
+
+    m = load_manifest("llamacpp")
+    plist_file = tmp_path / "com.asiai.llamacpp.plist"
+    with open(plist_file, "wb") as f:
+        _plistlib.dump(
+            {
+                "Label": "com.asiai.llamacpp",
+                "ProgramArguments": [
+                    "/opt/homebrew/bin/llama-server",
+                    "--model",
+                    "/Users/x/llms/Qwen3-27B-Q8.gguf",
+                    "--port",
+                    "8080",
+                ],
+            },
+            f,
+        )
+    with patch("ais_core.lifecycle.plist.plist_path", return_value=str(plist_file)):
+        assert lifecycle.installed_model(m) == "Qwen3-27B-Q8.gguf"
+
+
+def test_installed_model_none_for_wrapper_or_missing(tmp_path) -> None:
+    m = load_manifest("llamacpp")
+    # missing plist
+    with patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "nope.plist")):
+        assert lifecycle.installed_model(m) is None
+    # wrapper plist without --model
+    import plistlib as _plistlib
+
+    plist_file = tmp_path / "wrapper.plist"
+    with open(plist_file, "wb") as f:
+        _plistlib.dump({"ProgramArguments": ["/usr/local/bin/turboquant-start"]}, f)
+    with patch("ais_core.lifecycle.plist.plist_path", return_value=str(plist_file)):
+        assert lifecycle.installed_model(m) is None

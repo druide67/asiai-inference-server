@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import enum
 import os
+import plistlib
 import subprocess
 import time
 import urllib.error
@@ -45,7 +46,8 @@ class LifecycleError(RuntimeError):
 
 
 class EngineState(enum.StrEnum):
-    NOT_INSTALLED = "not_installed"  # no plist file
+    NOT_INSTALLED = "not_installed"  # binary absent, nothing provisioned
+    AVAILABLE = "available"  # binary present, service not provisioned (no plist)
     STOPPED = "stopped"  # plist exists, daemon not loaded
     DISABLED = "disabled"  # plist exists, durably off (survives reboot)
     LOADED_NOT_RUNNING = "loaded"  # launchctl knows it, no PID
@@ -510,13 +512,32 @@ def gen_probe(manifest: EngineManifest, *, request_timeout: float = 45.0) -> Gen
 
 
 def process_alive(manifest: EngineManifest) -> bool:
-    """True iff a process matching the manifest's pattern is running."""
+    """True iff a process belonging to THIS manifest is running.
+
+    Manifests can share a binary — every aux preset runs the same
+    llama-server fork — so a bare pattern hit may belong to ANOTHER
+    manifest's instance (the bug that pinned a stopped engine to
+    UNHEALTHY for weeks: health silent + a *neighbour's* process alive).
+    When the matched command lines carry ``--port``, the manifest's own
+    port disambiguates; matches without a port token (ollama-style
+    launchers, wrapper scripts) keep the historical pattern-only answer.
+    """
     proc = subprocess.run(
-        ["pgrep", "-f", manifest.binary.process_pattern],
+        ["pgrep", "-fl", manifest.binary.process_pattern],
         check=False,
         capture_output=True,
     )
-    return proc.returncode == 0
+    if proc.returncode != 0:
+        return False
+    lines = [ln for ln in proc.stdout.decode(errors="replace").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    port_token = f"--port {manifest.network.port}"
+    if any(port_token in ln for ln in lines):
+        return True
+    # False iff every match is pinned to some OTHER manifest's port;
+    # port-less matches keep the historical pattern-only answer.
+    return not all("--port " in ln for ln in lines)
 
 
 def is_loaded(manifest: EngineManifest) -> bool:
@@ -551,16 +572,11 @@ def probe_state(
     keep RUNNING — only the unambiguous zombie marker may raise the alarm.
     The verdict is ``None`` when ``deep`` is False or the engine isn't RUNNING.
     """
-    # No legacy /Library/LaunchDaemons plist — but the daemon may be
-    # bundle-managed: registered via SMAppService, its plist lives inside the
-    # signed .app and launchd loads it from there. launchctl still knows the
-    # label, so fall through to the normal cascade rather than falsely
-    # reporting NOT_INSTALLED (a bundle-migrated engine would show
-    # "not_installed" while it is happily serving). Only when launchd has
-    # never heard of the label is it genuinely not installed.
-    if not Path(plist.plist_path(manifest)).exists() and not is_loaded(manifest):
-        return EngineState.NOT_INSTALLED, None
-
+    # Network FIRST: a serving engine is RUNNING no matter what the launchd
+    # paperwork says. Bundle-managed daemons (SMAppService) are invisible to
+    # a user-domain ``launchctl list``, desktop apps and hand-launched
+    # servers have no plist at all — the old plist-first gate reported all
+    # of them NOT_INSTALLED while they were answering requests.
     if probe_health(manifest):
         if deep:
             verdict = gen_probe(manifest)
@@ -568,6 +584,17 @@ def probe_state(
                 return EngineState.DEGRADED, verdict
             return EngineState.RUNNING, verdict
         return EngineState.RUNNING, None
+
+    # Nothing provisioned for this label (no legacy plist, launchd has never
+    # heard of it — a bundle-managed label would still be loaded). Split by
+    # what's on disk: the software being present without a provisioned
+    # service (ollama installed via brew but never ``aisctl install``ed) is
+    # AVAILABLE, not "not installed" — an operator reading the fleet must
+    # not be told to install something that is already there.
+    if not Path(plist.plist_path(manifest)).exists() and not is_loaded(manifest):
+        if manifest.binary.resolve() is not None:
+            return EngineState.AVAILABLE, None
+        return EngineState.NOT_INSTALLED, None
 
     if process_alive(manifest):
         return EngineState.UNHEALTHY, None
@@ -584,3 +611,25 @@ def probe_state(
 def current_state(manifest: EngineManifest, *, deep: bool = False) -> EngineState:
     """State-only convenience over :func:`probe_state` (same single probe)."""
     return probe_state(manifest, deep=deep)[0]
+
+
+def installed_model(manifest: EngineManifest) -> str | None:
+    """Basename of the ``--model`` argument in the INSTALLED plist, or None.
+
+    Answers "what would this engine serve if started" for a provisioned but
+    non-running engine — the manifest itself carries no model (that is the
+    preset's job), but the generated plist does. Best-effort: unreadable or
+    model-less plists (wrapper engines) simply yield None.
+    """
+    try:
+        with open(plist.plist_path(manifest), "rb") as f:
+            data = plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException):
+        return None
+    args = data.get("ProgramArguments")
+    if not isinstance(args, list):
+        return None
+    for i, arg in enumerate(args):
+        if arg == "--model" and i + 1 < len(args):
+            return os.path.basename(str(args[i + 1])) or None
+    return None
