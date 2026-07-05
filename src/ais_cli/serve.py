@@ -211,6 +211,9 @@ def _collect_engines_state() -> dict[str, Any]:
                 "display": m.display,
                 "port": m.network.port,
                 "state": str(state),
+                # What a provisioned engine WOULD serve (from its installed
+                # plist) — lets the dashboard label non-running cards.
+                "model": lifecycle.installed_model(m),
             }
         except Exception as e:  # one broken manifest must never hide the others
             logger.warning("engines-state: probe failed for %s: %s", name, e)
