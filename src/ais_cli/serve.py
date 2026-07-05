@@ -4,6 +4,12 @@ Listens on ``127.0.0.1:8898`` and accepts ``POST /internal/v1/command``
 with a Bearer token shared with ``asiai web``. Each request shells out
 to ``aisctl <command> [args]`` and returns the JSON-shaped result.
 
+It also answers ``GET /internal/v1/engines-state`` (same Bearer): the
+rich :class:`ais_core.lifecycle.EngineState` of every manifest, so the
+co-located ``asiai web`` can surface stopped/disabled/unhealthy engines
+in its snapshot instead of the poor reachable/unreachable split HTTP
+detection alone can offer.
+
 Why a separate process?
 -----------------------
 The fleet write surface lives on the LAN (``asiai web`` on port 8899)
@@ -175,6 +181,60 @@ def _semaphore_acquire(sem: threading.Semaphore, timeout: float = 1.0) -> bool:
     return sem.acquire(timeout=timeout)
 
 
+# --- engines-state read surface ---------------------------------------------
+#
+# ``asiai web`` polls this on every snapshot (its own cache is ~10s); probing
+# every manifest costs launchctl+HTTP round-trips, so answers are cached a few
+# seconds. Two racing callers may both collect once — harmless, the cache
+# absorbs the rest.
+
+ENGINES_STATE_CACHE_TTL = 5.0
+_PROBE_POOL_SIZE = 8
+
+_state_cache_lock = threading.Lock()
+_state_cache: dict[str, Any] = {"ts": 0.0, "payload": None}
+
+
+def _collect_engines_state() -> dict[str, Any]:
+    """Probe every manifest's lifecycle state (parallel, never raises per-engine)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ais_core import lifecycle
+    from ais_core import manifest as manifest_mod
+
+    def probe_one(name: str) -> dict[str, Any] | None:
+        try:
+            m = manifest_mod.load_manifest(name)
+            state, _ = lifecycle.probe_state(m)
+            return {
+                "name": m.name,
+                "display": m.display,
+                "port": m.network.port,
+                "state": str(state),
+            }
+        except Exception as e:  # one broken manifest must never hide the others
+            logger.warning("engines-state: probe failed for %s: %s", name, e)
+            return None
+
+    names = manifest_mod.list_manifests()
+    with ThreadPoolExecutor(max_workers=_PROBE_POOL_SIZE) as pool:
+        engines = [r for r in pool.map(probe_one, names) if r]
+    return {"engines": engines, "ts": int(time.time())}
+
+
+def _engines_state_cached() -> dict[str, Any]:
+    now = time.monotonic()
+    with _state_cache_lock:
+        cached = _state_cache["payload"]
+        if cached is not None and now - _state_cache["ts"] < ENGINES_STATE_CACHE_TTL:
+            return cached
+    payload = _collect_engines_state()
+    with _state_cache_lock:
+        _state_cache["ts"] = time.monotonic()
+        _state_cache["payload"] = payload
+    return payload
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     server_version = "aisctl-serve/1"
     sys_version = ""
@@ -224,6 +284,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/internal/v1/health":
             self._json(200, {"ok": True, "service": "aisctl-serve"})
+            return
+        if self.path == "/internal/v1/engines-state":
+            # Unlike /health this discloses manifest names/ports/states:
+            # same Bearer gate as the write endpoint.
+            if not self._check_auth():
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                self._json(200, _engines_state_cached())
+            except Exception as e:  # fail as JSON, never a traceback page
+                logger.error("engines-state collection failed: %s", e)
+                self._json(500, {"error": "engines_state_failed"})
             return
         self._json(404, {"error": "not_found"})
 
