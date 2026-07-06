@@ -28,6 +28,17 @@ from ais_core.manifest import list_manifests, load_manifest
 _HELPER_PATH = Path(__file__).resolve().parents[1] / "data" / "helpers" / "asiai_priv.py"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_host_bundle_state(monkeypatch, tmp_path):
+    """Tests must never see THIS host's installed bundle app or active
+    manifests — the dev machine runs the real thing (/Applications/Asiai.app
+    embeds com.asiai.* labels, ~/.local/share/.../active/ holds real
+    presets), which would flip provisioned-state and installed_model
+    assertions depending on where the suite runs."""
+    monkeypatch.setenv("ASIAI_BUNDLE_APP", str(tmp_path / "no-bundle.app"))
+    monkeypatch.setenv("ASIAI_LAUNCH_MANIFEST_DIR", str(tmp_path / "no-active"))
+
+
 def _load_priv_helper():
     spec = importlib.util.spec_from_file_location("asiai_priv_compose", _HELPER_PATH)
     assert spec and spec.loader
@@ -845,3 +856,100 @@ def test_installed_model_none_for_wrapper_or_missing(tmp_path) -> None:
         _plistlib.dump({"ProgramArguments": ["/usr/local/bin/turboquant-start"]}, f)
     with patch("ais_core.lifecycle.plist.plist_path", return_value=str(plist_file)):
         assert lifecycle.installed_model(m) is None
+
+
+# ---------------------------------------------------------------------------
+# bundle-aware states + model (deploy-M4 findings, 0.8.2)
+# ---------------------------------------------------------------------------
+
+
+def _fake_bundle_app(tmp_path: Path, label: str) -> Path:
+    app = tmp_path / "Asiai.app"
+    daemons = app / "Contents" / "Library" / "LaunchDaemons"
+    daemons.mkdir(parents=True)
+    (daemons / f"{label}.plist").write_bytes(b"<plist/>")
+    return app
+
+
+def test_probe_state_bundle_dormant_is_stopped(tmp_path, monkeypatch) -> None:
+    """A bundle-provisioned service whose label is unloaded is STOPPED, not
+    AVAILABLE: with no legacy plist on disk, the embedded plist inside the
+    installed app is the only provisioning evidence (deploy-M4 finding —
+    dormant bundle services looked like never-provisioned software)."""
+    m = load_manifest("llamacpp")
+    monkeypatch.setenv("ASIAI_BUNDLE_APP", str(_fake_bundle_app(tmp_path, m.plist.name)))
+    with (
+        patch("ais_core.lifecycle.probe_health", return_value=False),
+        patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "no.plist")),
+        patch("ais_core.lifecycle.is_loaded", return_value=False),
+        patch("ais_core.lifecycle.process_alive", return_value=False),
+        patch("ais_core.lifecycle.is_disabled", return_value=False),
+    ):
+        assert lifecycle.current_state(m) == EngineState.STOPPED
+
+
+def test_probe_state_bundle_dormant_disabled(tmp_path, monkeypatch) -> None:
+    """Same dormant bundle service with a launchd override: DISABLED (the
+    cold-standby truth an operator acts on — Start vs re-enable)."""
+    m = load_manifest("llamacpp")
+    monkeypatch.setenv("ASIAI_BUNDLE_APP", str(_fake_bundle_app(tmp_path, m.plist.name)))
+    with (
+        patch("ais_core.lifecycle.probe_health", return_value=False),
+        patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "no.plist")),
+        patch("ais_core.lifecycle.is_loaded", return_value=False),
+        patch("ais_core.lifecycle.process_alive", return_value=False),
+        patch("ais_core.lifecycle.is_disabled", return_value=True),
+    ):
+        assert lifecycle.current_state(m) == EngineState.DISABLED
+
+
+def test_probe_state_other_bundle_service_stays_available(tmp_path, monkeypatch) -> None:
+    """The installed app embeds OTHER labels only: this engine is still just
+    AVAILABLE — bundle evidence is per-label, not per-host."""
+    m = load_manifest("ollama")
+    monkeypatch.setenv(
+        "ASIAI_BUNDLE_APP", str(_fake_bundle_app(tmp_path, "com.asiai.something-else"))
+    )
+    with (
+        patch("ais_core.lifecycle.probe_health", return_value=False),
+        patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "no.plist")),
+        patch("ais_core.lifecycle.is_loaded", return_value=False),
+        patch.object(type(m.binary), "resolve", return_value="/opt/homebrew/bin/ollama"),
+    ):
+        assert lifecycle.current_state(m) == EngineState.AVAILABLE
+
+
+def test_installed_model_falls_back_to_active_manifest(tmp_path, monkeypatch) -> None:
+    """Bundle-managed engines have no legacy plist to read argv from: the
+    active manifest published by ``aisctl bundle activate`` carries the
+    model, symlink resolved like the plist path (deploy-M4 finding —
+    model=None wiped 'preset: X' off every dormant card)."""
+    real = tmp_path / "Qwen3-4B-Instruct-UD-Q5_K_XL.gguf"
+    real.write_bytes(b"gguf")
+    link = tmp_path / "active.gguf"
+    link.symlink_to(real)
+    active_dir = tmp_path / "active"
+    active_dir.mkdir()
+    (active_dir / "llamacpp.toml").write_text(f'[binary]\nmodel_path = "{link}"\n')
+    monkeypatch.setenv("ASIAI_LAUNCH_MANIFEST_DIR", str(active_dir))
+    m = load_manifest("llamacpp")
+    with patch("ais_core.lifecycle.plist.plist_path", return_value=str(tmp_path / "no.plist")):
+        assert lifecycle.installed_model(m) == "Qwen3-4B-Instruct-UD-Q5_K_XL.gguf"
+
+
+def test_installed_model_legacy_plist_wins_over_active_manifest(tmp_path, monkeypatch) -> None:
+    """When both exist the INSTALLED plist is the truth — it is what launchd
+    actually execs on a legacy service; the active manifest may hold a
+    fresher preset not yet applied."""
+    import plistlib as _plistlib
+
+    active_dir = tmp_path / "active"
+    active_dir.mkdir()
+    (active_dir / "llamacpp.toml").write_text('[binary]\nmodel_path = "/x/from-active.gguf"\n')
+    monkeypatch.setenv("ASIAI_LAUNCH_MANIFEST_DIR", str(active_dir))
+    plist_file = tmp_path / "com.asiai.llamacpp.plist"
+    with open(plist_file, "wb") as f:
+        _plistlib.dump({"ProgramArguments": ["bin", "--model", "/x/from-plist.gguf"]}, f)
+    m = load_manifest("llamacpp")
+    with patch("ais_core.lifecycle.plist.plist_path", return_value=str(plist_file)):
+        assert lifecycle.installed_model(m) == "from-plist.gguf"
