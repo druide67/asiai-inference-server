@@ -26,16 +26,16 @@ wheels = [
 
 [[package]]
 name = "asiai"
-version = "1.15.0"
+version = "1.18.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/99/95/e36bcbe1391546151cd1fdcf2ac5dab460942e7c151483d94696c3a01d7e/asiai-1.15.0.tar.gz", hash = "sha256:719f38e4f15f657d6f046769aee263d4682b430663c8740214e1653c6dbfe700", size = 8284746, upload-time = "2026-07-01T23:56:58.035Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/f4/dc06bcdcc2e23e230e557fbe00c65c8060780e4c753fbffd2122a500e629/asiai-1.18.0.tar.gz", hash = "sha256:737379e61419ae2f15468aeed267e088d9f0ea4faafb1b84c8fc2a62be3deab6", size = 8325977, upload-time = "2026-07-06T19:21:41.448Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/8f/3bc4a196a6edd63ac061685f2f9ef0fe8f07d68fa1ebf7d6bd4f76812117/asiai-1.15.0-py3-none-any.whl", hash = "sha256:3a77447bd3a69ca6a3ae8f7e79913f3c54e72c2110927de770c1aa1432f2272c", size = 858651, upload-time = "2026-07-01T23:56:56.027Z" },
+    { url = "https://files.pythonhosted.org/packages/12/2a/549cbbc05d314161b7618d0262cc2020de0ba9bb99c2dbf5d35f2ce6343b/asiai-1.18.0-py3-none-any.whl", hash = "sha256:5a6023cc51ce1e639cbdf7e33554c23a700a0be1505158ad7c347757abca1d54", size = 895736, upload-time = "2026-07-06T19:21:39.723Z" },
 ]
 
 [[package]]
 name = "asiai-inference-server"
-version = "0.8.1"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "asiai" },
@@ -53,7 +53,7 @@ mcp = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asiai", specifier = ">=1.15.0" },
+    { name = "asiai", specifier = ">=1.18.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.12" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },

@@ -100,7 +100,17 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
         raise ValueError(f"unknown command: {command}")
     argv = [_aisctl_binary(), command, "--json"]
     engine = args.get("engine")
-    if command in {"start", "stop", "restart", "install", "uninstall", "unload", "load"}:
+    if command in {
+        "start",
+        "stop",
+        "restart",
+        "install",
+        "uninstall",
+        "unload",
+        "load",
+        "enable",
+        "disable",
+    }:
         if not isinstance(engine, str) or not engine:
             raise ValueError(f"command {command} requires args.engine (string)")
         argv.append(engine)
