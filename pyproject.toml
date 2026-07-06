@@ -35,7 +35,10 @@ classifiers = [
 dependencies = [
     # Phase 2 needs asiai.auth.loopback (1.8.0) + asiai.fleet.command_spec
     # (the shared fleet timeout/whitelist spec, SB) shipped in asiai 1.15.0.
-    "asiai>=1.15.0",
+    # The cold-standby pair (enable/disable) routed by ``aisctl serve`` was
+    # added to that spec in 1.18.0 — bump so the loopback whitelist and the
+    # edge/client timeout map are guaranteed to know the two verbs.
+    "asiai>=1.18.0",
 ]
 
 [project.optional-dependencies]
