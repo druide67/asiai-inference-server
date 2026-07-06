@@ -133,6 +133,19 @@ class TestBuildArgv:
         assert inner == int(inner_tool_timeout("upgrade"))
         assert inner < loopback_timeout("upgrade")
 
+    def test_enable_disable_route_with_engine(self):
+        """Cold-standby pair (asiai>=1.18 command_spec): same engine-argv
+        shape as start/stop — without the engine token the subprocess would
+        die on argparse instead of a clean 400."""
+        for cmd in ("enable", "disable"):
+            argv = serve._build_argv(cmd, {"engine": "llamacpp-aux-4"})
+            assert argv[-3:] == [cmd, "--json", "llamacpp-aux-4"]
+
+    def test_enable_disable_require_engine(self):
+        for cmd in ("enable", "disable"):
+            with pytest.raises(ValueError, match="engine"):
+                serve._build_argv(cmd, {})
+
     def test_upgrade_rejects_unknown_engine(self):
         with pytest.raises(ValueError, match="not whitelisted"):
             serve._build_argv("upgrade", {"engine": "evil-engine"})
