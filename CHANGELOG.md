@@ -6,6 +6,88 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.0](https://github.com/druide67/asiai-inference-server/compare/v0.9.0...v0.10.0) — 2026-07-07
+
+Preset funnel — the companion release for asiai 1.22.0's install preset
+picker, closing the silent-baseline trap end to end.
+
+### Added
+
+- **`GET /internal/v1/presets`** on `aisctl serve` (same loopback Bearer
+  gate as the other read endpoints): the bundled tuned-manifest presets
+  as `{preset, engine, display}` summaries, so the fleet cockpit's
+  Install modal can offer them.
+- **`install` accepts `args.preset`** through the loopback command
+  funnel — shape-checked before any subprocess (leading-alphanumeric,
+  ≤ 64 chars), then validated against the bundled preset registry by
+  `aisctl install` itself. A preset smuggled onto any other verb never
+  reaches the argv.
+- **`engines-state` carries each engine's install-time preset**, so
+  dashboards can label what a service was generated from.
+
+## [0.9.0](https://github.com/druide67/asiai-inference-server/compare/v0.8.2...v0.9.0) — 2026-07-06
+
+### Added
+
+- **Cold-standby verbs through the loopback dispatcher**: `enable` and
+  `disable` are now routable via `POST /internal/v1/command`, with the
+  same engine-argv shape as start/stop. Pairs with asiai ≥ 1.18's shared
+  command spec (60 s / 120 s budgets, REVERSIBLE classification) and the
+  cockpit's Standby/Enable menu.
+
+### Changed
+
+- Depends on `asiai >= 1.18.0` (single-sourced command spec).
+
+## [0.8.2](https://github.com/druide67/asiai-inference-server/compare/v0.8.1...v0.8.2) — 2026-07-06
+
+### Fixed
+
+- **Bundle-aware provisioned state**: engines whose LaunchDaemon lives in
+  the SMAppService bundle (not `/Library/LaunchDaemons/`) are recognized
+  as provisioned, so dormant bundle services report truthful
+  STOPPED/DISABLED instead of falling back to AVAILABLE.
+- `installed_model` falls back to the ACTIVE manifest
+  (`ASIAI_LAUNCH_MANIFEST_DIR`) when the plist embeds none, so dormant
+  services still display the model they would serve.
+
+## [0.8.1](https://github.com/druide67/asiai-inference-server/compare/v0.8.0...v0.8.1) — 2026-07-06
+
+### Fixed
+
+- `installed_model` resolves preset symlinks, so a model published
+  through a preset's `active.gguf` link shows its real name.
+
+## [0.8.0](https://github.com/druide67/asiai-inference-server/compare/v0.7.0...v0.8.0) — 2026-07-06
+
+Truthful lifecycle states.
+
+### Changed
+
+- **Port-aware liveness**: an engine is RUNNING only if ITS port
+  answers — a neighbor's server can no longer make a stopped engine
+  look alive.
+- **New AVAILABLE state**: software present but service not
+  provisioned, distinct from NOT_INSTALLED.
+- **Network-first probing** with the process table as fallback, and
+  `installed_model` read from the installed plist so non-running
+  engines are labeled by what they WOULD serve.
+
+## [0.7.0](https://github.com/druide67/asiai-inference-server/compare/v0.6.0...v0.7.0) — 2026-07-05
+
+### Added
+
+- **`GET /internal/v1/engines-state`** on `aisctl serve` (loopback
+  Bearer): the rich lifecycle state of every manifest, cached a few
+  seconds, so the co-located `asiai web` snapshot can show
+  stopped/disabled/unhealthy engines instead of the poor
+  reachable/unreachable split HTTP detection alone offers.
+
+### Fixed
+
+- Three first-real-deploy bundle findings (0.6.1): `bundle status`
+  parsing, register scope, and smd job recognition.
+
 ## [0.6.0](https://github.com/druide67/asiai-inference-server/compare/v0.5.1...v0.6.0) — 2026-07-04
 
 SMAppService bundle: the fleet's daemons get ONE named, iconed entry in the
