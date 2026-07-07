@@ -150,6 +150,28 @@ class TestBuildArgv:
         with pytest.raises(ValueError, match="not whitelisted"):
             serve._build_argv("upgrade", {"engine": "evil-engine"})
 
+    def test_install_with_preset(self):
+        argv = serve._build_argv("install", {"engine": "llamacpp", "preset": "hermes-aux-1"})
+        assert argv[-2:] == ["--preset", "hermes-aux-1"]
+        assert argv[argv.index("--json") + 1] == "llamacpp"
+
+    def test_install_without_preset_adds_no_flag(self):
+        argv = serve._build_argv("install", {"engine": "llamacpp"})
+        assert "--preset" not in argv
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["../evil", "a b", "x" * 65, "", 42, "-flag"],
+    )
+    def test_install_rejects_malformed_preset(self, bad):
+        with pytest.raises(ValueError, match="preset"):
+            serve._build_argv("install", {"engine": "llamacpp", "preset": bad})
+
+    def test_preset_ignored_on_other_commands(self):
+        """A preset smuggled onto a non-install verb must not reach argv."""
+        argv = serve._build_argv("stop", {"engine": "ollama", "preset": "hermes-aux-1"})
+        assert "--preset" not in argv
+
 
 # ---------------------------------------------------------------------------
 # _execute unit tests
@@ -390,3 +412,31 @@ class TestEnginesState:
         names = [e["name"] for e in result["engines"]]
         assert names == ["good"]
         assert result["engines"][0]["state"] == "running"
+
+
+class TestPresetsEndpoint:
+    def _url(self, server) -> str:
+        return f"http://127.0.0.1:{server['port']}/internal/v1/presets"
+
+    def test_requires_auth(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(self._url(server))
+        assert exc.value.code == 401
+
+    def test_lists_bundled_presets(self, server, monkeypatch):
+        from ais_core import manifest as manifest_mod
+
+        monkeypatch.setattr(manifest_mod, "list_presets", lambda: ["hermes-aux-1"])
+        monkeypatch.setattr(
+            manifest_mod,
+            "preset_summary",
+            lambda n: {"preset": n, "engine": "llamacpp-aux-1", "display": "aux 1 tuned"},
+        )
+        resp = _get(
+            self._url(server),
+            headers={"Authorization": f"Bearer {server['token']}"},
+        )
+        body = json.loads(resp.read())
+        assert body["presets"] == [
+            {"preset": "hermes-aux-1", "engine": "llamacpp-aux-1", "display": "aux 1 tuned"}
+        ]

@@ -114,6 +114,17 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
         if not isinstance(engine, str) or not engine:
             raise ValueError(f"command {command} requires args.engine (string)")
         argv.append(engine)
+    if command == "install":
+        # Optional tuned-manifest preset. Shape-checked here (400, no
+        # subprocess) and validated against the bundled preset registry
+        # inside cmd_install (_resolve_manifest raises on unknown names).
+        preset = args.get("preset")
+        if preset is not None:
+            if not isinstance(preset, str) or not re.match(
+                r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$", preset
+            ):
+                raise ValueError("args.preset must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}")
+            argv.extend(["--preset", preset])
     if command in ("unload", "load"):
         model = args.get("model")
         if command == "load" and not model:
@@ -209,13 +220,14 @@ def _collect_engines_state() -> dict[str, Any]:
     """Probe every manifest's lifecycle state (parallel, never raises per-engine)."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from ais_core import lifecycle
+    from ais_core import install_state, lifecycle
     from ais_core import manifest as manifest_mod
 
     def probe_one(name: str) -> dict[str, Any] | None:
         try:
             m = manifest_mod.load_manifest(name)
             state, _ = lifecycle.probe_state(m)
+            record = install_state.read_install(m.name)
             return {
                 "name": m.name,
                 "display": m.display,
@@ -224,6 +236,10 @@ def _collect_engines_state() -> dict[str, Any]:
                 # What a provisioned engine WOULD serve (from its installed
                 # plist) — lets the dashboard label non-running cards.
                 "model": lifecycle.installed_model(m),
+                # Recorded at install time — which tuned preset (if any)
+                # the service was generated from. The cockpit shows it and
+                # the install picker preselects it.
+                "preset": record.preset if record else None,
             }
         except Exception as e:  # one broken manifest must never hide the others
             logger.warning("engines-state: probe failed for %s: %s", name, e)
@@ -309,6 +325,21 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:  # fail as JSON, never a traceback page
                 logger.error("engines-state collection failed: %s", e)
                 self._json(500, {"error": "engines_state_failed"})
+            return
+        if self.path == "/internal/v1/presets":
+            # Bundled tuned-manifest presets, for the cockpit's install
+            # picker. Same Bearer gate: preset names reveal the tuning
+            # surface of the node.
+            if not self._check_auth():
+                self._json(401, {"error": "unauthorized"})
+                return
+            try:
+                from ais_core.manifest import list_presets, preset_summary
+
+                self._json(200, {"presets": [preset_summary(n) for n in list_presets()]})
+            except Exception as e:  # fail as JSON, never a traceback page
+                logger.error("presets listing failed: %s", e)
+                self._json(500, {"error": "presets_failed"})
             return
         self._json(404, {"error": "not_found"})
 
