@@ -42,6 +42,7 @@ swap storm.
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 from dataclasses import dataclass
 
@@ -273,6 +274,9 @@ def estimate_preset_cost(
                     "high bound only",
                 )
                 high += peak
+            overflow = _overflow_fallback(preset, median_mb * (1 - band), high, components)
+            if overflow is not None:
+                return overflow
             return PresetCost(
                 preset=preset,
                 total_mb_low=round(median_mb * (1 - band), 1),
@@ -319,12 +323,55 @@ def estimate_preset_cost(
         # high bound only (the low bound describes settled occupancy).
         high += peak
 
+    overflow = _overflow_fallback(preset, low, high, components)
+    if overflow is not None:
+        return overflow
     return PresetCost(
         preset=preset,
         total_mb_low=round(low, 1),
         total_mb_high=round(high, 1),
         confidence=confidence,
         components=components,
+    )
+
+
+def _overflow_fallback(
+    preset: str,
+    low: float,
+    high: float,
+    components: dict[str, CostComponent],
+) -> PresetCost | None:
+    """Fail-closed guard against IEEE754 overflow in the band arithmetic.
+
+    Every component is individually finite by the input guards, but two
+    absurdly large figures (a fat-fingered ``kv_bytes_per_token`` times an
+    equally wrong ``--ctx-size``) can still overflow the products/sums to
+    infinity — silently, no exception. The JSON layer would then refuse to
+    serialize (``allow_nan=False``) and drop the connection instead of
+    answering. Turn that into an honest ``unknown`` here.
+    """
+    if math.isfinite(low) and math.isfinite(high):
+        return None
+    # The offending component itself may already carry an infinite mb
+    # (the kv product overflows before the sum does) — strip it so the
+    # payload stays serializable under allow_nan=False.
+    sanitized = {
+        name: comp
+        if comp.mb is None or math.isfinite(comp.mb)
+        else dataclasses.replace(comp, mb=None, source="unknown")
+        for name, comp in components.items()
+    }
+    sanitized["arithmetic_overflow"] = CostComponent(
+        mb=None,
+        source="unknown",
+        detail="band arithmetic overflowed — memory figures are implausibly large",
+    )
+    return PresetCost(
+        preset=preset,
+        total_mb_low=0.0,
+        total_mb_high=0.0,
+        confidence="unknown",
+        components=sanitized,
     )
 
 

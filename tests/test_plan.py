@@ -396,6 +396,25 @@ class TestEstimateFailClosed:
         assert cost.confidence == "unknown"
         assert cost.total_mb_low == 0.0
 
+    def test_arithmetic_overflow_is_unknown(self, _isolated_user_config):
+        """Individually finite but absurdly large figures can overflow the
+        band products/sums to infinity AFTER the input guards (IEEE754
+        overflows silently). That must degrade to an honest unknown, not
+        crash JSON serialization (allow_nan=False) downstream."""
+        _write_preset(
+            _isolated_user_config,
+            program_args=("--ctx-size", "999999999999"),
+            memory_section=("[memory]\nweights_mb = 1000.0\nkv_bytes_per_token = 1.0e300\n"),
+        )
+        m, name = _load(_isolated_user_config)
+        cost = plan.estimate_preset_cost(m, preset=name)
+        assert cost.confidence == "unknown"
+        assert cost.total_mb_low == 0.0
+        assert cost.total_mb_high == 0.0
+        assert "arithmetic_overflow" in cost.components
+        # The payload must serialize under the wire discipline.
+        json.dumps(cost.payload(), allow_nan=False)
+
 
 # ---------------------------------------------------------------------------
 # estimate_preset_cost — measured path (calibration)
