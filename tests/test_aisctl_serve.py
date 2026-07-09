@@ -440,3 +440,95 @@ class TestPresetsEndpoint:
         assert body["presets"] == [
             {"preset": "hermes-aux-1", "engine": "llamacpp-aux-1", "display": "aux 1 tuned"}
         ]
+
+
+class TestPlanEndpoint:
+    def _url(self, server, preset: str | None) -> str:
+        base = f"http://127.0.0.1:{server['port']}/internal/v1/plan"
+        return base if preset is None else f"{base}?preset={preset}"
+
+    def _auth(self, server) -> dict:
+        return {"Authorization": f"Bearer {server['token']}"}
+
+    def test_requires_auth(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(self._url(server, "some-preset"))
+        assert exc.value.code == 401
+
+    def test_missing_preset_param_400(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(self._url(server, None), headers=self._auth(server))
+        assert exc.value.code == 400
+
+    def test_malformed_preset_400(self, server):
+        # Same shape gate as the install funnel: leading dash refused
+        # before any preset resolution happens.
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(self._url(server, "-flag"), headers=self._auth(server))
+        assert exc.value.code == 400
+        body = json.loads(exc.value.read())
+        assert body["error"] == "bad_preset"
+
+    def test_unknown_preset_404(self, server):
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(self._url(server, "definitely.not.a.preset"), headers=self._auth(server))
+        assert exc.value.code == 404
+        body = json.loads(exc.value.read())
+        assert body["error"] == "unknown_preset"
+
+    def test_valid_preset_returns_frozen_contract(self, server, monkeypatch):
+        from ais_core import plan as plan_mod
+        from ais_core.plan import CostComponent, PresetCost
+
+        fake = PresetCost(
+            preset="hermes-aux-1",
+            total_mb_low=4000.0,
+            total_mb_high=6000.0,
+            confidence="declared",
+            components={"weights": CostComponent(mb=3000.0, source="declared", detail="x")},
+        )
+        monkeypatch.setattr(plan_mod, "plan_for_preset", lambda preset: fake)
+        resp = _get(self._url(server, "hermes-aux-1"), headers=self._auth(server))
+        body = json.loads(resp.read())
+        # The frozen wire contract, verbatim.
+        assert body == {
+            "preset": "hermes-aux-1",
+            "cost": {
+                "total_mb_low": 4000.0,
+                "total_mb_high": 6000.0,
+                "confidence": "declared",
+                "components": {"weights": {"mb": 3000.0, "source": "declared", "detail": "x"}},
+            },
+        }
+
+    def test_estimator_crash_is_json_500(self, server, monkeypatch):
+        from ais_core import plan as plan_mod
+
+        def boom(preset):
+            raise RuntimeError("estimator exploded")
+
+        monkeypatch.setattr(plan_mod, "plan_for_preset", boom)
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(self._url(server, "hermes-aux-1"), headers=self._auth(server))
+        assert exc.value.code == 500
+        assert json.loads(exc.value.read())["error"] == "plan_failed"
+
+    def test_nan_payload_never_reaches_the_wire(self, server, monkeypatch):
+        """allow_nan=False belt-and-braces: even if a NaN somehow survives
+        the upstream guards, the server must fail rather than emit the
+        (invalid-JSON) NaN token to a consumer."""
+        import http.client
+
+        from ais_core import plan as plan_mod
+        from ais_core.plan import PresetCost
+
+        fake = PresetCost(
+            preset="hermes-aux-1",
+            total_mb_low=float("nan"),
+            total_mb_high=float("inf"),
+            confidence="declared",
+            components={},
+        )
+        monkeypatch.setattr(plan_mod, "plan_for_preset", lambda preset: fake)
+        with pytest.raises((urllib.error.URLError, ConnectionError, http.client.HTTPException)):
+            _get(self._url(server, "hermes-aux-1"), headers=self._auth(server))

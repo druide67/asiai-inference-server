@@ -99,3 +99,7 @@ install_path = "/usr/local/bin/mlx-lm-server-start"
 vars = [
     "MLXLM_MODEL=~/llms/mlx/Qwen3.6-35B-A3B-UD-MLX-4bit",
 ]
+# Promoted from the header comment above (~20 GB MLX-4bit on disk; MLX
+# weights are mmapped so disk size ~= resident weights).
+[memory]
+weights_mb = 20480.0

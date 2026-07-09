@@ -49,6 +49,7 @@ separate plist files; an ``aisctl engine install`` writes a fresh
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import tomllib
@@ -179,6 +180,35 @@ class WrapperSpec:
 
 
 @dataclass(frozen=True)
+class MemorySpec:
+    """Optional declared memory figures for the plan estimator (all advisory).
+
+    Deliberately component-based — there is NO monolithic ``resident_ram_mb``
+    field. A single resident figure would silently desynchronize every time an
+    operator edits ``--ctx-size`` in ``program_args``; per-component figures
+    let the estimator recompute the KV share from the args it actually sees.
+
+    All fields are optional: an absent component is reported as *unknown* by
+    the estimator (fail-closed), never guessed.
+    """
+
+    # Resident weight footprint in MB (model + mmproj if any), as measured or
+    # documented for the exact quant this preset targets.
+    weights_mb: float | None = None
+    # KV cache bytes per context token for this model architecture + cache
+    # type. Written by a human from the architecture (layers x kv_heads x
+    # head_dim x 2 x bytes) — NEVER parsed from the GGUF: hybrid-attention
+    # models (e.g. only 16 of 64 layers carrying KV) make the naive
+    # per-layer computation wrong by ~4x.
+    kv_bytes_per_token: float | None = None
+    # Engine runtime overhead in MB (Metal buffers, compute graphs, ...),
+    # overriding the estimator's per-engine-family default.
+    overhead_mb: float | None = None
+    # Transient extra MB above steady state during model load/warmup.
+    peak_extra_mb: float | None = None
+
+
+@dataclass(frozen=True)
 class EngineManifest:
     name: str
     display: str
@@ -190,6 +220,7 @@ class EngineManifest:
     wrapper: WrapperSpec
     env_vars: tuple[str, ...] = ()
     options: dict[str, object] = field(default_factory=dict)
+    memory: MemorySpec = field(default_factory=MemorySpec)
 
 
 def _bundled_manifest_dir() -> Path:
@@ -456,6 +487,59 @@ def load_manifest(name: str, preset: str | None = None) -> EngineManifest:
     return manifest
 
 
+def is_positive_finite(value: object) -> bool:
+    """True for a positive, finite int/float (bool excluded).
+
+    The three [memory]/calibration validation sites share this predicate:
+    bool is an int subclass — rejected explicitly — and isfinite() rejects
+    the TOML literals inf/+inf/-inf/nan (NaN in particular sails past a
+    ``<= 0`` guard, every comparison being False, and would propagate all
+    the way to the wire as an invalid JSON token).
+    """
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _memory_spec(raw: dict, *, source: str) -> MemorySpec:
+    """Parse the optional ``[memory]`` section into a :class:`MemorySpec`.
+
+    Fail-closed on types: a present-but-malformed value is a hard
+    :class:`ManifestError`, never silently coerced or dropped — a typo'd
+    memory figure feeding the plan estimator would produce a confidently
+    wrong verdict downstream.
+    """
+    mem_raw = raw.get("memory", {})
+    if not isinstance(mem_raw, dict):
+        raise ManifestError(f"{source}: [memory] must be a table")
+    known = {"weights_mb", "kv_bytes_per_token", "overhead_mb", "peak_extra_mb"}
+    unknown = set(mem_raw) - known
+    if unknown:
+        raise ManifestError(
+            f"{source}: unknown [memory] key(s) {sorted(unknown)}; allowed: {sorted(known)}"
+        )
+
+    def num(key: str) -> float | None:
+        value = mem_raw.get(key)
+        if value is None:
+            return None
+        if not is_positive_finite(value):
+            raise ManifestError(
+                f"{source}: [memory].{key} must be a positive finite number, got {value!r}"
+            )
+        return float(value)
+
+    return MemorySpec(
+        weights_mb=num("weights_mb"),
+        kv_bytes_per_token=num("kv_bytes_per_token"),
+        overhead_mb=num("overhead_mb"),
+        peak_extra_mb=num("peak_extra_mb"),
+    )
+
+
 def _from_dict(raw: dict, *, source: str) -> EngineManifest:
     try:
         binary_raw = raw["binary"]
@@ -507,6 +591,7 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
             ),
             env_vars=tuple(env_raw.get("vars", [])),
             options=dict(opt_raw),
+            memory=_memory_spec(raw, source=source),
         )
     except KeyError as e:
         raise ManifestError(f"{source}: missing required key {e}") from e

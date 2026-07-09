@@ -57,3 +57,7 @@ needed = false
 
 [environment]
 vars = []
+# Promoted from the target-hardware comment above (~20 GB MLX-4bit on disk;
+# MLX weights are mmapped so disk size ~= resident weights).
+[memory]
+weights_mb = 20480.0

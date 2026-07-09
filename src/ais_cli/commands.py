@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import logging
 import os
 import plistlib
 import re
@@ -29,9 +30,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ais_core import bootstrap, firewall, install_state, lifecycle, memory, sudoers
+from ais_core import bootstrap, calibration, firewall, install_state, lifecycle, memory, sudoers
 from ais_core.manifest import (
     EngineManifest,
+    ManifestError,
     list_manifests,
     list_presets,
     load_manifest,
@@ -49,6 +51,8 @@ from ais_engines.omlx import OmlxDriver
 from ais_engines.rapidmlx import RapidMlxDriver
 from ais_engines.turboquant import TurboquantDriver
 from ais_engines.vmlx import VmlxDriver
+
+logger = logging.getLogger(__name__)
 
 # Static driver registrations — engines that exist as a single instance,
 # one driver class each. Lookups for these names short-circuit ahead of
@@ -151,7 +155,9 @@ DRIVER_FACTORIES: dict[str, Callable[[], Any]] = _build_driver_factories()
 
 def _emit(payload: Any, *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps(_jsonify(payload), indent=2, default=str))
+        # allow_nan=False: NaN/Infinity are not valid JSON tokens; a producer
+        # bug must crash HERE, never emit unparseable output to a consumer.
+        print(json.dumps(_jsonify(payload), indent=2, default=str, allow_nan=False))
     else:
         print(payload)
 
@@ -231,6 +237,59 @@ def cmd_list_presets(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# plan
+# ---------------------------------------------------------------------------
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    """``aisctl plan <preset>`` — estimate the preset's memory cost (read-only).
+
+    No OperationsLock: nothing is mutated, and an operator planning the
+    next install must be able to run it while a bench or install holds
+    the lock. ``--json`` emits the frozen wire contract (the same payload
+    ``GET /internal/v1/plan`` serves).
+    """
+    from ais_core import plan as plan_mod
+
+    try:
+        cost = plan_mod.plan_for_preset(args.preset, engine=args.engine)
+    except ManifestError as e:
+        # e.g. --engine pinned to an engine the preset does not target.
+        raise SystemExit(str(e)) from None
+    except FileNotFoundError:
+        lines = [f"unknown preset {args.preset!r}; searched (in precedence order):"]
+        for d in preset_search_dirs():
+            if d.is_dir():
+                found = sorted(p.stem for p in d.glob("*.toml"))
+                lines.append(f"  {d}: {', '.join(found) or '(empty)'}")
+            else:
+                lines.append(f"  {d}: (absent)")
+        raise SystemExit("\n".join(lines)) from None
+
+    if args.json:
+        _emit(cost.payload(), as_json=True)
+        return 0
+
+    engine = args.engine or preset_summary(args.preset)["engine"]
+    print(f"Preset: {cost.preset} (engine: {engine})")
+    print("Components:")
+    for name, comp in cost.components.items():
+        mb = f"{comp.mb:>10.1f} MB" if comp.mb is not None else f"{'?':>10} MB"
+        detail = f" — {comp.detail}" if comp.detail else ""
+        print(f"  {name:<15} {mb}  [{comp.source}]{detail}")
+    if cost.confidence == "unknown":
+        print("Estimated total: unknown — at least one component has no usable source")
+        print("(declare it in the preset's [memory] section, or let calibration measure it)")
+    else:
+        print(
+            f"Estimated total: {cost.total_mb_low:.0f}-{cost.total_mb_high:.0f} MB "
+            f"(confidence: {cost.confidence})"
+        )
+    print("Advisory only — the estimate never blocks an install.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 
@@ -271,6 +330,81 @@ def cmd_status(args: argparse.Namespace) -> int:
         gen = f" {r['gen'] or '-'}" if deep else ""
         print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']} {preset}{gen}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# calibration hooks (advisory, best-effort — never fail the lifecycle verb)
+# ---------------------------------------------------------------------------
+
+
+def _record_health_calibration(m: EngineManifest) -> None:
+    """Record the engine's measured resident footprint after a healthy start.
+
+    This is the RELIABLE calibration source (full weights loaded — health
+    gated on it; measurement scoped to the one process). Only applies to
+    preset-based installs: the plan estimator answers per-preset questions,
+    and the install record carries the preset name + manifest sha that key
+    the calibration ring. Strictly best-effort: calibration is advisory
+    bookkeeping and must never fail the operation that produced it.
+    """
+    try:
+        record = install_state.read_install(m.name)
+        if record is None or record.preset is None or not record.manifest_sha256:
+            return
+        rss_mb = calibration.engine_rss_mb(m)
+        if rss_mb is None:
+            return
+        calibration.record_sample(
+            m.name,
+            preset=record.preset,
+            manifest_sha256=record.manifest_sha256,
+            phys_footprint_mb=rss_mb,
+            source="health",
+        )
+    except Exception as e:  # advisory hook — swallow everything
+        logger.debug("calibration (health) skipped for %s: %s", m.name, e)
+
+
+def _record_unload_calibration(
+    m: EngineManifest,
+    before: memory.VmStat | None,
+    after: memory.VmStat | None,
+) -> None:
+    """Record the host-wide footprint drop across a successful unload.
+
+    Both snapshots are captured by the caller — the ``after`` one INSIDE the
+    OperationsLock, right after the unload, so no concurrent locked operation
+    (purge, another unload) can allocate/free between the unload and the
+    measurement. Still noisy by nature (unlocked processes run freely), so
+    :mod:`ais_core.calibration` weights these samples at 0.5 and negative
+    deltas are discarded. Reuses :attr:`ais_core.memory.PurgeReport.freed_mb`
+    for the active+wired+compressed accounting.
+    """
+    if before is None or after is None:
+        return
+    try:
+        record = install_state.read_install(m.name)
+        if record is None or record.preset is None or not record.manifest_sha256:
+            return
+        report = memory.PurgeReport(before=before, after=after, pressure_after="", elapsed_s=0.0)
+        calibration.record_sample(
+            m.name,
+            preset=record.preset,
+            manifest_sha256=record.manifest_sha256,
+            phys_footprint_mb=float(report.freed_mb),
+            source="unload",
+        )
+    except Exception as e:  # advisory hook — swallow everything
+        logger.debug("calibration (unload) skipped for %s: %s", m.name, e)
+
+
+def _vm_snapshot_or_none() -> memory.VmStat | None:
+    """Non-throwing vm_stat snapshot for the unload calibration bracket."""
+    try:
+        return memory.vm_stat_parse()
+    except Exception as e:  # advisory hook — swallow everything
+        logger.debug("calibration: vm_stat snapshot failed: %s", e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +462,8 @@ def cmd_install(args: argparse.Namespace) -> int:
                 args.engine, preset=preset, manifest_path=src, firewall=args.firewall
             )
     result["preset"] = preset
+    if not args.dry_run and result.get("health_ok"):
+        _record_health_calibration(m)
     _emit(result, as_json=args.json)
     return 0 if (args.dry_run or result.get("health_ok")) else 2
 
@@ -383,6 +519,8 @@ def cmd_reinstall(args: argparse.Namespace) -> int:
         install_state.record_install(
             args.engine, preset=record.preset, manifest_path=src, firewall=firewall_mode
         )
+    if not args.dry_run and result.get("health_ok"):
+        _record_health_calibration(m)
     _emit(result, as_json=args.json)
     return 0 if (args.dry_run or result.get("health_ok")) else 2
 
@@ -403,6 +541,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         _emit({"engine": m.name, "started": False, "dry_run": True}, as_json=args.json)
         return 0
     healthy = lifecycle.wait_for_health(m, timeout=m.network.health_timeout)
+    if healthy:
+        _record_health_calibration(m)
     payload = {"engine": m.name, "started": True, "healthy": healthy}
     _emit(payload, as_json=args.json)
     return 0 if healthy else 2
@@ -453,6 +593,8 @@ def cmd_enable(args: argparse.Namespace) -> int:
         result = lifecycle.enable(m, start_now=args.start, dry_run=args.dry_run)
     if args.start and not args.dry_run:
         healthy = lifecycle.wait_for_health(m, timeout=m.network.health_timeout)
+        if healthy:
+            _record_health_calibration(m)
         result["healthy"] = healthy
         _emit(result, as_json=args.json)
         return 0 if healthy else 2
@@ -527,8 +669,16 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
 def cmd_unload(args: argparse.Namespace) -> int:
     m = _resolve_manifest(args.engine)
     driver = _driver_for(m)
+    before = _vm_snapshot_or_none()
     with memory.OperationsLock(force=args.force):
         outcome = driver.unload(args.model)
+        # Snapshot INSIDE the lock, right after the unload: a concurrent
+        # locked operation must not be able to skew the measured delta.
+        after = _vm_snapshot_or_none() if outcome.success else None
+    if outcome.success:
+        # The footprint drop across the unload is a (noisy) calibration
+        # sample for the plan estimator — recorded at half weight.
+        _record_unload_calibration(m, before, after)
     _emit(outcome, as_json=args.json)
     return 0 if outcome.success else 2
 

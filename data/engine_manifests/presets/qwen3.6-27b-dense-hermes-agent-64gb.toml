@@ -101,3 +101,11 @@ needed = false
 
 [environment]
 vars = []
+# Promoted from the "Architecture rationale" comment above:
+# - weights: 19 GB (model mlock, UD-Q5_K_XL)
+# - KV per token q8: 16 full-attention layers x 4 KV heads x 256 head_dim
+#   x 2 (K+V) x 1 byte = 32 KB/token (hybrid attention — a naive GGUF
+#   parse over all 64 layers would be ~4x too high).
+[memory]
+weights_mb = 19456.0
+kv_bytes_per_token = 32768.0

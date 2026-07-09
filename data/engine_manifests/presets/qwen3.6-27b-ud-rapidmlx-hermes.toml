@@ -92,3 +92,8 @@ needed = false
 vars = [
     "RAPIDMLX_MODEL=qwen3.6-27b-ud",
 ]
+# Promoted from the target-hardware comment above (~14 GB MLX-4bit on disk;
+# MLX weights are mmapped so disk size ~= resident weights). The ~36 GB
+# working-set advisory is a lumped figure and is deliberately NOT promoted.
+[memory]
+weights_mb = 14336.0

@@ -50,6 +50,7 @@ import sys
 import threading
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from asiai.auth import loopback as asiai_loopback
 from asiai.fleet.command_spec import ALLOWED_COMMANDS, inner_tool_timeout, loopback_timeout
@@ -60,6 +61,11 @@ LOOPBACK_HOST = "127.0.0.1"
 DEFAULT_PORT = 8898
 MAX_CONCURRENT = 4
 SHUTDOWN_GRACE_SECONDS = 5.0
+
+# Shape gate for preset names arriving over HTTP — the SAME pattern the
+# install funnel applies in ``_build_argv`` below, so the read (plan) and
+# write (install --preset) surfaces accept exactly the same names.
+PRESET_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
 # Command whitelist + subprocess-kill timeouts come from the single shared
 # source (``asiai.fleet.command_spec``). This loopback layer is the INNERMOST /
@@ -120,9 +126,7 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
         # inside cmd_install (_resolve_manifest raises on unknown names).
         preset = args.get("preset")
         if preset is not None:
-            if not isinstance(preset, str) or not re.match(
-                r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$", preset
-            ):
+            if not isinstance(preset, str) or not PRESET_NAME_RE.match(preset):
                 raise ValueError("args.preset must match [a-zA-Z0-9][a-zA-Z0-9._-]{0,63}")
             argv.extend(["--preset", preset])
     if command in ("unload", "load"):
@@ -277,7 +281,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         logger.info("%s - %s", self.address_string(), fmt % args)
 
     def _json(self, status: int, body: dict[str, Any]) -> None:
-        payload = json.dumps(body).encode("utf-8")
+        # allow_nan=False: NaN/Infinity are not valid JSON tokens; a producer
+        # bug must fail loudly server-side, never emit unparseable output
+        # onto the wire.
+        payload = json.dumps(body, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -340,6 +347,35 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:  # fail as JSON, never a traceback page
                 logger.error("presets listing failed: %s", e)
                 self._json(500, {"error": "presets_failed"})
+            return
+        if urlsplit(self.path).path == "/internal/v1/plan":
+            # Advisory memory-cost estimate for one preset (the "cost" half
+            # of the UMA plan contract; ``asiai web`` owns the verdict).
+            # Same Bearer gate: the estimate discloses preset names and the
+            # node's tuning surface.
+            if not self._check_auth():
+                self._json(401, {"error": "unauthorized"})
+                return
+            query = parse_qs(urlsplit(self.path).query)
+            presets = query.get("preset", [])
+            preset = presets[0] if len(presets) == 1 else None
+            # Same shape gate as the install funnel (PRESET_NAME_RE): the
+            # read and write surfaces must accept exactly the same names.
+            if not preset or not PRESET_NAME_RE.match(preset):
+                self._json(400, {"error": "bad_preset", "detail": "preset= query required"})
+                return
+            try:
+                from ais_core.plan import plan_for_preset
+
+                cost = plan_for_preset(preset)
+            except FileNotFoundError:
+                self._json(404, {"error": "unknown_preset", "preset": preset})
+                return
+            except Exception as e:  # fail as JSON, never a traceback page
+                logger.error("plan estimation failed for %s: %s", preset, e)
+                self._json(500, {"error": "plan_failed"})
+                return
+            self._json(200, cost.payload())
             return
         self._json(404, {"error": "not_found"})
 

@@ -102,3 +102,8 @@ needed = false
 
 [environment]
 vars = []
+# Promoted from the "Memory footprint" comment above: model ~5 GB (Q4_K_M)
+# + mmproj ~1.4 GB (F16) = ~6.4 GB resident weights. KV per token is
+# deliberately NOT declared here — the header comment only gives a lumped total.
+[memory]
+weights_mb = 6554.0

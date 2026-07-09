@@ -90,6 +90,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_reinstall.add_argument("--json", action="store_true")
     p_reinstall.set_defaults(func=commands.cmd_reinstall)
 
+    # plan
+    p_plan = sub.add_parser(
+        "plan",
+        help="Estimate a preset's memory cost (advisory, read-only, no lock).",
+    )
+    p_plan.add_argument("preset", help="Preset name (see 'aisctl list-presets').")
+    p_plan.add_argument(
+        "--engine",
+        help="Pin the engine explicitly (default: read from the preset's 'name' field).",
+    )
+    p_plan.add_argument("--json", action="store_true")
+    p_plan.set_defaults(func=commands.cmd_plan)
+
     # list-presets
     p_presets = sub.add_parser(
         "list-presets",

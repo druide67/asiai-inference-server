@@ -87,3 +87,11 @@ needed = false
 
 [environment]
 vars = []
+
+# [memory] intentionally omitted: this file only carries hedged figures
+# ("25GB+ GGUF", "35GB+ memory") and pins no exact quant ("UD-Q5_K_XL or
+# equivalent"), so there is no precise number on record to promote — and the
+# MLX siblings of this model are a different format/engine whose weights are
+# not transposable. The plan estimator prices the weights from the model
+# file's on-disk size when the active.gguf symlink is present, and the
+# calibration ring measures the real footprint on first healthy start.
