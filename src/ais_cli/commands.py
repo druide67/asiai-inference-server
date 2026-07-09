@@ -155,7 +155,9 @@ DRIVER_FACTORIES: dict[str, Callable[[], Any]] = _build_driver_factories()
 
 def _emit(payload: Any, *, as_json: bool) -> None:
     if as_json:
-        print(json.dumps(_jsonify(payload), indent=2, default=str))
+        # allow_nan=False: NaN/Infinity are not valid JSON tokens; a producer
+        # bug must crash HERE, never emit unparseable output to a consumer.
+        print(json.dumps(_jsonify(payload), indent=2, default=str, allow_nan=False))
     else:
         print(payload)
 
@@ -363,23 +365,28 @@ def _record_health_calibration(m: EngineManifest) -> None:
         logger.debug("calibration (health) skipped for %s: %s", m.name, e)
 
 
-def _record_unload_calibration(m: EngineManifest, before: memory.VmStat | None) -> None:
+def _record_unload_calibration(
+    m: EngineManifest,
+    before: memory.VmStat | None,
+    after: memory.VmStat | None,
+) -> None:
     """Record the host-wide footprint drop across a successful unload.
 
-    Noisy by nature (other processes allocate/free during the window), so
+    Both snapshots are captured by the caller — the ``after`` one INSIDE the
+    OperationsLock, right after the unload, so no concurrent locked operation
+    (purge, another unload) can allocate/free between the unload and the
+    measurement. Still noisy by nature (unlocked processes run freely), so
     :mod:`ais_core.calibration` weights these samples at 0.5 and negative
     deltas are discarded. Reuses :attr:`ais_core.memory.PurgeReport.freed_mb`
     for the active+wired+compressed accounting.
     """
-    if before is None:
+    if before is None or after is None:
         return
     try:
         record = install_state.read_install(m.name)
         if record is None or record.preset is None or not record.manifest_sha256:
             return
-        report = memory.PurgeReport(
-            before=before, after=memory.vm_stat_parse(), pressure_after="", elapsed_s=0.0
-        )
+        report = memory.PurgeReport(before=before, after=after, pressure_after="", elapsed_s=0.0)
         calibration.record_sample(
             m.name,
             preset=record.preset,
@@ -663,10 +670,13 @@ def cmd_unload(args: argparse.Namespace) -> int:
     before = _vm_snapshot_or_none()
     with memory.OperationsLock(force=args.force):
         outcome = driver.unload(args.model)
+        # Snapshot INSIDE the lock, right after the unload: a concurrent
+        # locked operation must not be able to skew the measured delta.
+        after = _vm_snapshot_or_none() if outcome.success else None
     if outcome.success:
         # The footprint drop across the unload is a (noisy) calibration
         # sample for the plan estimator — recorded at half weight.
-        _record_unload_calibration(m, before)
+        _record_unload_calibration(m, before, after)
     _emit(outcome, as_json=args.json)
     return 0 if outcome.success else 2
 

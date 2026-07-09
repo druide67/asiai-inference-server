@@ -512,3 +512,23 @@ class TestPlanEndpoint:
             _get(self._url(server, "hermes-aux-1"), headers=self._auth(server))
         assert exc.value.code == 500
         assert json.loads(exc.value.read())["error"] == "plan_failed"
+
+    def test_nan_payload_never_reaches_the_wire(self, server, monkeypatch):
+        """allow_nan=False belt-and-braces: even if a NaN somehow survives
+        the upstream guards, the server must fail rather than emit the
+        (invalid-JSON) NaN token to a consumer."""
+        import http.client
+
+        from ais_core import plan as plan_mod
+        from ais_core.plan import PresetCost
+
+        fake = PresetCost(
+            preset="hermes-aux-1",
+            total_mb_low=float("nan"),
+            total_mb_high=float("inf"),
+            confidence="declared",
+            components={},
+        )
+        monkeypatch.setattr(plan_mod, "plan_for_preset", lambda preset: fake)
+        with pytest.raises((urllib.error.URLError, ConnectionError, http.client.HTTPException)):
+            _get(self._url(server, "hermes-aux-1"), headers=self._auth(server))

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import socket
 import subprocess
@@ -121,9 +122,11 @@ def record_sample(
         raise ValueError(f"unknown sample source {source!r}; known: {sorted(SOURCE_WEIGHTS)}")
     if not _ENGINE_NAME_RE.match(engine):
         raise ValueError(f"invalid engine name {engine!r}")
-    if phys_footprint_mb <= 0:
+    # isfinite: a NaN measurement would sail past `<= 0` (every comparison is
+    # False) and poison the ring — same defence-in-depth as [memory] parsing.
+    if not math.isfinite(phys_footprint_mb) or phys_footprint_mb <= 0:
         logger.debug(
-            "calibration: discarding non-positive sample %.1f MB for %s (%s)",
+            "calibration: discarding non-positive/non-finite sample %r MB for %s (%s)",
             phys_footprint_mb,
             engine,
             source,
@@ -152,7 +155,13 @@ def _weighted_median(samples: list[dict]) -> float | None:
     pairs: list[tuple[float, float]] = []
     for s in samples:
         mb = s.get("phys_footprint_mb")
-        if isinstance(mb, bool) or not isinstance(mb, (int, float)) or mb <= 0:
+        # isfinite also rejects NaN/inf smuggled in by a hand-edited ring file.
+        if (
+            isinstance(mb, bool)
+            or not isinstance(mb, (int, float))
+            or not math.isfinite(mb)
+            or mb <= 0
+        ):
             continue
         weight = SOURCE_WEIGHTS.get(str(s.get("source")), 0.0)
         if weight > 0:

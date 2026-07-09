@@ -107,26 +107,34 @@ def _parse_ctx_size(program_args: tuple[str, ...]) -> int | None:
     """Total context size from llama.cpp-style args (``--ctx-size`` / ``-c``).
 
     This is the TOTAL KV budget, shared between ``--parallel`` slots —
-    callers must NOT multiply by the parallel count. Returns None when the
-    flag is absent or its value is not a positive integer (fail-closed:
-    the KV component then reports unknown rather than guessing a default).
+    callers must NOT multiply by the parallel count. When the flag appears
+    more than once, the LAST occurrence wins — that is what llama.cpp's own
+    CLI parser does at runtime, and the estimate must price what would
+    actually run. Returns None when the flag is absent or the winning
+    (last) occurrence is not a positive integer (fail-closed: the KV
+    component then reports unknown rather than guessing a default).
     """
     args = list(program_args)
+    ctx: int | None = None
     for i, tok in enumerate(args):
         value: str | None = None
         if tok in ("--ctx-size", "-c"):
-            if i + 1 < len(args):
-                value = args[i + 1]
+            value = args[i + 1] if i + 1 < len(args) else ""
         elif tok.startswith("--ctx-size="):
             value = tok.split("=", 1)[1]
         if value is None:
             continue
+        # Every occurrence overwrites the previous one (last assignment
+        # wins); a malformed LAST occurrence therefore yields None — the
+        # runtime would reject it, so an earlier valid value must not
+        # silently price a config that cannot start.
         try:
-            ctx = int(value)
+            parsed = int(value)
         except ValueError:
-            return None
-        return ctx if ctx > 0 else None
-    return None
+            ctx = None
+            continue
+        ctx = parsed if parsed > 0 else None
+    return ctx
 
 
 def _file_size_mb(path: str) -> float | None:

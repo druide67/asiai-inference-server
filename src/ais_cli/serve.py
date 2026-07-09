@@ -281,7 +281,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         logger.info("%s - %s", self.address_string(), fmt % args)
 
     def _json(self, status: int, body: dict[str, Any]) -> None:
-        payload = json.dumps(body).encode("utf-8")
+        # allow_nan=False: NaN/Infinity are not valid JSON tokens; a producer
+        # bug must fail loudly server-side, never emit unparseable output
+        # onto the wire.
+        payload = json.dumps(body, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))

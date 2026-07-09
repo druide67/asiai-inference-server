@@ -63,6 +63,13 @@ class TestRecordSample:
         assert _record(0.0, source="unload") is False
         assert _lookup() is None
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_nonfinite_sample_discarded(self, bad):
+        """NaN sails past a `<= 0` guard (every comparison is False); a
+        non-finite measurement must never enter the ring."""
+        assert _record(bad, source="health") is False
+        assert _lookup() is None
+
     def test_unknown_source_raises(self):
         with pytest.raises(ValueError, match="unknown sample source"):
             _record(1000.0, source="guess")
@@ -120,6 +127,20 @@ class TestWeightedMedian:
         assert result is not None
         assert result[0] == 3000.0
 
+    def test_median_ignores_nonfinite_ring_entries(self, _isolated_install_state: Path):
+        """Defence in depth: a NaN/Infinity smuggled into the ring file by a
+        hand edit must be skipped by the read path, not poison the median."""
+        _record(3000.0)
+        path = _isolated_install_state / "calibration" / "llamacpp.json"
+        raw = json.loads(path.read_text())
+        ring = raw["samples"][f"test-preset@{SHA}"]
+        ring.append({**ring[0], "phys_footprint_mb": float("inf")})
+        ring.append({**ring[0], "phys_footprint_mb": float("nan")})
+        path.write_text(json.dumps(raw))  # stdlib default writes the bare tokens
+        result = _lookup()
+        assert result is not None
+        assert result[0] == 3000.0
+
 
 class TestLifecycleHooks:
     """The commands.py hooks feed the ring — best-effort by contract."""
@@ -170,35 +191,88 @@ class TestLifecycleHooks:
         monkeypatch.setattr(commands.calibration, "engine_rss_mb", boom)
         commands._record_health_calibration(m)  # must not raise
 
-    def test_unload_hook_records_positive_delta(self, monkeypatch, tmp_path):
+    @staticmethod
+    def _vmstat(pages_active: int):
+        from ais_core.memory import VmStat
+
+        return VmStat(
+            page_size_bytes=16384,
+            pages_free=0,
+            pages_active=pages_active,
+            pages_inactive=0,
+            pages_wired=0,
+            pages_compressed=0,
+        )
+
+    def test_unload_hook_records_positive_delta(self, tmp_path):
         from ais_cli import commands
         from ais_core.manifest import load_manifest
-        from ais_core.memory import VmStat
 
         sha = self._install_record(tmp_path)
         m = load_manifest("llamacpp")
-        page = 16384
-        before = VmStat(
-            page_size_bytes=page,
-            pages_free=0,
-            pages_active=200_000,
-            pages_inactive=0,
-            pages_wired=0,
-            pages_compressed=0,
-        )
-        after = VmStat(
-            page_size_bytes=page,
-            pages_free=0,
-            pages_active=100_000,
-            pages_inactive=0,
-            pages_wired=0,
-            pages_compressed=0,
-        )
-        monkeypatch.setattr(commands.memory, "vm_stat_parse", lambda: after)
-        commands._record_unload_calibration(m, before)
+        # Both snapshots are captured by cmd_unload (the "after" one inside
+        # the OperationsLock) and passed in — the hook takes no snapshot.
+        commands._record_unload_calibration(m, self._vmstat(200_000), self._vmstat(100_000))
         result = calibration.measured_footprint_mb(
             "llamacpp", preset="some-preset", manifest_sha256=sha
         )
         assert result is not None
-        freed_mb = (100_000 * page) // (1024 * 1024)
+        freed_mb = (100_000 * 16384) // (1024 * 1024)
         assert result[0] == float(freed_mb)
+
+    def test_unload_hook_noop_without_after_snapshot(self, tmp_path):
+        from ais_cli import commands
+        from ais_core.manifest import load_manifest
+
+        sha = self._install_record(tmp_path)
+        m = load_manifest("llamacpp")
+        commands._record_unload_calibration(m, self._vmstat(200_000), None)
+        assert (
+            calibration.measured_footprint_mb("llamacpp", preset="some-preset", manifest_sha256=sha)
+            is None
+        )
+
+    def test_unload_after_snapshot_taken_inside_lock(self, monkeypatch, tmp_path):
+        """Regression: the 'after' vm_stat snapshot must happen while
+        cmd_unload still holds the OperationsLock, so a concurrent locked
+        operation cannot skew the measured delta."""
+        import argparse
+
+        from ais_cli import commands
+        from ais_core.manifest import load_manifest
+
+        self._install_record(tmp_path)
+        m = load_manifest("llamacpp")
+        events: list[str] = []
+
+        class FakeLock:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                events.append("lock_enter")
+                return self
+
+            def __exit__(self, *exc):
+                events.append("lock_exit")
+
+        class FakeOutcome:
+            success = True
+
+        class FakeDriver:
+            def unload(self, model):
+                events.append("unload")
+                return FakeOutcome()
+
+        def fake_snapshot():
+            events.append("snapshot")
+            return TestLifecycleHooks._vmstat(100_000)
+
+        monkeypatch.setattr(commands.memory, "OperationsLock", FakeLock)
+        monkeypatch.setattr(commands, "_resolve_manifest", lambda name: m)
+        monkeypatch.setattr(commands, "_driver_for", lambda manifest: FakeDriver())
+        monkeypatch.setattr(commands, "_vm_snapshot_or_none", fake_snapshot)
+        monkeypatch.setattr(commands, "_record_unload_calibration", lambda *a: None)
+        args = argparse.Namespace(engine="llamacpp", model=None, force=False, json=False)
+        assert commands.cmd_unload(args) == 0
+        assert events == ["snapshot", "lock_enter", "unload", "snapshot", "lock_exit"]

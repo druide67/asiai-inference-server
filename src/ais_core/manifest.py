@@ -49,6 +49,7 @@ separate plist files; an ``aisctl engine install`` writes a fresh
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import tomllib
@@ -508,10 +509,18 @@ def _memory_spec(raw: dict, *, source: str) -> MemorySpec:
         value = mem_raw.get(key)
         if value is None:
             return None
-        # bool is an int subclass — reject it explicitly.
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        # bool is an int subclass — reject it explicitly. isfinite() rejects
+        # the TOML literals inf/+inf/-inf/nan: NaN in particular sails past a
+        # `<= 0` guard (every comparison is False) and would propagate all the
+        # way to the wire as an invalid JSON token.
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
             raise ManifestError(
-                f"{source}: [memory].{key} must be a positive number, got {value!r}"
+                f"{source}: [memory].{key} must be a positive finite number, got {value!r}"
             )
         return float(value)
 

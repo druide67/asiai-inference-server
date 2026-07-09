@@ -141,10 +141,36 @@ class TestMemorySpecParsing:
         assert m.memory.overhead_mb == 900.0
         assert m.memory.peak_extra_mb == 2048.5
 
-    @pytest.mark.parametrize("bad", ["19GB", True, -1, 0, [1024]])
+    @pytest.mark.parametrize(
+        "bad",
+        ["19GB", True, -1, 0, [1024], float("inf"), float("-inf"), float("nan")],
+    )
     def test_malformed_value_fails_closed(self, bad):
+        """Non-finite floats matter: TOML 1.0 accepts inf/nan literals, and
+        NaN sails past a `<= 0` guard (every comparison is False) — it must
+        be rejected here, not discovered as an invalid token on the wire."""
         with pytest.raises(ManifestError, match="weights_mb"):
             _from_dict(self._raw({"weights_mb": bad}), source="test")
+
+    @pytest.mark.parametrize(
+        ("key", "literal"),
+        [
+            ("kv_bytes_per_token", "inf"),
+            ("kv_bytes_per_token", "nan"),
+            ("weights_mb", "+inf"),
+            ("overhead_mb", "-inf"),
+        ],
+    )
+    def test_toml_nonfinite_literals_rejected_end_to_end(self, _isolated_user_config, key, literal):
+        """The actual TOML literals (tomllib parses them into float inf/nan)
+        must die in load_manifest with a ManifestError, never reach the
+        estimator or the JSON surfaces."""
+        _write_preset(
+            _isolated_user_config,
+            memory_section=f"[memory]\n{key} = {literal}\n",
+        )
+        with pytest.raises(ManifestError, match=key):
+            load_manifest("llamacpp", preset="test-plan-preset")
 
     def test_unknown_key_fails_closed(self):
         """A typo'd key (resident_ram_mb…) must be a loud error, not silently
@@ -194,6 +220,22 @@ class TestParseCtxSize:
 
     def test_malformed_value_is_none(self):
         assert plan._parse_ctx_size(("--ctx-size", "lots")) is None
+
+    def test_last_occurrence_wins(self):
+        """llama.cpp's CLI parser applies the LAST assignment; the estimate
+        must price what would actually run."""
+        assert plan._parse_ctx_size(("--ctx-size", "4096", "--ctx-size", "262144")) == 262144
+
+    def test_short_flag_after_long_flag_wins(self):
+        assert plan._parse_ctx_size(("--ctx-size", "4096", "-c", "8192")) == 8192
+
+    def test_equals_form_after_long_flag_wins(self):
+        assert plan._parse_ctx_size(("--ctx-size", "4096", "--ctx-size=16384")) == 16384
+
+    def test_malformed_last_occurrence_fails_closed(self):
+        """The runtime would reject the winning (last) assignment — an earlier
+        valid value must not silently price a config that cannot start."""
+        assert plan._parse_ctx_size(("--ctx-size", "4096", "--ctx-size", "lots")) is None
 
     def test_trailing_flag_is_none(self):
         assert plan._parse_ctx_size(("--parallel", "2", "--ctx-size")) is None
@@ -543,6 +585,15 @@ class TestCmdPlan:
 
         with pytest.raises(SystemExit, match="unknown preset"):
             commands.cmd_plan(self._ns("no-such-preset"))
+
+    def test_emit_json_refuses_nan(self):
+        """Belt-and-braces on the CLI output surface: NaN/Infinity are not
+        valid JSON tokens — a producer bug must crash here, never print
+        unparseable output for a consumer to choke on."""
+        from ais_cli import commands
+
+        with pytest.raises(ValueError):
+            commands._emit({"total_mb_low": float("nan")}, as_json=True)
 
     def test_engine_mismatch_exits_cleanly(self, _isolated_user_config):
         from ais_cli import commands
