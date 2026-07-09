@@ -187,6 +187,16 @@ def _attach_engine_subparser(ctx: RegistrationContext) -> None:
             "cmd_list_presets",
         ),
         (
+            "plan",
+            "Estimate a preset's memory cost (advisory, read-only, no lock).",
+            [
+                (("preset",), {}),
+                (("--engine",), {}),
+                (("--json",), {"action": "store_true"}),
+            ],
+            "cmd_plan",
+        ),
+        (
             "reinstall",
             "Uninstall + install replaying the recorded preset.",
             [

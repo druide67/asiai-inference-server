@@ -94,3 +94,8 @@ needed = false
 
 [environment]
 vars = []
+# Promoted from the "Memory footprint" comment above (model ~3 GB) so the
+# plan estimator can price this preset. KV per token is deliberately NOT
+# declared here — the header comment only gives a lumped total.
+[memory]
+weights_mb = 3072.0
