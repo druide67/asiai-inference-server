@@ -6,6 +6,30 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0](https://github.com/druide67/asiai-inference-server/compare/v0.10.0...v0.11.0) — 2026-07-09
+
+### Added
+
+- **Preset memory-cost estimator** (#32): `aisctl plan <preset> [--engine] [--json]`
+  (and `asiai engine plan`) estimates the resident memory a preset needs —
+  weights + KV cache + runtime overhead, each from its best source
+  (measured ±10 % / declared ±20 % / computed ±35 %, worst source wins).
+  Fail-closed: an unsourceable component makes the whole estimate `unknown`
+  with zeroed bounds. GGUF metadata is deliberately never parsed (hybrid-
+  attention models make the naive KV formula wrong by ~4×).
+- Optional `[memory]` manifest section (`weights_mb`, `kv_bytes_per_token`,
+  `overhead_mb`, `peak_extra_mb`) — strictly validated (positive finite
+  numbers, unknown keys rejected). Bundled tuned presets now carry the
+  figures previously recorded as comments.
+- Calibration rings (`~/.local/state/asiai-inference-server/calibration/`):
+  real footprint samples recorded after healthy start/install/reinstall/
+  enable (full weight) and from the unload memory delta (half weight),
+  keyed by preset × manifest digest, host-filtered, 10-sample ring.
+  A fresh measurement beats any decomposition (±10 %).
+- `GET /internal/v1/plan?preset=` on `aisctl serve` (loopback, Bearer):
+  returns the frozen cost contract consumed by asiai ≥ 1.25's
+  `/api/v1/plan` verdict route.
+
 ## [0.10.0](https://github.com/druide67/asiai-inference-server/compare/v0.9.0...v0.10.0) — 2026-07-07
 
 Preset funnel — the companion release for asiai 1.22.0's install preset
