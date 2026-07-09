@@ -153,6 +153,18 @@ def _file_size_mb(path: str) -> float | None:
     return size / (1024.0 * 1024.0)
 
 
+def _unknown_component(detail: str) -> CostComponent:
+    return CostComponent(mb=None, source="unknown", detail=detail)
+
+
+def _peak_extra_component(peak_mb: float) -> CostComponent:
+    return CostComponent(
+        mb=peak_mb,
+        source="declared",
+        detail="[memory].peak_extra_mb — load/warmup transient, added to the high bound only",
+    )
+
+
 def _weights_component(manifest: EngineManifest) -> CostComponent:
     """Weights footprint: declared ``[memory].weights_mb``, else disk size."""
     declared = manifest.memory.weights_mb
@@ -161,46 +173,30 @@ def _weights_component(manifest: EngineManifest) -> CostComponent:
     if manifest.binary.model_path:
         model_mb = _file_size_mb(manifest.binary.model_path)
         if model_mb is None:
-            return CostComponent(
-                mb=None,
-                source="unknown",
-                detail=f"model file not found: {manifest.binary.model_path}",
-            )
+            return _unknown_component(f"model file not found: {manifest.binary.model_path}")
         detail = "st_size of model file"
         if manifest.binary.mmproj_path:
             mmproj_mb = _file_size_mb(manifest.binary.mmproj_path)
             if mmproj_mb is None:
-                return CostComponent(
-                    mb=None,
-                    source="unknown",
-                    detail=f"mmproj file not found: {manifest.binary.mmproj_path}",
-                )
+                return _unknown_component(f"mmproj file not found: {manifest.binary.mmproj_path}")
             model_mb += mmproj_mb
             detail = "st_size of model + mmproj files"
         return CostComponent(mb=round(model_mb, 1), source="computed", detail=detail)
-    return CostComponent(
-        mb=None,
-        source="unknown",
-        detail="no [memory].weights_mb declared and no model_path to size",
-    )
+    return _unknown_component("no [memory].weights_mb declared and no model_path to size")
 
 
 def _kv_component(manifest: EngineManifest) -> CostComponent:
     """KV cache: declared bytes/token x the ctx parsed from program_args."""
     bpt = manifest.memory.kv_bytes_per_token
     if bpt is None:
-        return CostComponent(
-            mb=None,
-            source="unknown",
-            detail="no [memory].kv_bytes_per_token declared (GGUF parsing is deliberately "
-            "not attempted: wrong on hybrid-attention models)",
+        return _unknown_component(
+            "no [memory].kv_bytes_per_token declared (GGUF parsing is deliberately "
+            "not attempted: wrong on hybrid-attention models)"
         )
     ctx = _parse_ctx_size(manifest.binary.program_args)
     if ctx is None:
-        return CostComponent(
-            mb=None,
-            source="unknown",
-            detail="kv_bytes_per_token declared but no --ctx-size/-c in program_args",
+        return _unknown_component(
+            "kv_bytes_per_token declared but no --ctx-size/-c in program_args"
         )
     kv_mb = bpt * ctx / (1024.0 * 1024.0)
     return CostComponent(
@@ -267,12 +263,7 @@ def estimate_preset_cost(
             }
             high = median_mb * (1 + band)
             if peak is not None:
-                components["peak_extra"] = CostComponent(
-                    mb=peak,
-                    source="declared",
-                    detail="[memory].peak_extra_mb — load/warmup transient, added to the "
-                    "high bound only",
-                )
+                components["peak_extra"] = _peak_extra_component(peak)
                 high += peak
             overflow = _overflow_fallback(preset, median_mb * (1 - band), high, components)
             if overflow is not None:
@@ -292,11 +283,7 @@ def estimate_preset_cost(
         "overhead": _overhead_component(manifest),
     }
     if peak is not None:
-        components["peak_extra"] = CostComponent(
-            mb=peak,
-            source="declared",
-            detail="[memory].peak_extra_mb — load/warmup transient, added to the high bound only",
-        )
+        components["peak_extra"] = _peak_extra_component(peak)
 
     summed = [components[name] for name in ("weights", "kv_cache", "overhead")]
     confidence = _worst_confidence([c.source for c in summed])
@@ -361,10 +348,8 @@ def _overflow_fallback(
         else dataclasses.replace(comp, mb=None, source="unknown")
         for name, comp in components.items()
     }
-    sanitized["arithmetic_overflow"] = CostComponent(
-        mb=None,
-        source="unknown",
-        detail="band arithmetic overflowed — memory figures are implausibly large",
+    sanitized["arithmetic_overflow"] = _unknown_component(
+        "band arithmetic overflowed — memory figures are implausibly large"
     )
     return PresetCost(
         preset=preset,

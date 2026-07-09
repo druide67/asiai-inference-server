@@ -593,6 +593,8 @@ def cmd_enable(args: argparse.Namespace) -> int:
         result = lifecycle.enable(m, start_now=args.start, dry_run=args.dry_run)
     if args.start and not args.dry_run:
         healthy = lifecycle.wait_for_health(m, timeout=m.network.health_timeout)
+        if healthy:
+            _record_health_calibration(m)
         result["healthy"] = healthy
         _emit(result, as_json=args.json)
         return 0 if healthy else 2

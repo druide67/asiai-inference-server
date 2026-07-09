@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import re
 import socket
 import subprocess
@@ -47,7 +46,7 @@ import time
 from pathlib import Path
 
 from ais_core.install_state import _state_dir
-from ais_core.manifest import EngineManifest
+from ais_core.manifest import EngineManifest, is_positive_finite
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +121,7 @@ def record_sample(
         raise ValueError(f"unknown sample source {source!r}; known: {sorted(SOURCE_WEIGHTS)}")
     if not _ENGINE_NAME_RE.match(engine):
         raise ValueError(f"invalid engine name {engine!r}")
-    # isfinite: a NaN measurement would sail past `<= 0` (every comparison is
-    # False) and poison the ring — same defence-in-depth as [memory] parsing.
-    if not math.isfinite(phys_footprint_mb) or phys_footprint_mb <= 0:
+    if not is_positive_finite(phys_footprint_mb):
         logger.debug(
             "calibration: discarding non-positive/non-finite sample %r MB for %s (%s)",
             phys_footprint_mb,
@@ -155,13 +152,8 @@ def _weighted_median(samples: list[dict]) -> float | None:
     pairs: list[tuple[float, float]] = []
     for s in samples:
         mb = s.get("phys_footprint_mb")
-        # isfinite also rejects NaN/inf smuggled in by a hand-edited ring file.
-        if (
-            isinstance(mb, bool)
-            or not isinstance(mb, (int, float))
-            or not math.isfinite(mb)
-            or mb <= 0
-        ):
+        # Also rejects NaN/inf smuggled in by a hand-edited ring file.
+        if not is_positive_finite(mb):
             continue
         weight = SOURCE_WEIGHTS.get(str(s.get("source")), 0.0)
         if weight > 0:

@@ -487,6 +487,23 @@ def load_manifest(name: str, preset: str | None = None) -> EngineManifest:
     return manifest
 
 
+def is_positive_finite(value: object) -> bool:
+    """True for a positive, finite int/float (bool excluded).
+
+    The three [memory]/calibration validation sites share this predicate:
+    bool is an int subclass — rejected explicitly — and isfinite() rejects
+    the TOML literals inf/+inf/-inf/nan (NaN in particular sails past a
+    ``<= 0`` guard, every comparison being False, and would propagate all
+    the way to the wire as an invalid JSON token).
+    """
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
 def _memory_spec(raw: dict, *, source: str) -> MemorySpec:
     """Parse the optional ``[memory]`` section into a :class:`MemorySpec`.
 
@@ -509,16 +526,7 @@ def _memory_spec(raw: dict, *, source: str) -> MemorySpec:
         value = mem_raw.get(key)
         if value is None:
             return None
-        # bool is an int subclass — reject it explicitly. isfinite() rejects
-        # the TOML literals inf/+inf/-inf/nan: NaN in particular sails past a
-        # `<= 0` guard (every comparison is False) and would propagate all the
-        # way to the wire as an invalid JSON token.
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value <= 0
-        ):
+        if not is_positive_finite(value):
             raise ManifestError(
                 f"{source}: [memory].{key} must be a positive finite number, got {value!r}"
             )
