@@ -89,6 +89,7 @@ def test_list_human_output(capsys: pytest.CaptureFixture[str]) -> None:
     assert "vmlx" in out
     assert "mlx-lm" in out
     assert "rapidmlx" in out
+    assert "mtplx" in out
 
 
 def test_list_json_output(capsys: pytest.CaptureFixture[str]) -> None:
@@ -110,6 +111,7 @@ def test_list_json_output(capsys: pytest.CaptureFixture[str]) -> None:
         "vmlx",
         "mlx-lm",
         "rapidmlx",
+        "mtplx",
     }
 
 
@@ -153,10 +155,10 @@ def test_status_all_engines_when_no_arg(capsys: pytest.CaptureFixture[str]) -> N
     out = capsys.readouterr().out
     payload = json.loads(out)
     assert rc == 0
-    # 9 baseline engines (ollama, lmstudio, omlx, turboquant, llamacpp,
-    # llamacpp-aux-1, vmlx, mlx-lm, rapidmlx) + 4 extra aux-N siblings
-    # (aux-2/3/4/5) = 13
-    assert len(payload["engines"]) == 13
+    # 10 baseline engines (ollama, lmstudio, omlx, turboquant, llamacpp,
+    # llamacpp-aux-1, vmlx, mlx-lm, rapidmlx, mtplx) + 4 extra aux-N
+    # siblings (aux-2/3/4/5) = 14
+    assert len(payload["engines"]) == 14
 
 
 def test_status_deep_surfaces_degraded_state_and_gen_verdict(

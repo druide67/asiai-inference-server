@@ -1,0 +1,143 @@
+# Example preset — Qwen3.6-27B MTPLX Optimized-Speed (native MTP D3) for Hermes Agent
+#
+# This is an EXAMPLE preset adapted for the Hermes Agent class of
+# orchestrator (see README.md in this directory). Copy and edit for your
+# own orchestrator, or override locally via $XDG_CONFIG_HOME.
+#
+# Target role: PRIMARY main-inference slot (port 8080) — drop-in
+#   replacement for a llama.cpp main instance. Installing this preset on
+#   a host where llamacpp runs on 8080 requires stopping/disabling
+#   llamacpp first (one port, one server).
+# Target hardware: Apple Silicon M-series with 64+ GB unified memory.
+# Target use case: Hermes Agent class — multi-turn agentic sessions,
+#   60-80 api_calls per cycle, tool-calling reliability matters. Thinking
+#   is disabled at LAUNCH (``--reasoning off`` → the server starts with
+#   ``--reasoning-mode off --no-enable-thinking``, verified against the
+#   ``mtplx quickstart --dry-run`` argv 2026-07-11): a tool-executor role
+#   must answer, not deliberate.
+# Target model: Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed — the MTPLX
+#   forge of Qwen3.6-27B (dense, hybrid attention) with a verified MTP
+#   head, served from the MTPLX cache (~16 GB on disk). Fetch it once
+#   before installing: ``mtplx quickstart --model
+#   Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed --download --dry-run``
+#   (or ``mtplx setup``); ``mtplx models`` lists the cache.
+#
+# Tuning rationale:
+# - ``--mtp --depth 3``: native MTP speculative decoding, 3 drafted
+#   tokens per verify pass — the engine's whole point, and the measured
+#   sweet spot on M-series for this model family (``mtplx tune`` to
+#   re-derive for your Mac).
+# - ``--profile turbo``: sustained-throughput runtime profile used in the
+#   bench campaign that motivated the cutover.
+# - ``--ssd-session-cache off`` EXPLICIT: MTPLX 2.0.x defaults the SSD
+#   SessionBank to on/100GB (upstream issue youssofal/MTPLX#140) — a
+#   supervised daemon never inherits that silently. Flip to ``on`` only
+#   as a deliberate operator decision (TTFT wins on recurring prefixes
+#   at the price of SSD writes + disk budget).
+# - ``--default-temperature/top-p/top-k`` 0.6/0.95/20: Qwen3.6 official
+#   sampling recommendations (same as the llamacpp Hermes presets).
+# - Paged KV quantization stays at its default (off = fp16); the model's
+#   hybrid attention keeps the KV bill small (see [memory] below).
+#
+# Auth (MTPLX hard constraint on LAN binds):
+# - MTPLX refuses ``--host 0.0.0.0`` without an API key, and its auth
+#   middleware covers ALL routes including ``/health``.
+# - The key lives in a FILE (600 perms), never in argv: create it once
+#   with ``umask 077 && python3 -c 'import secrets; print(secrets.token_hex(32))'
+#   > ~/.mtplx/api-key`` before installing. ``~`` in ``--api-key-file``
+#   is expanded by MTPLX against $HOME, which the daemon plist sets to
+#   the daemon account's home.
+# - ``[network].api_key_file`` (below) lets the aisrv health/generation
+#   probes authenticate; every OTHER client (Hermes, monitoring) must
+#   send ``Authorization: Bearer <key>`` too.
+#
+# Install: aisctl install mtplx --preset qwen3.6-27b-mtplx-hermes-agent
+
+name = "mtplx"
+display = "MTPLX (Qwen3.6-27B Optimized-Speed, native MTP D3, Hermes Agent preset)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/mtplx",
+    "/usr/local/bin/mtplx",
+]
+# The quickstart CLI execs into ``python -m mtplx.server.openai`` — match
+# the server module in the final cmdline (it also carries --port for
+# instance disambiguation).
+process_pattern = "mtplx.server.openai"
+# ``--model`` is an MTPLX repo id resolved against ``~/.mtplx/models/``,
+# not a filesystem path — hence in program_args, not ``model_path``.
+# --host/--port are emitted automatically from [network] (do not duplicate).
+program_args = [
+    "quickstart",
+    "--model", "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed",
+    "--yes",
+    "--profile", "turbo",
+    "--mtp",
+    "--depth", "3",
+    "--reasoning", "off",
+    "--ssd-session-cache", "off",
+    "--default-temperature", "0.6",
+    "--default-top-p", "0.95",
+    "--default-top-k", "20",
+    "--api-key-file", "~/.mtplx/api-key",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.mtplx"
+throttle_interval = 15
+timeout = 60
+
+[network]
+# Takes over the main-inference slot (llama.cpp main's port). Stop or
+# disable any llamacpp instance on 8080 before installing.
+port = 8080
+# LAN-exposed for the Hermes Agent orchestrator — pair with
+# ``aisctl install --firewall lan-only`` and the API key above.
+bind = "0.0.0.0"
+health_endpoint = "/health"
+# 120s: ~16 GB of MLX weights + startup warmup generation on a cold
+# page cache.
+health_timeout = 120
+# Path to the SAME key file passed via --api-key-file: MTPLX auth covers
+# /health and /v1/chat/completions, so the aisrv probes must send
+# ``Authorization: Bearer <key>`` or a serving engine would read as
+# UNHEALTHY forever. Only the path is declared here — never the key.
+api_key_file = "~/.mtplx/api-key"
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.mtplx"
+
+[logs]
+dir = "~/Library/Logs/asiai/mtplx"
+stdout = "mtplx-stdout.log"
+stderr = "mtplx-stderr.log"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []
+
+# Memory figures for the plan estimator (advisory, ±20% declared band;
+# the first healthy start records a calibration sample that beats these):
+# - weights: MLX weights are mmapped, resident ~= on-disk size. The cache
+#   dir measures 15.7 GiB (du -m: 15659); 16400 MB declared keeps a small
+#   allowance for the MTP head tensors resident alongside.
+# - KV per token fp16 (paged-kv-quantization off, verified via quickstart
+#   --dry-run argv): 16 full-attention layers x 4 KV heads x 256 head_dim
+#   x 2 (K+V) x 2 bytes = 64 KiB/token. Hybrid attention — only 16 of 64
+#   layers carry KV (arch validated vs HF config 2026-05-17, see the
+#   qwen3.6-27b-dense llamacpp preset); the 48 DeltaNet layers keep a
+#   fixed-size state priced inside the overhead default.
+# - ctx_tokens: the MTPLX CLI takes no context-size flag (window is
+#   model-native, 262144 for Qwen3.6-27B). MTPLX pages KV on demand, so
+#   this prices the FULL-context worst case — the honest admission bound;
+#   steady-state occupancy under Hermes runs lower and calibration will
+#   converge on it.
+[memory]
+weights_mb = 16400.0
+kv_bytes_per_token = 65536.0
+ctx_tokens = 262144.0

@@ -396,7 +396,7 @@ class TestEnginesState:
                 self.network = _Net()
                 self.network.port = port
 
-        def fake_load(name):
+        def fake_load(name, preset=None):
             if name == "broken":
                 raise ValueError("bad toml")
             return FakeManifest(name, 8090)

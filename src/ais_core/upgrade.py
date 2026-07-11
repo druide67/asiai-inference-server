@@ -21,6 +21,7 @@ UPGRADE_FORMULAS: dict[str, str] = {
     "lmstudio": "lm-studio",
     "rapidmlx": "rapid-mlx",
     "turboquant": "turboquant",
+    "mtplx": "mtplx",
 }
 
 

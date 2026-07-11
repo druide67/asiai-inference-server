@@ -136,3 +136,26 @@ def clear_install(engine: str) -> bool:
         return True
     except FileNotFoundError:
         return False
+
+
+def load_installed_manifest(name: str):
+    """Load ``name``'s manifest as INSTALLED: overlay the preset recorded
+    at install time.
+
+    Lifecycle verbs and dashboards must probe the ports/paths the service
+    was actually generated from, and a preset may move them off the
+    baseline (e.g. a main-slot preset relocating a sidecar-baseline
+    engine's port). Resolving the baseline instead reports a serving
+    engine as stopped — and a post-start health wait would time out on a
+    port nobody listens on.
+
+    A recorded preset that no longer resolves (deleted since install)
+    degrades to the baseline rather than failing every verb.
+    """
+    from ais_core import manifest as manifest_mod
+
+    record = read_install(name)
+    preset = record.preset if record else None
+    if preset is not None and preset not in manifest_mod.list_presets():
+        preset = None
+    return manifest_mod.load_manifest(name, preset=preset)

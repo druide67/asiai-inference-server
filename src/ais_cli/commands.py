@@ -46,6 +46,7 @@ from ais_engines.llamacpp import LlamaCppDriver
 from ais_engines.llamacpp_aux import LlamaCppAuxDriver
 from ais_engines.lmstudio import LMStudioDriver
 from ais_engines.mlx_lm import MlxLmDriver
+from ais_engines.mtplx import MtplxDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
 from ais_engines.rapidmlx import RapidMlxDriver
@@ -66,6 +67,7 @@ _STATIC_DRIVER_FACTORIES: dict[str, Callable[[], Any]] = {
     "vmlx": VmlxDriver.from_manifest,
     "mlx-lm": MlxLmDriver.from_manifest,
     "rapidmlx": RapidMlxDriver.from_manifest,
+    "mtplx": MtplxDriver.from_manifest,
 }
 
 # Family-pattern registrations — names matching the regex resolve to the
@@ -188,6 +190,19 @@ def _resolve_manifest(name: str, preset: str | None = None) -> EngineManifest:
     return load_manifest(name, preset=preset)
 
 
+def _resolve_installed_manifest(name: str) -> EngineManifest:
+    """Resolve an engine as INSTALLED (preset recorded at install time).
+
+    Lifecycle verbs must target the ports/paths the service was actually
+    generated from — the baseline may differ (a preset can move the port).
+    ``install`` keeps taking its preset explicitly; everything that acts
+    on an existing service goes through here.
+    """
+    if name not in list_manifests():
+        raise SystemExit(f"unknown engine {name!r}; known: {', '.join(list_manifests())}")
+    return install_state.load_installed_manifest(name)
+
+
 def _driver_for(manifest: EngineManifest):
     try:
         factory = get_driver_factory(manifest.name)
@@ -299,7 +314,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     targets = [args.engine] if args.engine else list_manifests()
     rows = []
     for name in targets:
-        m = _resolve_manifest(name)
+        m = _resolve_installed_manifest(name)
         # probe_state probes generation at most once per engine (deep mode)
         # and returns the verdict alongside the state. ZOMBIE downgrades the
         # state to DEGRADED; BUSY/UNSUPPORTED/ERROR are surfaced as-is so the
@@ -526,7 +541,7 @@ def cmd_reinstall(args: argparse.Namespace) -> int:
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     with memory.OperationsLock(force=args.force):
         result = lifecycle.uninstall(m, dry_run=args.dry_run)
     _emit(result, as_json=args.json)
@@ -534,7 +549,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     dry_run = getattr(args, "dry_run", False)
     lifecycle.start(m, dry_run=dry_run)
     if dry_run:
@@ -549,7 +564,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 
 def cmd_stop(args: argparse.Namespace) -> int:
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     with memory.OperationsLock(force=args.force):
         lifecycle.stop(m, dry_run=args.dry_run)
     _emit({"engine": m.name, "stopped": True, "dry_run": args.dry_run}, as_json=args.json)
@@ -557,7 +572,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 
 def cmd_restart(args: argparse.Namespace) -> int:
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     dry_run = getattr(args, "dry_run", False)
     with memory.OperationsLock(force=args.force):
         lifecycle.restart(m, dry_run=dry_run)
@@ -580,7 +595,7 @@ def cmd_disable(args: argparse.Namespace) -> int:
     installed with its tuned configuration but is excluded from the boot
     sequence — and from its model-load memory spike.
     """
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     with memory.OperationsLock(force=args.force):
         result = lifecycle.disable(m, dry_run=args.dry_run)
     _emit(result, as_json=args.json)
@@ -588,7 +603,7 @@ def cmd_disable(args: argparse.Namespace) -> int:
 
 
 def cmd_enable(args: argparse.Namespace) -> int:
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     with memory.OperationsLock(force=args.force):
         result = lifecycle.enable(m, start_now=args.start, dry_run=args.dry_run)
     if args.start and not args.dry_run:
@@ -611,7 +626,7 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     (otherwise we print a hint and leave the process running so an in-flight
     request isn't interrupted without the operator asking).
     """
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     try:
         argv = upgrade_argv(m.name)
     except ValueError as e:
@@ -667,7 +682,7 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
 
 
 def cmd_unload(args: argparse.Namespace) -> int:
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     driver = _driver_for(m)
     before = _vm_snapshot_or_none()
     with memory.OperationsLock(force=args.force):
@@ -701,7 +716,7 @@ def cmd_load(args: argparse.Namespace) -> int:
     import urllib.error
     import urllib.request
 
-    m = _resolve_manifest(args.engine)
+    m = _resolve_installed_manifest(args.engine)
     # Driver is intentionally not used here: this command targets the
     # engine's HTTP surface directly (different transport per engine).
     # We still resolve the manifest to enforce that the engine is known.

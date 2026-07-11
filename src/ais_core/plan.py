@@ -185,24 +185,47 @@ def _weights_component(manifest: EngineManifest) -> CostComponent:
     return _unknown_component("no [memory].weights_mb declared and no model_path to size")
 
 
+def _ctx_flag_present(program_args: tuple[str, ...]) -> bool:
+    """True iff a llama.cpp-style context flag appears in the args at all."""
+    return any(tok in ("--ctx-size", "-c") or tok.startswith("--ctx-size=") for tok in program_args)
+
+
 def _kv_component(manifest: EngineManifest) -> CostComponent:
-    """KV cache: declared bytes/token x the ctx parsed from program_args."""
+    """KV cache: declared bytes/token x the ctx parsed from program_args.
+
+    Engines whose CLI takes no context-size flag (the window is model-native,
+    e.g. MTPLX) declare the budget as ``[memory].ctx_tokens`` instead. The
+    declared figure is only a FALLBACK: a context flag present in
+    ``program_args`` always wins (it is what the runtime honors), and a
+    present-but-malformed flag stays fail-closed unknown — falling back would
+    price a config that cannot start.
+    """
     bpt = manifest.memory.kv_bytes_per_token
     if bpt is None:
         return _unknown_component(
             "no [memory].kv_bytes_per_token declared (GGUF parsing is deliberately "
             "not attempted: wrong on hybrid-attention models)"
         )
-    ctx = _parse_ctx_size(manifest.binary.program_args)
+    ctx: float | None = _parse_ctx_size(manifest.binary.program_args)
+    ctx_origin = "--ctx-size"
+    if ctx is None:
+        if _ctx_flag_present(manifest.binary.program_args):
+            return _unknown_component(
+                "kv_bytes_per_token declared but the --ctx-size/-c in program_args "
+                "is malformed (fail-closed: the runtime would reject it)"
+            )
+        ctx = manifest.memory.ctx_tokens
+        ctx_origin = "[memory].ctx_tokens"
     if ctx is None:
         return _unknown_component(
-            "kv_bytes_per_token declared but no --ctx-size/-c in program_args"
+            "kv_bytes_per_token declared but no --ctx-size/-c in program_args "
+            "and no [memory].ctx_tokens"
         )
     kv_mb = bpt * ctx / (1024.0 * 1024.0)
     return CostComponent(
         mb=round(kv_mb, 1),
         source="declared",
-        detail=f"{bpt:g} B/token x ctx {ctx} (total, shared across slots)",
+        detail=f"{bpt:g} B/token x ctx {ctx:g} ({ctx_origin}; total, shared across slots)",
     )
 
 

@@ -75,3 +75,26 @@ def test_state_dir_falls_back_to_xdg_state_home(
     install_state.record_install("ollama", preset="p", manifest_path=manifest_file)
     expected = tmp_path / "xdg-state" / "asiai-inference-server" / "installs" / "ollama.json"
     assert expected.is_file()
+
+
+class TestLoadInstalledManifest:
+    """The INSTALLED view: lifecycle verbs must resolve the preset recorded
+    at install time — the baseline may live on another port entirely."""
+
+    def test_overlays_recorded_preset(self, manifest_file: Path) -> None:
+        install_state.record_install(
+            "mtplx", preset="qwen3.6-27b-mtplx-hermes-agent", manifest_path=manifest_file
+        )
+        m = install_state.load_installed_manifest("mtplx")
+        assert m.network.port == 8080  # preset port, not the 8005 baseline
+
+    def test_no_record_resolves_baseline(self) -> None:
+        m = install_state.load_installed_manifest("mtplx")
+        assert m.network.port == 8005
+
+    def test_vanished_preset_degrades_to_baseline(self, manifest_file: Path) -> None:
+        install_state.record_install(
+            "mtplx", preset="deleted-since-install", manifest_path=manifest_file
+        )
+        m = install_state.load_installed_manifest("mtplx")
+        assert m.network.port == 8005

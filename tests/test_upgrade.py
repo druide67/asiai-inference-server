@@ -25,7 +25,14 @@ def test_upgrade_argv_rejects_unlisted():
 
 
 def test_whitelist_covers_expected_engines():
-    assert set(UPGRADE_FORMULAS) >= {"ollama", "llamacpp", "lmstudio", "rapidmlx", "turboquant"}
+    assert set(UPGRADE_FORMULAS) >= {
+        "ollama",
+        "llamacpp",
+        "lmstudio",
+        "rapidmlx",
+        "turboquant",
+        "mtplx",
+    }
 
 
 # --- cmd_upgrade -----------------------------------------------------------

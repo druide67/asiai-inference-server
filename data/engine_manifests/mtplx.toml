@@ -1,0 +1,109 @@
+# Engine manifest — MTPLX — generic baseline
+#
+# Upstream: https://github.com/youssofal/MTPLX
+# Install:  ``brew install youssofal/mtplx/mtplx`` (brew tap)
+#
+# MTPLX is an MLX-based OpenAI-compatible inference server for Apple Silicon
+# built around NATIVE MTP (multi-token prediction) speculative decoding:
+# the model's own MTP head drafts tokens that the target verifies in a
+# single pass — no separate draft model. It serves MTPLX-forged model
+# artifacts from its own cache (``~/.mtplx/models/``, see ``mtplx models``).
+#
+# Launch path (why the brew wrapper, not the venv python)
+# -------------------------------------------------------
+# The brew formula installs a wrapper script at ``/opt/homebrew/bin/mtplx``
+# that execs the CLI inside a KEG-VERSIONED virtualenv
+# (``/opt/homebrew/var/mtplx/venv-<version>/``) — a path that CHANGES on
+# every ``brew upgrade``. The daemon therefore launches through the stable
+# wrapper: ``mtplx quickstart`` resolves the current venv, then the CLI
+# ``os.execvpe``s the real server (``python -m mtplx.server.openai``)
+# in-place. One PID from wrapper to server — launchd supervises the
+# serving process directly, and a KeepAlive respawn re-resolves whatever
+# venv the installed formula currently ships. Hardcoding the venv python
+# would break silently at the first upgrade.
+#
+# ``process_pattern`` matches the post-exec cmdline (the server module),
+# which also carries ``--port`` for instance disambiguation.
+#
+# SSD session cache — ALWAYS pinned explicitly
+# --------------------------------------------
+# MTPLX 2.0.x defaults the persistent SSD SessionBank cache to ON with a
+# 100 GB budget (upstream issue youssofal/MTPLX#140). A supervised daemon
+# must never inherit that silently: every manifest/preset for this engine
+# passes ``--ssd-session-cache`` explicitly.
+#
+# Auth constraint (baseline binds loopback)
+# -----------------------------------------
+# MTPLX refuses any non-localhost bind without an API key, and its auth
+# middleware covers ALL routes including ``/health``. The baseline binds
+# 127.0.0.1 so it works out of the box, key-less. Presets that expose the
+# server on the LAN must add ``--api-key-file`` to ``program_args`` AND
+# declare ``[network].api_key_file`` so the aisrv health/generation probes
+# authenticate (see the mtplx Hermes preset for the worked example).
+#
+# For pre-tuned configurations see ``data/engine_manifests/presets/``:
+#   aisctl install mtplx --preset <preset-name>
+
+name = "mtplx"
+display = "MTPLX (native MTP speculative decoding)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/mtplx",
+    "/usr/local/bin/mtplx",
+]
+# The quickstart CLI execs into ``python -m mtplx.server.openai`` — match
+# the server module in the final cmdline, not the transient wrapper argv.
+process_pattern = "mtplx.server.openai"
+# ``quickstart`` is the positional subcommand (same pattern as the
+# rapidmlx ``serve`` preset). ``--model`` takes an MTPLX/HF repo id
+# resolved against the MTPLX cache — it is NOT a filesystem path, so it
+# lives here rather than in ``model_path`` (which is tilde-expanded and
+# realpath'd for file-based engines). ``--yes`` confirms non-interactive
+# actions; --host/--port are emitted automatically from [network].
+program_args = [
+    "quickstart",
+    "--model", "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed",
+    "--yes",
+    "--ssd-session-cache", "off",
+]
+builds_from_source = false
+
+[plist]
+name = "com.asiai.mtplx"
+throttle_interval = 15
+timeout = 60
+
+[network]
+# 8005 — picked to leave room for mlx-lm (8000), vmlx (8003), rapidmlx
+# (8004), llamacpp main (8080), turboquant (8081), llamacpp-aux (8090+),
+# omlx (8800) without collision. Presets that take over a production slot
+# (e.g. the Hermes preset replacing llamacpp main on 8080) override it.
+port = 8005
+# Loopback default: key-less out-of-the-box install (MTPLX hard-requires
+# an API key for any non-localhost bind). LAN presets override ``bind``
+# and pair it with ``--api-key-file`` + ``[network].api_key_file``.
+bind = "127.0.0.1"
+# GET /health answers {"ok": true, ...} once the model is loaded and the
+# warmup generation finished.
+health_endpoint = "/health"
+# 120s: loading ~16 GB of MLX weights + the startup warmup generation can
+# take well over a minute on a cold page cache.
+health_timeout = 120
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.mtplx"
+
+[logs]
+dir = "~/Library/Logs/asiai/mtplx"
+stdout = "mtplx-stdout.log"
+stderr = "mtplx-stderr.log"
+
+[wrapper]
+# The brew formula already ships its own wrapper script — nothing for
+# aisrv to install.
+needed = false
+
+[environment]
+vars = []

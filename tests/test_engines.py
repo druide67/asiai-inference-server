@@ -12,6 +12,7 @@ from ais_engines.llamacpp import LlamaCppDriver
 from ais_engines.llamacpp_aux import LlamaCppAuxDriver
 from ais_engines.lmstudio import LMStudioDriver
 from ais_engines.mlx_lm import MlxLmDriver
+from ais_engines.mtplx import MtplxDriver
 from ais_engines.ollama import OllamaDriver
 from ais_engines.omlx import OmlxDriver
 from ais_engines.turboquant import TurboquantDriver
@@ -189,6 +190,7 @@ def test_list_loaded_models_empty_when_engine_lacks_method() -> None:
         (LlamaCppDriver.from_manifest, "llamacpp"),
         (VmlxDriver.from_manifest, "vmlx"),
         (MlxLmDriver.from_manifest, "mlx-lm"),
+        (MtplxDriver.from_manifest, "mtplx"),
     ],
 )
 def test_factories_load_correct_manifest(factory, expected_name: str) -> None:
@@ -238,6 +240,21 @@ def test_vmlx_from_manifest_loads_engine_proxy() -> None:
     driver = VmlxDriver.from_manifest()
     assert driver.manifest.name == "vmlx"
     assert driver.manifest.network.port == 8003
+
+
+def test_mtplx_driver_is_restart_only_subclass() -> None:
+    driver = MtplxDriver.from_manifest()
+    assert isinstance(driver, RestartOnlyDriver)
+    assert driver.name == "mtplx"
+    # MTPLX serves one model loaded at launch; no unload endpoint —
+    # bouncing the LaunchDaemon is the only way to free the VRAM.
+    assert driver._try_native_unload("any-model") is False
+
+
+def test_mtplx_from_manifest_loads_baseline() -> None:
+    driver = MtplxDriver.from_manifest()
+    assert driver.manifest.name == "mtplx"
+    assert driver.manifest.network.port == 8005
 
 
 def test_mlx_lm_from_manifest_loads_engine_proxy() -> None:

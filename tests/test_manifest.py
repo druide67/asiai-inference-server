@@ -30,6 +30,7 @@ EXPECTED_ENGINES = {
     "vmlx",
     "mlx-lm",
     "rapidmlx",
+    "mtplx",
 }
 
 
@@ -152,6 +153,92 @@ def test_llamacpp_hermes_preset() -> None:
     assert pa[pa.index("--top-p") + 1] == "0.95"
     assert pa[pa.index("--top-k") + 1] == "20"
     assert "--chat-template-kwargs" in pa
+
+
+def test_mtplx_baseline_specifics() -> None:
+    """Baseline mtplx.toml: loopback, key-less, SSD cache pinned off.
+
+    MTPLX hard-requires an API key for any non-localhost bind and its auth
+    middleware covers /health — the baseline binds 127.0.0.1 so it works
+    out of the box without a key. The SSD SessionBank default (on/100GB,
+    upstream issue #140) must never be inherited silently: every mtplx
+    manifest passes --ssd-session-cache explicitly.
+    """
+    m = load_manifest("mtplx")
+    assert m.network.port == 8005
+    assert m.network.bind == "127.0.0.1"
+    assert m.network.api_key_file is None
+    assert m.network.health_endpoint == "/health"
+    assert m.plist.name == "com.asiai.mtplx"
+    assert m.firewall.anchor_name == "com.asiai.mtplx"
+    # The quickstart CLI execs into the server module — the pattern must
+    # match the FINAL cmdline, not the transient wrapper argv.
+    assert m.binary.process_pattern == "mtplx.server.openai"
+    assert not m.wrapper.needed
+    assert not m.binary.builds_from_source
+    pa = list(m.binary.program_args)
+    # Positional subcommand first (same pattern as the rapidmlx presets).
+    assert pa[0] == "quickstart"
+    assert "--yes" in pa
+    assert pa[pa.index("--ssd-session-cache") + 1] == "off"
+    # The model is an MTPLX repo id, not a file path: program_args, never
+    # model_path (which is tilde-expanded + realpath'd for file engines).
+    assert m.binary.model_path is None
+    assert "--model" in pa
+    # Baseline keeps out workload tuning (that's the preset's job).
+    assert "--profile" not in pa
+    assert "--reasoning" not in pa
+    assert m.network.health_timeout >= 120
+
+
+def test_mtplx_hermes_preset() -> None:
+    """The Qwen3.6-27B Optimized-Speed Hermes preset (M-series main slot).
+
+    Carries the validated cutover tuning: native MTP depth 3, turbo
+    profile, thinking OFF at launch, Qwen3.6 sampling recos, SSD cache
+    explicitly off, LAN bind + API-key file (both the server flag and the
+    [network] declaration the aisrv probes authenticate with).
+    """
+    m = load_manifest("mtplx", preset="qwen3.6-27b-mtplx-hermes-agent")
+    assert m.name == "mtplx"
+    # Supervision identity pinned to the baseline (label + anchor).
+    assert m.plist.name == "com.asiai.mtplx"
+    assert m.firewall.anchor_name == "com.asiai.mtplx"
+    # Takes over the main-inference slot.
+    assert m.network.port == 8080
+    assert m.network.bind == "0.0.0.0"
+    pa = list(m.binary.program_args)
+    assert pa[0] == "quickstart"
+    assert "--yes" in pa
+    assert "--mtp" in pa
+    assert pa[pa.index("--depth") + 1] == "3"
+    assert pa[pa.index("--profile") + 1] == "turbo"
+    # Thinking OFF at launch for the tool-executor role (--reasoning off →
+    # server argv --reasoning-mode off --no-enable-thinking, verified via
+    # mtplx quickstart --dry-run).
+    assert pa[pa.index("--reasoning") + 1] == "off"
+    # Dangerous upstream default pinned off (issue #140).
+    assert pa[pa.index("--ssd-session-cache") + 1] == "off"
+    # Qwen3.6 official sampling recommendations.
+    assert pa[pa.index("--default-temperature") + 1] == "0.6"
+    assert pa[pa.index("--default-top-p") + 1] == "0.95"
+    assert pa[pa.index("--default-top-k") + 1] == "20"
+    # LAN bind requires the key: server flag + probe declaration, and the
+    # two must point at the SAME file.
+    key_file = pa[pa.index("--api-key-file") + 1]
+    assert key_file == "~/.mtplx/api-key"
+    assert m.network.api_key_file == key_file
+    # Memory figures for the plan estimator.
+    assert m.memory.weights_mb == 16400.0
+    assert m.memory.kv_bytes_per_token == 65536.0
+    assert m.memory.ctx_tokens == 262144.0
+
+
+def test_api_key_file_must_be_nonempty_string() -> None:
+    raw = _read_minimal_dict()
+    raw["network"]["api_key_file"] = "   "
+    with pytest.raises(ManifestError, match="api_key_file"):
+        _from_dict(raw, source="<test>")
 
 
 @pytest.mark.parametrize(
