@@ -29,16 +29,20 @@ NOPASSWD on that one binary only). The helper uses the modern launchctl model
 from __future__ import annotations
 
 import enum
+import logging
 import os
 import plistlib
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from ais_core import firewall, plist, privhelper
 from ais_core.manifest import EngineManifest
+
+logger = logging.getLogger(__name__)
 
 
 class LifecycleError(RuntimeError):
@@ -445,7 +449,12 @@ def wait_for_health(
     return False
 
 
-def _auth_headers(manifest: EngineManifest) -> dict[str, str]:
+# Key files already warned about this process — the perms warning fires once
+# per file, not on every probe (monitors probe frequently).
+_warned_key_files: set[str] = set()
+
+
+def _auth_headers(manifest: EngineManifest, *, url: str) -> dict[str, str]:
     """Bearer header for engines that gate every endpoint behind an API key.
 
     Some engines (MTPLX) require an API key for any non-localhost bind and
@@ -453,6 +462,10 @@ def _auth_headers(manifest: EngineManifest) -> dict[str, str]:
     unauthenticated probe would read 401 and misreport a serving engine as
     UNHEALTHY forever. When the manifest declares ``[network].api_key_file``,
     read the key at probe time and attach it.
+
+    The key is only ever attached to loopback requests: probes run on the
+    host itself, so a non-loopback target URL (strict-bind health probe, or
+    a hostile manifest) gets no header — the key never leaves the host.
 
     Fail-soft: an absent/unreadable/empty key file yields no header — the
     probe then honestly reports whatever the engine answers (401 → not
@@ -462,8 +475,16 @@ def _auth_headers(manifest: EngineManifest) -> dict[str, str]:
     key_file = manifest.network.api_key_file
     if not key_file:
         return {}
+    if urllib.parse.urlsplit(url).hostname != "127.0.0.1":
+        return {}
+    path = Path(os.path.expanduser(key_file))
     try:
-        key = Path(os.path.expanduser(key_file)).read_text(encoding="utf-8").strip()
+        if path.stat().st_mode & 0o077 and str(path) not in _warned_key_files:
+            _warned_key_files.add(str(path))
+            logger.warning(
+                "api key file %s is readable by group/others — chmod 600 recommended", path
+            )
+        key = path.read_text(encoding="utf-8").strip()
     except OSError:
         return {}
     if not key:
@@ -473,7 +494,8 @@ def _auth_headers(manifest: EngineManifest) -> dict[str, str]:
 
 def probe_health(manifest: EngineManifest, *, request_timeout: float = 2.0) -> bool:
     """Single non-throwing health probe. True iff the endpoint returns 2xx."""
-    req = urllib.request.Request(manifest.network.health_url, headers=_auth_headers(manifest))
+    url = manifest.network.health_url
+    req = urllib.request.Request(url, headers=_auth_headers(manifest, url=url))
     try:
         with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             return 200 <= resp.status < 300
@@ -501,10 +523,11 @@ def gen_probe(manifest: EngineManifest, *, request_timeout: float = 45.0) -> Gen
     instance is busy (e.g. a long prefill holds every slot) — restarting it
     would kill legitimate work.
     """
+    url = manifest.network.gen_url
     req = urllib.request.Request(
-        manifest.network.gen_url,
+        url,
         data=_GEN_PROBE_PAYLOAD,
-        headers={"Content-Type": "application/json", **_auth_headers(manifest)},
+        headers={"Content-Type": "application/json", **_auth_headers(manifest, url=url)},
         method="POST",
     )
     try:

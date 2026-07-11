@@ -199,6 +199,48 @@ def test_probe_health_with_key_still_true_on_keyless_engine(healthy_server: int,
     assert probe_health(m) is True
 
 
+def test_probe_health_with_empty_key_file_degrades_to_no_header(auth_server: int, tmp_path) -> None:
+    """A key file that exists but is empty (or whitespace-only) must behave
+    like a missing one: no header, 401 reported honestly."""
+    key_file = tmp_path / "api-key"
+    key_file.write_text("\n")
+    m = _manifest_with_api_key_file(auth_server, str(key_file))
+    assert probe_health(m) is False
+
+
+def test_auth_headers_never_attach_key_to_non_loopback_url(tmp_path) -> None:
+    """The key must never leave the host: a non-loopback target URL (strict
+    bind, or a hostile manifest pointing the probe elsewhere) gets no header."""
+    from ais_core.lifecycle import _auth_headers
+
+    key_file = tmp_path / "api-key"
+    key_file.write_text("sekret")
+    m = _manifest_with_api_key_file(0, str(key_file))
+    assert _auth_headers(m, url="http://127.0.0.1:8080/health") == {
+        "Authorization": "Bearer sekret"
+    }
+    assert _auth_headers(m, url="http://192.168.0.42:8080/health") == {}
+    assert _auth_headers(m, url="http://example.com/health") == {}
+
+
+def test_auth_headers_warn_once_on_open_key_file_perms(tmp_path, caplog) -> None:
+    """A group/other-readable key file logs a chmod warning — once per file,
+    not on every probe."""
+    import logging
+
+    from ais_core.lifecycle import _auth_headers
+
+    key_file = tmp_path / "api-key"
+    key_file.write_text("sekret")
+    key_file.chmod(0o644)
+    m = _manifest_with_api_key_file(0, str(key_file))
+    with caplog.at_level(logging.WARNING, logger="ais_core.lifecycle"):
+        assert _auth_headers(m, url="http://127.0.0.1:1/health")["Authorization"]
+        assert _auth_headers(m, url="http://127.0.0.1:1/health")["Authorization"]
+    warnings = [r for r in caplog.records if "chmod 600" in r.message]
+    assert len(warnings) == 1
+
+
 def test_probe_health_returns_false_on_unreachable_host() -> None:
     """No server bound to the chosen port → probe must NOT raise."""
     m = _manifest_pointing_to_port(_free_port())
