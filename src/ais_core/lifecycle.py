@@ -445,11 +445,37 @@ def wait_for_health(
     return False
 
 
+def _auth_headers(manifest: EngineManifest) -> dict[str, str]:
+    """Bearer header for engines that gate every endpoint behind an API key.
+
+    Some engines (MTPLX) require an API key for any non-localhost bind and
+    apply the auth middleware to ALL routes — including ``/health`` — so an
+    unauthenticated probe would read 401 and misreport a serving engine as
+    UNHEALTHY forever. When the manifest declares ``[network].api_key_file``,
+    read the key at probe time and attach it.
+
+    Fail-soft: an absent/unreadable/empty key file yields no header — the
+    probe then honestly reports whatever the engine answers (401 → not
+    healthy), instead of masking a misconfiguration. The key is held only
+    for the duration of the request and never logged.
+    """
+    key_file = manifest.network.api_key_file
+    if not key_file:
+        return {}
+    try:
+        key = Path(os.path.expanduser(key_file)).read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    if not key:
+        return {}
+    return {"Authorization": f"Bearer {key}"}
+
+
 def probe_health(manifest: EngineManifest, *, request_timeout: float = 2.0) -> bool:
     """Single non-throwing health probe. True iff the endpoint returns 2xx."""
-    url = manifest.network.health_url
+    req = urllib.request.Request(manifest.network.health_url, headers=_auth_headers(manifest))
     try:
-        with urllib.request.urlopen(url, timeout=request_timeout) as resp:
+        with urllib.request.urlopen(req, timeout=request_timeout) as resp:
             return 200 <= resp.status < 300
     except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
         return False
@@ -478,7 +504,7 @@ def gen_probe(manifest: EngineManifest, *, request_timeout: float = 45.0) -> Gen
     req = urllib.request.Request(
         manifest.network.gen_url,
         data=_GEN_PROBE_PAYLOAD,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_auth_headers(manifest)},
         method="POST",
     )
     try:

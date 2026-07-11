@@ -126,6 +126,79 @@ def test_probe_health_returns_true_on_2xx(healthy_server: int) -> None:
     assert probe_health(m) is True
 
 
+class _Auth200(BaseHTTPRequestHandler):
+    """Answers 200 only with the right Bearer key — MTPLX-style middleware
+    that covers EVERY route, /health included."""
+
+    expected_key = "sekret"
+
+    def do_GET(self) -> None:
+        if self.headers.get("Authorization") != f"Bearer {self.expected_key}":
+            self.send_response(401)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok": true}')
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def auth_server():
+    port = _free_port()
+    server = HTTPServer(("127.0.0.1", port), _Auth200)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        server.shutdown()
+
+
+def _manifest_with_api_key_file(port: int, key_file: str):
+    from dataclasses import replace
+
+    m = _manifest_pointing_to_port(port)
+    return replace(m, network=replace(m.network, api_key_file=key_file))
+
+
+def test_probe_health_sends_bearer_from_api_key_file(auth_server: int, tmp_path) -> None:
+    """[network].api_key_file → the probe authenticates (engines like MTPLX
+    gate /health itself behind the key on non-localhost binds)."""
+    key_file = tmp_path / "api-key"
+    key_file.write_text("sekret\n")  # trailing newline must be stripped
+    m = _manifest_with_api_key_file(auth_server, str(key_file))
+    assert probe_health(m) is True
+
+
+def test_probe_health_without_key_reads_401_as_unhealthy(auth_server: int) -> None:
+    """No api_key_file declared → no header → the 401 is reported honestly."""
+    m = _manifest_pointing_to_port(auth_server)
+    assert probe_health(m) is False
+
+
+def test_probe_health_with_missing_key_file_degrades_to_no_header(
+    auth_server: int, tmp_path
+) -> None:
+    """An unreadable key file must not crash the probe — it degrades to an
+    unauthenticated request (→ 401 → False), surfacing the misconfiguration
+    as unhealthy instead of masking it."""
+    m = _manifest_with_api_key_file(auth_server, str(tmp_path / "does-not-exist"))
+    assert probe_health(m) is False
+
+
+def test_probe_health_with_key_still_true_on_keyless_engine(healthy_server: int, tmp_path) -> None:
+    """A declared key against an engine that ignores auth stays healthy —
+    the header is additive, never harmful."""
+    key_file = tmp_path / "api-key"
+    key_file.write_text("sekret")
+    m = _manifest_with_api_key_file(healthy_server, str(key_file))
+    assert probe_health(m) is True
+
+
 def test_probe_health_returns_false_on_unreachable_host() -> None:
     """No server bound to the chosen port → probe must NOT raise."""
     m = _manifest_pointing_to_port(_free_port())
@@ -462,6 +535,43 @@ class TestGenProbe:
         _GenHandler.mode = "ok"
         m = _manifest_pointing_to_port(gen_server)
         assert lifecycle.gen_probe(m) is lifecycle.GenVerdict.OK
+
+    def test_gen_probe_sends_bearer_from_api_key_file(self, tmp_path) -> None:
+        """Same auth contract as probe_health: a key-gated engine (MTPLX)
+        must see the Bearer header on the generation probe too."""
+
+        class _AuthGen(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                if self.headers.get("Authorization") != "Bearer sekret":
+                    body = b'{"error":{"message":"missing or invalid API key"}}'
+                    self.send_response(401)
+                else:
+                    body = b'{"choices":[{"message":{"role":"assistant","content":"!"}}]}'
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args: object) -> None:
+                pass
+
+        port = _free_port()
+        server = HTTPServer(("127.0.0.1", port), _AuthGen)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            key_file = tmp_path / "api-key"
+            key_file.write_text("sekret\n")
+            m = _manifest_with_api_key_file(port, str(key_file))
+            assert lifecycle.gen_probe(m) is lifecycle.GenVerdict.OK
+            # Without the declaration the 401 reads UNSUPPORTED (4xx) —
+            # non-alarming, but not OK.
+            m_bare = _manifest_pointing_to_port(port)
+            assert lifecycle.gen_probe(m_bare) is lifecycle.GenVerdict.UNSUPPORTED
+        finally:
+            server.shutdown()
 
     def test_zombie_on_http_500_compute_error(self, gen_server: int) -> None:
         _GenHandler.mode = "zombie"

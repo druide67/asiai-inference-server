@@ -128,6 +128,15 @@ class NetworkSpec:
     health_endpoint: str
     health_timeout: int
     gen_check: bool = False
+    # Optional path to a file holding the engine's API key, for engines that
+    # gate EVERY endpoint (including the health one) behind Bearer/X-API-Key
+    # auth when bound beyond loopback (e.g. MTPLX refuses a non-localhost
+    # bind without a key, and its auth middleware has no /health exemption).
+    # The health/generation probes read this file at probe time and attach
+    # ``Authorization: Bearer <key>``. Tilde-expanded against the invoking
+    # user (probes run on the engine's own host). The key itself must NEVER
+    # appear in the manifest, program_args, or logs — only this path does.
+    api_key_file: str | None = None
 
     @property
     def health_url(self) -> str:
@@ -206,6 +215,12 @@ class MemorySpec:
     overhead_mb: float | None = None
     # Transient extra MB above steady state during model load/warmup.
     peak_extra_mb: float | None = None
+    # Declared context budget in tokens, for engines whose CLI takes no
+    # context-size flag (the window is model-native, e.g. MTPLX). Used by
+    # the plan estimator as the KV multiplier ONLY when ``program_args``
+    # carries no ``--ctx-size``/``-c`` — an explicit CLI flag always wins
+    # because it is what the runtime would actually honor.
+    ctx_tokens: float | None = None
 
 
 @dataclass(frozen=True)
@@ -515,7 +530,7 @@ def _memory_spec(raw: dict, *, source: str) -> MemorySpec:
     mem_raw = raw.get("memory", {})
     if not isinstance(mem_raw, dict):
         raise ManifestError(f"{source}: [memory] must be a table")
-    known = {"weights_mb", "kv_bytes_per_token", "overhead_mb", "peak_extra_mb"}
+    known = {"weights_mb", "kv_bytes_per_token", "overhead_mb", "peak_extra_mb", "ctx_tokens"}
     unknown = set(mem_raw) - known
     if unknown:
         raise ManifestError(
@@ -537,6 +552,7 @@ def _memory_spec(raw: dict, *, source: str) -> MemorySpec:
         kv_bytes_per_token=num("kv_bytes_per_token"),
         overhead_mb=num("overhead_mb"),
         peak_extra_mb=num("peak_extra_mb"),
+        ctx_tokens=num("ctx_tokens"),
     )
 
 
@@ -574,6 +590,7 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
                 health_endpoint=net_raw["health_endpoint"],
                 health_timeout=int(net_raw["health_timeout"]),
                 gen_check=bool(net_raw.get("gen_check", False)),
+                api_key_file=net_raw.get("api_key_file"),
             ),
             firewall=FirewallSpec(
                 supported=bool(fw_raw["supported"]),
@@ -624,6 +641,14 @@ def _validate(m: EngineManifest, *, source: str) -> None:
         raise ManifestError(
             f"{source}: network.health_endpoint must start with '/', "
             f"got {m.network.health_endpoint!r}"
+        )
+
+    if m.network.api_key_file is not None and (
+        not isinstance(m.network.api_key_file, str) or not m.network.api_key_file.strip()
+    ):
+        raise ManifestError(
+            f"{source}: network.api_key_file must be a non-empty path string, "
+            f"got {m.network.api_key_file!r}"
         )
 
     if m.wrapper.needed and not m.wrapper.install_path:

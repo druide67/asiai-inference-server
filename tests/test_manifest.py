@@ -154,6 +154,13 @@ def test_llamacpp_hermes_preset() -> None:
     assert "--chat-template-kwargs" in pa
 
 
+def test_api_key_file_must_be_nonempty_string() -> None:
+    raw = _read_minimal_dict()
+    raw["network"]["api_key_file"] = "   "
+    with pytest.raises(ManifestError, match="api_key_file"):
+        _from_dict(raw, source="<test>")
+
+
 @pytest.mark.parametrize(
     "name, port",
     [

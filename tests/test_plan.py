@@ -384,6 +384,56 @@ class TestEstimateFailClosed:
         assert cost.components["kv_cache"].source == "unknown"
         assert cost.confidence == "unknown"
 
+    def test_declared_ctx_tokens_backfills_missing_ctx_flag(self, _isolated_user_config):
+        """Engines whose CLI takes no context flag (MTPLX) declare the
+        budget as [memory].ctx_tokens — the kv component prices it."""
+        _write_preset(
+            _isolated_user_config,
+            program_args=("--parallel", "2"),
+            memory_section=(
+                "[memory]\nweights_mb = 1000.0\nkv_bytes_per_token = 32768.0\nctx_tokens = 65536\n"
+            ),
+        )
+        m, name = _load(_isolated_user_config)
+        cost = plan.estimate_preset_cost(m, preset=name)
+        assert cost.components["kv_cache"].mb == 2048.0
+        assert cost.components["kv_cache"].source == "declared"
+        assert "[memory].ctx_tokens" in cost.components["kv_cache"].detail
+        assert cost.confidence == "computed"
+
+    def test_ctx_flag_beats_declared_ctx_tokens(self, _isolated_user_config):
+        """A context flag in program_args is what the runtime honors — it
+        must win over a (stale) declared ctx_tokens."""
+        _write_preset(
+            _isolated_user_config,
+            program_args=("--ctx-size", "4096"),
+            memory_section=(
+                "[memory]\nweights_mb = 1000.0\nkv_bytes_per_token = 32768.0\nctx_tokens = 262144\n"
+            ),
+        )
+        m, name = _load(_isolated_user_config)
+        cost = plan.estimate_preset_cost(m, preset=name)
+        # 32768 B/token x 4096 tokens = 128 MB — the CLI value, not 8192 MB.
+        assert cost.components["kv_cache"].mb == 128.0
+        assert "--ctx-size" in cost.components["kv_cache"].detail
+
+    def test_malformed_ctx_flag_never_falls_back_to_ctx_tokens(self, _isolated_user_config):
+        """A present-but-malformed --ctx-size means the runtime would refuse
+        to start; falling back to ctx_tokens would price a config that
+        cannot run. Fail-closed unknown."""
+        _write_preset(
+            _isolated_user_config,
+            program_args=("--ctx-size", "lots"),
+            memory_section=(
+                "[memory]\nweights_mb = 1000.0\nkv_bytes_per_token = 32768.0\nctx_tokens = 65536\n"
+            ),
+        )
+        m, name = _load(_isolated_user_config)
+        cost = plan.estimate_preset_cost(m, preset=name)
+        assert cost.components["kv_cache"].source == "unknown"
+        assert cost.confidence == "unknown"
+        assert cost.total_mb_low == 0.0
+
     def test_missing_model_file_is_unknown(self, _isolated_user_config, tmp_path):
         _write_preset(
             _isolated_user_config,
