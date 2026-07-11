@@ -23,6 +23,12 @@ def test_provide_covers_base_engines_and_turboquant():
     assert by_name["llamacpp"]["version_scheme"] == "llamacpp_build"
     assert by_name["llamacpp"].get("brew_formula") == "llama.cpp"
 
+    # mtplx is aisrv-managed: brew tap formula + upstream GitHub repo.
+    assert "mtplx" in by_name
+    assert by_name["mtplx"].get("brew_formula") == "mtplx"
+    assert by_name["mtplx"].get("github_repo") == "youssofal/MTPLX"
+    assert by_name["mtplx"]["version_scheme"] == "semver"
+
 
 def test_provide_skips_aux_instances():
     specs = version_sources.provide(version_sources.VERSION_SOURCE_API_VERSION)

@@ -38,6 +38,7 @@ _GITHUB = {
     "ollama": "ollama/ollama",
     "llamacpp": "ggml-org/llama.cpp",
     "mlx-lm": "ml-explore/mlx-lm",
+    "mtplx": "youssofal/MTPLX",
 }
 
 
