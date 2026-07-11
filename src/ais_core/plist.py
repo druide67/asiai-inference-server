@@ -100,6 +100,10 @@ def build_plist_dict(
             program_args.extend(["--chat-template-file", _for_user(manifest.binary.template_path)])
         if manifest.binary.mmproj_path:
             program_args.extend(["--mmproj", _for_user(manifest.binary.mmproj_path)])
+        if manifest.binary.api_key_file:
+            # Path only — the key value lives in the (operator-created, 600)
+            # file and must never reach the plist, which is world-readable.
+            program_args.extend(["--api-key-file", _for_user(manifest.binary.api_key_file)])
         if manifest.network.bind:
             program_args.extend(
                 [
