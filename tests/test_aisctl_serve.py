@@ -13,6 +13,10 @@ import pytest
 
 from ais_cli import serve
 
+# Captured at import time, BEFORE any fixture monkeypatches serve._execute:
+# lets wire-level tests exercise the real subprocess path on demand.
+_REAL_EXECUTE = serve._execute
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -199,6 +203,84 @@ class TestExecute:
         result = serve._execute(["sleep", "5"], timeout=0.1)
         assert result["exit_code"] == 124
         assert result["error"] == "timeout"
+        assert "timed out" in result["detail"]
+
+    def test_success_carries_no_error_or_detail(self):
+        # The success shape is frozen: enrichment keys appear ONLY on failure.
+        result = serve._execute(["echo", "hello"], timeout=5.0)
+        assert "error" not in result
+        assert "detail" not in result
+
+    def test_failure_carries_error_code_and_stderr_detail(self):
+        # The real-world shape: aisctl exits non-zero after printing an
+        # explicit message on stderr; the body must carry it so the
+        # dashboard toast is actionable instead of an opaque http_500.
+        result = serve._execute(
+            [
+                "/bin/sh",
+                "-c",
+                "echo 'progress noise'; "
+                "echo 'error: preset model_path may not be a symlink' >&2; exit 3",
+            ],
+            timeout=5.0,
+        )
+        assert result["ok"] is False
+        assert result["exit_code"] == 3
+        assert result["error"] == "command_failed"
+        assert "may not be a symlink" in result["detail"]
+        # Full streams keep travelling untouched next to the summary.
+        assert "may not be a symlink" in result["stderr"]
+        assert "progress noise" in result["stdout"]
+
+    def test_failure_detail_falls_back_to_stdout(self):
+        # Some failures print their message on stdout with an empty stderr.
+        result = serve._execute(
+            ["/bin/sh", "-c", "echo 'install failed: disk full'; exit 1"],
+            timeout=5.0,
+        )
+        assert result["error"] == "command_failed"
+        assert "disk full" in result["detail"]
+
+    def test_silent_failure_has_error_but_no_detail(self):
+        # ``false`` produces no output at all: keep the machine code, omit
+        # the empty detail instead of sending "".
+        result = serve._execute(["false"], timeout=5.0)
+        assert result["error"] == "command_failed"
+        assert "detail" not in result
+
+    def test_missing_binary_carries_detail(self, tmp_path):
+        result = serve._execute([str(tmp_path / "nonexistent")], timeout=2.0)
+        assert result["error"] == "aisctl_binary_not_found"
+        assert result["detail"]
+
+
+class TestFailureDetail:
+    def test_prefers_stderr_over_stdout(self):
+        assert serve._failure_detail("real error", "noise") == "real error"
+
+    def test_empty_output_yields_empty_string(self):
+        assert serve._failure_detail("", "") == ""
+        assert serve._failure_detail("  \n ", "\n") == ""
+
+    def test_keeps_last_lines_within_cap(self):
+        noise = "\n".join(f"progress step {i}" for i in range(200))
+        text = noise + "\nError: helper refused model_path (symlink)"
+        detail = serve._failure_detail(text, "")
+        assert len(detail) <= serve.FAILURE_DETAIL_MAX_CHARS
+        # The actionable LAST line survives; the truncated window starts on
+        # a line boundary (no partial leading line).
+        assert detail.endswith("Error: helper refused model_path (symlink)")
+        assert detail.splitlines()[0].startswith("progress step")
+
+    def test_single_oversized_line_is_tail_truncated(self):
+        text = "x" * 2000 + "END"
+        detail = serve._failure_detail(text, "")
+        assert len(detail) == serve.FAILURE_DETAIL_MAX_CHARS
+        assert detail.endswith("END")
+
+    def test_blank_lines_are_dropped(self):
+        detail = serve._failure_detail("first\n\n\nlast\n", "")
+        assert detail == "first\nlast"
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +367,48 @@ class TestHandlerPayload:
                 headers=self._ok_headers(server),
             )
         assert exc.value.code == 404
+
+
+class TestHandlerCommandFailure:
+    def _headers(self, server):
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {server['token']}",
+        }
+
+    def test_failed_command_returns_500_with_error_body(self, server, monkeypatch):
+        """A failing subprocess must answer 500 with the actionable message
+        IN THE BODY — consumers (asiai web proxies → dashboard toast) key on
+        ``error``/``detail`` and previously saw only an opaque http_500.
+
+        The fixture's success stub is overridden with the REAL ``_execute``
+        pointed at a deterministic failing argv, so the enrichment that goes
+        on the wire is the production path, not a hand-built dict.
+        """
+
+        def failing_execute(argv: list[str], timeout: float):
+            return _REAL_EXECUTE(
+                [
+                    "/bin/sh",
+                    "-c",
+                    "echo 'error: preset model_path may not be a symlink' >&2; exit 3",
+                ],
+                timeout=5.0,
+            )
+
+        monkeypatch.setattr(serve, "_execute", failing_execute)
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(
+                f"http://127.0.0.1:{server['port']}/internal/v1/command",
+                {"command": "purge"},
+                headers=self._headers(server),
+            )
+        assert exc.value.code == 500
+        body = json.loads(exc.value.read())
+        assert body["ok"] is False
+        assert body["exit_code"] == 3
+        assert body["error"] == "command_failed"
+        assert "may not be a symlink" in body["detail"]
 
 
 class TestHandlerHealth:
