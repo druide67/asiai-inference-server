@@ -229,7 +229,10 @@ def _collect_engines_state() -> dict[str, Any]:
 
     def probe_one(name: str) -> dict[str, Any] | None:
         try:
-            m = manifest_mod.load_manifest(name)
+            # As INSTALLED (preset overlay): the baseline port may differ
+            # from the port the service was generated on — probing the
+            # baseline would show a serving engine as stopped.
+            m = install_state.load_installed_manifest(name)
             state, _ = lifecycle.probe_state(m)
             record = install_state.read_install(m.name)
             return {
