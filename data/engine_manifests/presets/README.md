@@ -128,3 +128,40 @@ included — a key file must exist at `~/.mtplx/api-key` (600 perms)
 before installing. The preset's header comment documents both, plus the
 `[network].api_key_file` field that lets the aisrv health/generation
 probes authenticate.
+
+## API key for non-loopback binds (`llamacpp-aux` presets)
+
+The five `hermes-aux` presets bind `0.0.0.0`, so they run the engine
+**authenticated**: `[binary].api_key_file` makes the generated plist pass
+`--api-key-file <path>` to `llama-server`, which reads its API key(s)
+from that file at startup. Only the *path* ever appears in the manifest,
+the plist (which is world-readable), or `ps` output — never the key.
+
+Before installing one of these presets, create the key file yourself
+(the tooling never writes it):
+
+```
+mkdir -p ~/.config/asiai-inference-server
+umask 177 && printf '%s\n' "$(openssl rand -hex 32)" \
+  > ~/.config/asiai-inference-server/backend-api-key
+```
+
+`aisctl install` refuses to proceed when the declared file is missing
+(llama-server would abort at startup and crash-loop) or contains no key
+(llama-server parses zero keys and starts with auth *disabled* — a
+silent fail-open on a LAN bind).
+
+The same file is declared as `[network].api_key_file` so the aisrv
+generation probe can authenticate. `llama-server` keeps `/health`,
+`/v1/health`, `/models` and `/v1/models` public even when a key is set,
+but `/v1/chat/completions` — the generation probe — is gated. When the
+file is shared with the probe it must contain exactly **one** key line
+and no comments: the probe sends the whole file content (stripped) as
+the Bearer token, whereas `llama-server` itself accepts one key per
+line with `#` comments.
+
+The engine baselines (`llamacpp`, `llamacpp-aux-1..5`) ship with both
+fields documented but commented out, so a plain out-of-the-box install
+keeps working without a key file. Uncomment both fields together to
+adopt the same convention there. Clients then call the engine with
+`Authorization: Bearer <key>` (or `X-Api-Key: <key>`).

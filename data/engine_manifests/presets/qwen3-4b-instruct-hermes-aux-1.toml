@@ -92,6 +92,14 @@ program_args = [
     "--metrics",
 ]
 builds_from_source = false
+# Non-loopback bind (0.0.0.0 below) → the engine requires an API key.
+# The file holds the key (one line); only its PATH appears in the plist
+# and process args. Create it BEFORE installing this preset (install
+# refuses a missing or empty key file):
+#   mkdir -p ~/.config/asiai-inference-server
+#   umask 177 && printf '%s\n' "$(openssl rand -hex 32)" \
+#     > ~/.config/asiai-inference-server/backend-api-key
+api_key_file = "~/.config/asiai-inference-server/backend-api-key"
 
 [plist]
 name = "com.asiai.llamacpp-aux-1"
@@ -104,6 +112,11 @@ bind = "0.0.0.0"
 health_endpoint = "/health"
 # 30s: 4B GGUF + 2 GB KV mlock loads in 8-15s on M-series NVMe.
 health_timeout = 30
+# Same file as [binary].api_key_file: the aisrv generation probe
+# authenticates with it (llama-server keeps /health public even with a
+# key; /v1/chat/completions is gated). Exactly ONE key line, no comments —
+# the probe sends the whole file content (stripped) as the Bearer token.
+api_key_file = "~/.config/asiai-inference-server/backend-api-key"
 
 [firewall]
 supported = true
