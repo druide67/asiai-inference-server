@@ -6,7 +6,7 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.12.0](https://github.com/druide67/asiai-inference-server/compare/v0.11.0...v0.12.0) — 2026-07-11
 
 ### Added
 
@@ -35,6 +35,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Used as the KV multiplier only when `program_args` carries no
   `--ctx-size`/`-c`; an explicit CLI flag always wins, and a
   present-but-malformed flag stays fail-closed `unknown`.
+
+### Fixed
+
+- Every lifecycle verb (`status`/`start`/`stop`/`restart`/`enable`/
+  `disable`/`upgrade`/`unload`/`load`) and the serve engines-state funnel
+  now resolve engines **as installed** — overlaying the preset recorded at
+  install time — instead of the baseline manifest. A preset that moves the
+  port (e.g. the MTPLX main-slot preset, 8005 → 8080) no longer makes
+  `status` report a serving engine as stopped, and post-start health waits
+  target the right port (#33).
+- The probe API key is only ever attached to loopback (`127.0.0.1`)
+  targets, a group/other-readable key file logs a chmod-600 warning (#33).
+- Failed funnel commands carry an actionable body: `error:
+  "command_failed"` plus a bounded `detail` with the last useful lines of
+  stderr — dashboard toasts show the real message instead of an opaque
+  `http_500` (#34).
 
 ## [0.11.0](https://github.com/druide67/asiai-inference-server/compare/v0.10.0...v0.11.0) — 2026-07-09
 
