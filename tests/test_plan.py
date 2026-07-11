@@ -191,6 +191,22 @@ class TestBundledPresetCuration:
         assert m.memory.weights_mb == 19456.0
         assert m.memory.kv_bytes_per_token == 32768.0
 
+    def test_mtplx_hermes_preset_plans_without_ctx_flag(self):
+        """The MTPLX CLI takes no context-size flag — the bundled Hermes
+        preset must still yield a full decomposition via the declared
+        [memory].ctx_tokens (fp16 KV rate x native 256K window)."""
+        m = load_manifest("mtplx", preset="qwen3.6-27b-mtplx-hermes-agent")
+        assert m.memory.weights_mb == 16400.0
+        assert m.memory.kv_bytes_per_token == 65536.0
+        assert m.memory.ctx_tokens == 262144.0
+        cost = plan.estimate_preset_cost(m, preset="qwen3.6-27b-mtplx-hermes-agent")
+        # 65536 B/token x 262144 tokens = 16384 MB.
+        assert cost.components["kv_cache"].mb == 16384.0
+        assert cost.components["kv_cache"].source == "declared"
+        assert "[memory].ctx_tokens" in cost.components["kv_cache"].detail
+        assert cost.confidence == "computed"  # overhead is the family default
+        assert cost.total_mb_low > 0.0
+
     def test_all_bundled_presets_still_load(self):
         from ais_core.manifest import list_presets, preset_summary
 

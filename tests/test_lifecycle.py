@@ -786,6 +786,27 @@ def test_install_args_parse_through_real_helper(name: str) -> None:
             assert ns.port is None
 
 
+def test_install_args_mtplx_hermes_preset_parses_through_real_helper() -> None:
+    """The mtplx Hermes preset brings two firsts the guard above (baselines
+    only) doesn't cover: a POSITIONAL subcommand token (``quickstart``) and
+    a tilde path as a program-arg VALUE (``--api-key-file ~/.mtplx/api-key``,
+    expanded by MTPLX against the daemon's $HOME, deliberately NOT by us)."""
+    m = load_manifest("mtplx", preset="qwen3.6-27b-mtplx-hermes-agent")
+    argv = lifecycle._install_args(m, user="someuser", binary_path="/opt/homebrew/bin/mtplx")
+    ns = _load_priv_helper()._build_parser().parse_args(["install-daemon", *argv])
+
+    assert ns.label == "com.asiai.mtplx"
+    assert ns.program_arg[0] == "quickstart"
+    # tilde path round-trips verbatim (no client-side expansion)
+    assert "~/.mtplx/api-key" in ns.program_arg
+    # LAN bind → --host/--port emitted
+    assert ns.port == "8080"
+    assert "--host" in ns.program_arg and "0.0.0.0" in ns.program_arg
+    # the repo id goes through --program-arg, never --model-path
+    assert ns.model_path is None
+    assert "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed" in ns.program_arg
+
+
 def test_install_args_ollama_no_port_llamacpp_has_port_and_dash_flags() -> None:
     """Pin the two reproduced regressions: ollama (bind='') must get NO --port (else
     'ollama serve --port' crash-loops); llamacpp must get --port AND its dash-prefixed flags
