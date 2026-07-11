@@ -64,6 +64,12 @@ became obvious:
   orchestrator, shipped v0.2).
 - **TOML** for human-edited files (engine manifests, profiles, fleet
   inventory). JSON for runtime state.
+- **Engine API keys stay out of plists and `ps`**: manifests declare
+  `[binary].api_key_file` (path to an operator-created, mode-600 key
+  file the engine reads at startup — e.g. `llama-server
+  --api-key-file`) and `[network].api_key_file` (same file, used by the
+  health/generation probes to authenticate). Only paths appear in
+  manifests, generated plists, and process arguments — never key values.
 
 ## License
 

@@ -6,6 +6,39 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Optional `[binary].api_key_file` manifest field — server-side companion
+  of `[network].api_key_file` (0.12.0): the generated LaunchDaemon passes
+  `--api-key-file <path>` to the engine (llama-server reads its API
+  key(s) from the file at startup, one per line), so a non-loopback bind
+  can be authenticated without the key value ever appearing in the
+  manifest, the world-readable plist, or `ps` output — only the path
+  does. The file is created by the operator (mode 600), never by this
+  package. Tilde paths are expanded against the daemon account's home;
+  relative paths are refused at manifest validation.
+- Install preflight for `[binary].api_key_file`: a real (non-dry-run)
+  install fails fast — before the previous daemon is touched — when the
+  declared key file is missing (the engine would abort at argv parsing
+  and crash-loop) or contains no key (llama-server parses zero keys and
+  starts with auth **disabled**: silent fail-open on a LAN bind). A
+  group/other-readable key file logs a chmod-600 warning.
+
+### Changed
+
+- The five bundled `hermes-aux` presets (llamacpp-aux-1..5, all binding
+  `0.0.0.0`) now declare both `[binary].api_key_file` and
+  `[network].api_key_file` pointing at
+  `~/.config/asiai-inference-server/backend-api-key` — create the key
+  file before installing them (see
+  `data/engine_manifests/presets/README.md`). The
+  `llamacpp`/`llamacpp-aux-*` baselines document both fields commented
+  out, so out-of-the-box installs keep working key-less. llama-server
+  keeps `/health`, `/v1/health`, `/models` and `/v1/models` public even
+  with a key; `/v1/chat/completions` (the generation probe) is gated.
+
 ## [0.12.0](https://github.com/druide67/asiai-inference-server/compare/v0.11.0...v0.12.0) — 2026-07-11
 
 ### Added
