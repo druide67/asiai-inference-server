@@ -115,7 +115,16 @@ refuses anything else. Two practical consequences:
 | `qwen3.6-35b-a3b-rapidmlx-hermes.toml` | `rapidmlx` | Example primary-agent tuning, MoE 35B-A3B served by Rapid-MLX. |
 | `qwopus-27b-v2-rapidmlx-hermes.toml` | `rapidmlx` | Example primary-agent tuning, Qwopus 27B v2 served by Rapid-MLX. |
 | `qwopus-35b-a3b-rapidmlx-hermes.toml` | `rapidmlx` | Example primary-agent tuning, Qwopus 35B-A3B served by Rapid-MLX. |
+| `qwen3.6-27b-mtplx-hermes-agent.toml` | `mtplx` | Example primary-agent tuning, Qwen3.6-27B Optimized-Speed served by MTPLX (native MTP D3), main slot 8080. |
 
 To use one of these, the operator must have the matching GGUF available
 and the conventional `~/llms/gguf/aux<N>/active.gguf` symlink in place
 (or override `model_path` in their own copy of the preset).
+
+The MTPLX preset has two extra preconditions of its own: the model must
+already be in the MTPLX cache (`mtplx models` to check), and — because
+MTPLX refuses a non-localhost bind without an API key, `/health`
+included — a key file must exist at `~/.mtplx/api-key` (600 perms)
+before installing. The preset's header comment documents both, plus the
+`[network].api_key_file` field that lets the aisrv health/generation
+probes authenticate.

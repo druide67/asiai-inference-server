@@ -6,6 +6,36 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **MTPLX engine driver** — full lifecycle support for
+  [MTPLX](https://github.com/youssofal/MTPLX) (MLX-based OpenAI-compatible
+  server with native multi-token-prediction speculative decoding, brew tap
+  `youssofal/mtplx`): baseline manifest (loopback, port 8005), restart-only
+  driver, upgrade whitelist + `asiai versions` provider entries. The daemon
+  launches through the stable brew wrapper (`mtplx quickstart …`), which
+  execs into the server inside the keg-versioned virtualenv — surviving
+  `brew upgrade` without a reinstall. The SSD SessionBank cache is pinned
+  `off` explicitly in every bundled manifest (upstream defaults it to
+  on/100GB — youssofal/MTPLX#140).
+- Bundled preset `qwen3.6-27b-mtplx-hermes-agent`: Qwen3.6-27B
+  Optimized-Speed on the main-inference slot (8080, LAN bind), native MTP
+  depth 3, turbo profile, thinking disabled at launch (`--reasoning off`),
+  Qwen3.6 sampling recommendations, `[memory]` figures for the plan
+  estimator.
+- Optional `[network].api_key_file` manifest field: the health and
+  generation probes attach `Authorization: Bearer <key>` read from the
+  file at probe time — required for engines whose auth middleware covers
+  `/health` itself on non-localhost binds (MTPLX). Only the path lives in
+  the manifest, never the key.
+- Optional `[memory].ctx_tokens` field: declared context budget for
+  engines whose CLI takes no context-size flag (window is model-native).
+  Used as the KV multiplier only when `program_args` carries no
+  `--ctx-size`/`-c`; an explicit CLI flag always wins, and a
+  present-but-malformed flag stays fail-closed `unknown`.
+
 ## [0.11.0](https://github.com/druide67/asiai-inference-server/compare/v0.10.0...v0.11.0) — 2026-07-09
 
 ### Added
