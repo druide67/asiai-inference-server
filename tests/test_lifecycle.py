@@ -849,6 +849,129 @@ def test_install_args_mtplx_hermes_preset_parses_through_real_helper() -> None:
     assert "Youssofal/Qwen3.6-27B-MTPLX-Optimized-Speed" in ns.program_arg
 
 
+def test_install_args_inject_api_key_file_path_expanded_never_content(tmp_path) -> None:
+    """[binary].api_key_file rides as a generic --program-arg pair: flag token
+    then PATH token, tilde expanded client-side against the daemon user's home
+    (generic program-args cross the helper verbatim; launchd exec()s without a
+    shell). The key CONTENT must never appear in any argv token, even when the
+    file exists and is readable."""
+    import os
+    from dataclasses import replace
+
+    sentinel = "SENTINEL-KEY-VALUE-do-not-leak"
+    key_file = tmp_path / "backend-api-key"
+    key_file.write_text(sentinel + "\n")
+
+    me = getpass.getuser()
+    m = load_manifest("llamacpp")
+
+    # tilde path → expanded against the daemon user's home
+    m_tilde = replace(m, binary=replace(m.binary, api_key_file="~/.config/aistest/key"))
+    argv = lifecycle._install_args(m_tilde, user=me, binary_path="/opt/homebrew/bin/llama-server")
+    expected = os.path.expanduser("~/.config/aistest/key")
+    assert "--program-arg=--api-key-file" in argv
+    assert f"--program-arg={expected}" in argv
+    # the flag/value pair stays adjacent (helper appends program-args in order)
+    i = argv.index("--program-arg=--api-key-file")
+    assert argv[i + 1] == f"--program-arg={expected}"
+
+    # absolute path → passes through verbatim; content never leaks
+    m_abs = replace(m, binary=replace(m.binary, api_key_file=str(key_file)))
+    argv_abs = lifecycle._install_args(m_abs, user=me, binary_path="/opt/homebrew/bin/llama-server")
+    assert f"--program-arg={key_file}" in argv_abs
+    assert all(sentinel not in a for a in argv_abs)
+    assert all(sentinel not in a for a in argv)
+
+
+def test_install_args_no_api_key_flag_when_field_unset() -> None:
+    """Baselines (field commented out) generate the exact pre-existing argv."""
+    argv = lifecycle._install_args(
+        load_manifest("llamacpp-aux-1"), user="u", binary_path="/opt/homebrew/bin/llama-server"
+    )
+    assert not any("--api-key-file" in a for a in argv)
+    assert not any("--api-key" in a for a in argv)
+
+
+def test_expand_api_key_file_unknown_user_fails_closed() -> None:
+    """A tilde path that cannot be resolved against the daemon user must raise,
+    never fall through to a literal '~' in ProgramArguments."""
+    with pytest.raises(lifecycle.LifecycleError, match="home directory"):
+        lifecycle._expand_api_key_file("~/.config/x/key", user="no-such-user-xyz")
+    # absolute paths never need the user's home
+    assert lifecycle._expand_api_key_file("/etc/x/key", user="no-such-user-xyz") == "/etc/x/key"
+
+
+def test_install_args_hermes_aux_preset_parses_through_real_helper() -> None:
+    """Composition guard for the aux presets' authenticated variant: the
+    generated argv (with the injected --api-key-file program-arg pair) must
+    parse cleanly through the REAL helper argparse, and the path token must
+    arrive expanded (no tilde) since the helper does not expand generic
+    program-args."""
+    import os
+
+    m = load_manifest("llamacpp-aux-1", preset="qwen3-4b-instruct-hermes-aux-1")
+    argv = lifecycle._install_args(
+        m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server"
+    )
+    ns = _load_priv_helper()._build_parser().parse_args(["install-daemon", *argv])
+
+    assert ns.label == "com.asiai.llamacpp-aux-1"
+    assert "--api-key-file" in ns.program_arg
+    expanded = os.path.expanduser("~/.config/asiai-inference-server/backend-api-key")
+    assert expanded in ns.program_arg
+    assert not any(a.startswith("~") for a in ns.program_arg)
+    assert ns.port == "8090"
+
+
+def test_install_preflight_refuses_missing_or_keyless_api_key_file(tmp_path) -> None:
+    """A real install with a declared key file must fail fast — BEFORE the
+    daemon is stopped or the helper invoked — when the file is missing
+    (llama-server would abort at argv parsing → crash-loop) or holds no key
+    (llama-server parses ZERO keys and starts with auth DISABLED: fail-open
+    on a 0.0.0.0 bind)."""
+    from dataclasses import replace
+
+    m = load_manifest("llamacpp")
+    with (
+        patch("ais_core.lifecycle.stop_existing") as stop_mock,
+        patch("ais_core.lifecycle.privhelper.run") as run_mock,
+    ):
+        # missing file
+        missing = replace(
+            m, binary=replace(m.binary, api_key_file=str(tmp_path / "does-not-exist"))
+        )
+        with pytest.raises(lifecycle.LifecycleError, match="does not exist"):
+            lifecycle.install(missing, user=getpass.getuser(), binary_path="/opt/homebrew/bin/x")
+
+        # present but keyless (comments/blank lines only) — would be fail-open
+        keyless_file = tmp_path / "keyless"
+        keyless_file.write_text("# just a comment\n\n")
+        keyless = replace(m, binary=replace(m.binary, api_key_file=str(keyless_file)))
+        with pytest.raises(lifecycle.LifecycleError, match="no key"):
+            lifecycle.install(keyless, user=getpass.getuser(), binary_path="/opt/homebrew/bin/x")
+
+        stop_mock.assert_not_called()
+        run_mock.assert_not_called()
+
+
+def test_install_dry_run_skips_api_key_preflight(tmp_path, capsys) -> None:
+    """Dry-run previews the install on hosts where the key file does not exist
+    yet — nothing is written, so the preflight must not block it. The argv
+    preview shows the path pair and never any key content."""
+    from dataclasses import replace
+
+    m = load_manifest("llamacpp")
+    m = replace(m, binary=replace(m.binary, api_key_file=str(tmp_path / "not-created-yet")))
+    with patch("ais_core.lifecycle.stop_existing"):
+        result = lifecycle.install(
+            m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server", dry_run=True
+        )
+    assert result["dry_run"] is True
+    out = capsys.readouterr().out
+    assert "--program-arg=--api-key-file" in out
+    assert str(tmp_path / "not-created-yet") in out
+
+
 def test_install_args_ollama_no_port_llamacpp_has_port_and_dash_flags() -> None:
     """Pin the two reproduced regressions: ollama (bind='') must get NO --port (else
     'ollama serve --port' crash-loops); llamacpp must get --port AND its dash-prefixed flags
