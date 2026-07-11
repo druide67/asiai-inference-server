@@ -163,8 +163,45 @@ def _build_argv(command: str, args: dict[str, Any]) -> list[str]:
     return argv
 
 
+# Cap on the human-readable failure detail extracted from a failed
+# subprocess's output. Large enough for aisctl's multi-line error messages,
+# small enough to stay readable in a dashboard toast or an audit log line.
+FAILURE_DETAIL_MAX_CHARS = 800
+
+
+def _failure_detail(stderr: str, stdout: str) -> str:
+    """Extract the actionable tail of a failed command's output.
+
+    Prefer stderr (where aisctl prints its error messages); fall back to
+    stdout (some failures emit their envelope there). Keep the LAST lines:
+    the root-cause message ends the output, after any progress noise. The
+    full streams still travel in the ``stdout``/``stderr`` fields — this is
+    the short, display-ready summary consumers can show verbatim.
+    """
+    text = stderr.strip() or stdout.strip()
+    if not text:
+        return ""
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    detail = "\n".join(lines)
+    if len(detail) > FAILURE_DETAIL_MAX_CHARS:
+        detail = detail[-FAILURE_DETAIL_MAX_CHARS:]
+        # Drop the partial first line of the retained window when the tail
+        # spans several lines (a single oversized line is kept as-is).
+        cut = detail.find("\n")
+        if cut != -1:
+            detail = detail[cut + 1 :]
+    return detail
+
+
 def _execute(argv: list[str], timeout: float) -> dict[str, Any]:
-    """Run argv, capture output, return a normalized response dict."""
+    """Run argv, capture output, return a normalized response dict.
+
+    On failure (non-zero exit), the dict additionally carries
+    ``error: "command_failed"`` plus a bounded ``detail`` string with the
+    last useful lines of stderr (stdout fallback), so HTTP consumers get an
+    actionable message in the body instead of a bare status code. Existing
+    fields are unchanged — the enrichment is strictly additive.
+    """
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -182,6 +219,7 @@ def _execute(argv: list[str], timeout: float) -> dict[str, Any]:
             "stderr": str(e),
             "duration_ms": int((time.monotonic() - started) * 1000),
             "error": "aisctl_binary_not_found",
+            "detail": str(e)[:FAILURE_DETAIL_MAX_CHARS],
         }
     except subprocess.TimeoutExpired:
         return {
@@ -191,14 +229,25 @@ def _execute(argv: list[str], timeout: float) -> dict[str, Any]:
             "stderr": f"command timed out after {timeout:.0f}s",
             "duration_ms": int((time.monotonic() - started) * 1000),
             "error": "timeout",
+            "detail": f"command timed out after {timeout:.0f}s",
         }
-    return {
+    result: dict[str, Any] = {
         "ok": proc.returncode == 0,
         "exit_code": proc.returncode,
         "stdout": proc.stdout[-16384:],
         "stderr": proc.stderr[-16384:],
         "duration_ms": int((time.monotonic() - started) * 1000),
     }
+    if proc.returncode != 0:
+        # Stable machine code (like "timeout"/"aisctl_binary_not_found"
+        # above) + bounded human-readable detail. Without these, dashboard
+        # clients that key on ``error`` show an opaque "http_500" even
+        # though aisctl printed an explicit, actionable message.
+        result["error"] = "command_failed"
+        detail = _failure_detail(proc.stderr, proc.stdout)
+        if detail:
+            result["detail"] = detail
+    return result
 
 
 def _semaphore_acquire(sem: threading.Semaphore, timeout: float = 1.0) -> bool:
