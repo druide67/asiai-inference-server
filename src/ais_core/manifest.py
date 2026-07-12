@@ -100,6 +100,18 @@ class BinarySpec:
     # should use this field rather than passing ``--mmproj ~/...`` in
     # ``program_args``, where the tilde would not be expanded.
     mmproj_path: str | None = None
+    # Optional API-key file path injected as ``--api-key-file <path>``.
+    # For engines that read their API key(s) from a file at startup
+    # (llama-server: one key per line, ``#`` comments) so a non-loopback
+    # bind can be authenticated WITHOUT the key value ever appearing in
+    # the manifest, the plist ProgramArguments (root:wheel 644, world-
+    # readable), or ``ps`` output — only this path does. The file is
+    # created by the operator (mode 600, owned by the daemon account),
+    # never by this package. Same tilde-expansion contract as
+    # ``model_path``: preset writers should use this field rather than
+    # passing ``--api-key-file ~/...`` in ``program_args``, where the
+    # tilde would not be expanded.
+    api_key_file: str | None = None
 
     def resolve(self) -> str | None:
         """Return the first existing binary candidate, expanding ``~``.
@@ -578,6 +590,7 @@ def _from_dict(raw: dict, *, source: str) -> EngineManifest:
                 model_path=binary_raw.get("model_path"),
                 template_path=binary_raw.get("template_path"),
                 mmproj_path=binary_raw.get("mmproj_path"),
+                api_key_file=binary_raw.get("api_key_file"),
             ),
             plist=PlistSpec(
                 name=plist_raw["name"],
@@ -650,6 +663,22 @@ def _validate(m: EngineManifest, *, source: str) -> None:
             f"{source}: network.api_key_file must be a non-empty path string, "
             f"got {m.network.api_key_file!r}"
         )
+
+    if m.binary.api_key_file is not None:
+        if not isinstance(m.binary.api_key_file, str) or not m.binary.api_key_file.strip():
+            raise ManifestError(
+                f"{source}: binary.api_key_file must be a non-empty path string, "
+                f"got {m.binary.api_key_file!r}"
+            )
+        # The path lands verbatim in launchd ProgramArguments (no shell, no
+        # cwd guarantee): a relative path would resolve against launchd's
+        # working directory. Require absolute or home-anchored.
+        if not m.binary.api_key_file.startswith(("/", "~")):
+            raise ManifestError(
+                f"{source}: binary.api_key_file must be an absolute path or start "
+                f"with '~' (expanded against the daemon account's home), "
+                f"got {m.binary.api_key_file!r}"
+            )
 
     if m.wrapper.needed and not m.wrapper.install_path:
         raise ManifestError(f"{source}: wrapper.needed=true but wrapper.install_path is empty")

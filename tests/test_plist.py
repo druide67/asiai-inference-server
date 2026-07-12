@@ -117,6 +117,48 @@ def test_plist_no_model_arg_when_model_path_unset() -> None:
     assert "--model" not in d["ProgramArguments"]
 
 
+def test_plist_injects_api_key_file_path_expanded_never_key_content(tmp_path) -> None:
+    """[binary].api_key_file → ``--api-key-file <abs path>`` in ProgramArguments.
+
+    Only the PATH may reach the plist (root:wheel 644, world-readable):
+    even with a real key file on disk, its content must never appear in
+    any emitted argument.
+    """
+    import os
+
+    sentinel = "SENTINEL-KEY-VALUE-do-not-leak"
+    key_file = tmp_path / "backend-api-key"
+    key_file.write_text(sentinel + "\n")
+
+    m = load_manifest("llamacpp")
+    m = replace(m, binary=replace(m.binary, api_key_file="~/.config/aistest/backend-api-key"))
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server")
+    args = d["ProgramArguments"]
+
+    idx = args.index("--api-key-file")
+    expanded = args[idx + 1]
+    assert expanded == os.path.expanduser("~/.config/aistest/backend-api-key")
+    assert expanded.startswith("/")  # no tilde left for a shell-less launchd exec
+    # the flag sits before the trailing --host/--port block
+    assert idx < args.index("--host")
+    assert all(sentinel not in a for a in args)
+
+    # absolute paths pass through untouched
+    m2 = replace(m, binary=replace(m.binary, api_key_file=str(key_file)))
+    d2 = build_plist_dict(m2, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server")
+    args2 = d2["ProgramArguments"]
+    assert args2[args2.index("--api-key-file") + 1] == str(key_file)
+    assert all(sentinel not in a for a in args2)
+
+
+def test_plist_no_api_key_flag_when_field_unset() -> None:
+    """Baseline llamacpp (field commented out) must render exactly as before."""
+    m = load_manifest("llamacpp")
+    d = build_plist_dict(m, user=getpass.getuser(), binary_path="/opt/homebrew/bin/llama-server")
+    assert "--api-key-file" not in d["ProgramArguments"]
+    assert "--api-key" not in d["ProgramArguments"]
+
+
 def test_llamacpp_hermes_preset_plist_injects_template_path_expanded() -> None:
     """The Hermes preset overrides the embedded template via --chat-template-file.
 

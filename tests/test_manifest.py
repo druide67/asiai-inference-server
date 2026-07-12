@@ -241,6 +241,60 @@ def test_api_key_file_must_be_nonempty_string() -> None:
         _from_dict(raw, source="<test>")
 
 
+def test_binary_api_key_file_accepts_tilde_and_absolute() -> None:
+    raw = _read_minimal_dict()
+    raw["binary"]["api_key_file"] = "~/.config/asiai-inference-server/backend-api-key"
+    m = _from_dict(raw, source="<test>")
+    assert m.binary.api_key_file == "~/.config/asiai-inference-server/backend-api-key"
+    raw["binary"]["api_key_file"] = "/etc/asiai/backend-api-key"
+    m = _from_dict(raw, source="<test>")
+    assert m.binary.api_key_file == "/etc/asiai/backend-api-key"
+
+
+def test_binary_api_key_file_rejects_blank_and_relative() -> None:
+    raw = _read_minimal_dict()
+    raw["binary"]["api_key_file"] = "   "
+    with pytest.raises(ManifestError, match=r"binary\.api_key_file"):
+        _from_dict(raw, source="<test>")
+    # A relative path would resolve against launchd's cwd — refuse.
+    raw["binary"]["api_key_file"] = "keys/backend-api-key"
+    with pytest.raises(ManifestError, match="absolute"):
+        _from_dict(raw, source="<test>")
+
+
+def test_llamacpp_baselines_ship_without_api_key_requirement() -> None:
+    """Out-of-the-box baseline installs must not demand a key file: the
+    field ships as documented-commented in every llamacpp* baseline."""
+    for engine in sorted(e for e in EXPECTED_ENGINES if e.startswith("llamacpp")):
+        m = load_manifest(engine)
+        assert m.binary.api_key_file is None, engine
+        assert m.network.api_key_file is None, engine
+
+
+HERMES_AUX_PRESETS = (
+    ("llamacpp-aux-1", "qwen3-4b-instruct-hermes-aux-1"),
+    ("llamacpp-aux-2", "qwen3-1.7b-instruct-hermes-aux-2"),
+    ("llamacpp-aux-3", "qwen3-0.6b-instruct-hermes-aux-3"),
+    ("llamacpp-aux-4", "qwen2.5-vl-7b-instruct-hermes-aux-4"),
+    ("llamacpp-aux-5", "qwen3-4b-instruct-hermes-aux-5-compression"),
+)
+
+
+@pytest.mark.parametrize("engine,preset", HERMES_AUX_PRESETS)
+def test_hermes_aux_presets_declare_api_key_on_both_sides(engine: str, preset: str) -> None:
+    """The aux presets bind 0.0.0.0 → authenticated engine (server-side
+    ``[binary].api_key_file``) AND authenticated generation probe
+    (``[network].api_key_file``), both pointing at the SAME file. Only the
+    path may appear anywhere — never a key value."""
+    m = load_manifest(engine, preset=preset)
+    assert m.network.bind == "0.0.0.0"
+    assert m.binary.api_key_file == "~/.config/asiai-inference-server/backend-api-key"
+    assert m.network.api_key_file == m.binary.api_key_file
+    # the flag must come from the dedicated field, not hand-rolled program_args
+    assert "--api-key-file" not in m.binary.program_args
+    assert "--api-key" not in m.binary.program_args
+
+
 @pytest.mark.parametrize(
     "name, port",
     [

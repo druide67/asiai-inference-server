@@ -29,6 +29,16 @@ program_args = [
     "--jinja",
 ]
 builds_from_source = false
+# Non-loopback binds should carry auth. llama-server reads its API key(s)
+# from a file (one key per line, '#' comments) so the key value never
+# appears in the generated plist (world-readable) or in `ps` output —
+# only the path does. Create the file yourself (mode 600, owned by the
+# account the daemon runs as), then uncomment BOTH this field and
+# [network].api_key_file below:
+#   mkdir -p ~/.config/asiai-inference-server
+#   umask 177 && printf '%s\n' "$(openssl rand -hex 32)" \
+#     > ~/.config/asiai-inference-server/backend-api-key
+# api_key_file = "~/.config/asiai-inference-server/backend-api-key"
 
 [plist]
 name = "com.asiai.llamacpp-aux-5"
@@ -42,6 +52,14 @@ port = 8094
 bind = "0.0.0.0"
 health_endpoint = "/health"
 health_timeout = 60
+# Companion of [binary].api_key_file (uncomment together): lets the aisrv
+# generation probe authenticate. llama-server keeps /health, /v1/health,
+# /models and /v1/models public even with a key, so the health probe needs
+# none — but /v1/chat/completions (the generation probe) is gated. When
+# shared with the probe, the file must hold exactly ONE key line and no
+# comments: the probe sends the whole file content (stripped) as the
+# Bearer token.
+# api_key_file = "~/.config/asiai-inference-server/backend-api-key"
 
 [firewall]
 supported = true

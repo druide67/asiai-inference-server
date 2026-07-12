@@ -127,6 +127,14 @@ def install(
     ):
         firewall.preflight_sudo(f"{manifest.name}: installing the pf anchor")
 
+    # Same fail-fast doctrine for the engine API-key file: a missing file
+    # crash-loops the daemon at argv parsing, an empty one silently starts
+    # the engine WITHOUT auth (fail-open). Refuse before touching anything.
+    # Dry-run skips it: previewing the install on a host without the key
+    # file yet is legitimate (nothing is written).
+    if not dry_run and manifest.binary.api_key_file:
+        _preflight_api_key_file(manifest, user=user)
+
     if binary_path is None:
         resolved = manifest.binary.resolve()
         if resolved is None:
@@ -175,6 +183,72 @@ def install(
         "health_ok": health_ok if not dry_run else None,
         "dry_run": dry_run,
     }
+
+
+def _expand_api_key_file(raw: str, *, user: str) -> str:
+    """Expand a leading ``~`` in ``binary.api_key_file`` against USER's home.
+
+    Unlike model/template/mmproj paths (dedicated helper flags, expanded by
+    the helper against the daemon account), ``binary.api_key_file`` travels
+    as a generic ``--program-arg`` — the helper passes it verbatim and
+    launchd exec()s without a shell, so a tilde would reach the engine
+    literally (llama-server opens the path with no expansion). Expand HERE,
+    against the DAEMON user's home (the account launchd runs the engine as),
+    never the invoker's. Absolute paths pass through untouched — and are
+    deliberately NOT realpath'd: the helper's anti-symlink hardening only
+    covers its dedicated path flags, and pinning the key file would break
+    the operator's rotate-by-replace convention for no security gain.
+    """
+    if raw == "~" or raw.startswith("~/"):
+        home = os.path.expanduser(f"~{user}")
+        if home == f"~{user}":
+            raise LifecycleError(
+                f"cannot resolve home directory for user {user!r} to expand "
+                f"binary.api_key_file {raw!r}"
+            )
+        return home if raw == "~" else f"{home}/{raw[2:]}"
+    return raw
+
+
+def _preflight_api_key_file(manifest: EngineManifest, *, user: str) -> None:
+    """Refuse a real install whose declared engine API-key file cannot gate anything.
+
+    Two failure modes this closes BEFORE the daemon is touched:
+
+    * missing file — llama-server aborts at argv parsing, leaving a
+      crash-looping daemon (KeepAlive) with an opaque log; fail here with
+      an actionable message instead.
+    * file present but holding no key (empty, or comments/blank lines
+      only) — llama-server parses ZERO keys and then SKIPS auth entirely
+      (fail-open on a non-loopback bind). Refuse: a declared key file
+      must actually carry a key.
+
+    Unreadable-due-to-permissions is tolerated: the invoker may
+    legitimately be unable to read a 600 file owned by the daemon
+    account; the engine itself still fails closed at start if the file
+    is wrong. The key content is never logged.
+    """
+    expanded = _expand_api_key_file(manifest.binary.api_key_file or "", user=user)
+    path = Path(expanded)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise LifecycleError(
+            f"{manifest.name}: binary.api_key_file {expanded!r} does not exist. "
+            "Create it first (never done by this tool), e.g.: "
+            f"umask 177 && printf '%s\\n' \"$(openssl rand -hex 32)\" > {expanded}"
+        ) from None
+    except OSError:
+        return  # can't verify (permissions); the engine fails closed at start
+    keys = [ln for ln in content.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    if not keys:
+        raise LifecycleError(
+            f"{manifest.name}: binary.api_key_file {expanded!r} contains no key "
+            "(empty or comments only) — the engine would start with auth DISABLED "
+            "on a non-loopback bind. Put one key per line in the file."
+        )
+    if path.stat().st_mode & 0o077:
+        logger.warning("api key file %s is readable by group/others — chmod 600 recommended", path)
 
 
 def _resolve_user_file(raw: str) -> str:
@@ -228,6 +302,18 @@ def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> l
     if not manifest.wrapper.needed:
         for pa in manifest.binary.program_args:
             args.append(f"--program-arg={pa}")
+        if manifest.binary.api_key_file:
+            # Generic --program-arg (the helper has no dedicated flag for it,
+            # and the helper surface is frozen): flag token + PATH token. The
+            # tilde is expanded HERE against the daemon user's home — generic
+            # program-args cross the helper verbatim and launchd exec()s
+            # without a shell, so an unexpanded ``~`` would reach the engine
+            # literally. Only the path travels; the key value never leaves
+            # the operator-created 600 file.
+            args.append("--program-arg=--api-key-file")
+            args.append(
+                f"--program-arg={_expand_api_key_file(manifest.binary.api_key_file, user=user)}"
+            )
         if manifest.binary.model_path:
             args.append(f"--model-path={_resolve_user_file(manifest.binary.model_path)}")
         if manifest.binary.template_path:
