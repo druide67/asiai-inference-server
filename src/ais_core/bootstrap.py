@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import plistlib
+import pwd
 import re
 import stat
 import subprocess
@@ -341,6 +343,82 @@ def ensure_log_dir(*, dry_run: bool = False) -> str:
     # freshly created one was never inspected (same pattern as install_helper).
     assert_chain_locked(LOG_DIR)
     return LOG_DIR
+
+
+def installed_daemon_log_specs() -> list[tuple[Path, str]]:
+    """Discover ``(log_path, run_as_user)`` pairs for every installed com.asiai.* daemon.
+
+    Reads ``StandardOutPath``/``StandardErrorPath`` and ``UserName`` from each
+    ``/Library/LaunchDaemons/com.asiai.*.plist``. Only paths directly under
+    ``LOG_DIR`` are returned: this function feeds ``sudo touch``/``chown``, so a
+    plist pointing anywhere else is deliberately left alone.
+    """
+    specs: list[tuple[Path, str]] = []
+    daemons_dir = Path(plist.LAUNCH_DAEMONS_DIR)
+    if not daemons_dir.is_dir():
+        return specs
+    for pl in sorted(daemons_dir.glob("com.asiai.*.plist")):
+        try:
+            with pl.open("rb") as fh:
+                data = plistlib.load(fh)
+        except (OSError, plistlib.InvalidFileException):
+            continue  # unreadable or malformed: not ours to fix here
+        user = data.get("UserName")
+        if not isinstance(user, str) or not user:
+            continue
+        for key in ("StandardOutPath", "StandardErrorPath"):
+            raw = data.get(key)
+            if isinstance(raw, str) and Path(raw).parent == Path(LOG_DIR):
+                specs.append((Path(raw), user))
+    return specs
+
+
+def missing_daemon_log_files() -> list[tuple[Path, str]]:
+    """Read-only check: the subset of ``installed_daemon_log_specs`` that does not exist."""
+    return [(p, u) for p, u in installed_daemon_log_specs() if not p.exists()]
+
+
+def ensure_daemon_log_files(*, dry_run: bool = False) -> list[str]:
+    """Pre-create the ``Standard*Path`` log files of installed daemons.
+
+    launchd opens ``Standard*Path`` with the JOB's uid: a daemon running as a
+    regular user cannot create its own log file inside the root-owned 0755
+    ``LOG_DIR`` and dies with ``EX_CONFIG`` before exec — silently, since the
+    very file that would tell you is the one it could not create. The helper
+    pre-creates these leaves at install-daemon time, but a macOS system update
+    can prune ``LOG_DIR`` entirely (observed with the sealed-system-volume
+    post-update migration), leaving every installed daemon unable to respawn
+    at the post-update boot. This repairs them all in one pass.
+
+    Files are created root-side then chown'd to the plist's run-as user and
+    its primary group, mode 0640 — matching what install-daemon produces.
+    """
+    missing = missing_daemon_log_files()
+    if dry_run:
+        for p, u in missing:
+            print(f"[dry-run] create {p} ({u}, 0640)")
+        return [str(p) for p, _ in missing]
+    if not missing:
+        return []
+    if not sys.stdin.isatty():
+        raise BootstrapError(
+            "aisctl bootstrap --logs-only requires an interactive terminal (sudo password)."
+        )
+    created: list[str] = []
+    for p, user in missing:
+        try:
+            gid = pwd.getpwnam(user).pw_gid
+        except KeyError:
+            print(f"skipping {p}: run-as user {user!r} does not exist", file=sys.stderr)
+            continue
+        try:
+            subprocess.run(["sudo", "/usr/bin/touch", str(p)], check=True)
+            subprocess.run(["sudo", "/usr/sbin/chown", f"{user}:{gid}", str(p)], check=True)
+            subprocess.run(["sudo", "/bin/chmod", "0640", str(p)], check=True)
+        except subprocess.CalledProcessError as e:
+            raise BootstrapError(f"Failed to pre-create log file {p}: {e}") from e
+        created.append(str(p))
+    return created
 
 
 def ensure_audit_log(*, dry_run: bool = False) -> str:

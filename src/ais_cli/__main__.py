@@ -329,9 +329,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install only the sudoers fragment (granular/legacy), after visudo validation.",
     )
     p_boot_verb.add_argument(
+        "--logs-only",
+        action="store_true",
+        help="Repair the daemon logging surface only: recreate /Library/Logs/asiai "
+        "(root:wheel 0755) if missing and pre-create the Standard*Path files of installed "
+        "daemons. Run this after every macOS system update — the post-update migration can "
+        "prune the log dir, and daemons then fail respawn with EX_CONFIG. Never touches the "
+        "helper or sudoers.",
+    )
+    p_boot_verb.add_argument(
         "--verify",
         action="store_true",
-        help="Recompute the installed helper's SHA-256 and compare it to its sidecar (NFR11).",
+        help="Recompute the installed helper's SHA-256 and compare it to its sidecar (NFR11); "
+        "also checks the daemon logging surface (log dir + Standard*Path files).",
     )
     p_boot_verb.add_argument(
         "--rollback",
