@@ -817,16 +817,73 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         return _bootstrap_full(dedicated_user=args.dedicated_user, dry_run=args.dry_run)
     if args.install_sudoers:
         return _bootstrap_sudoers_only(dry_run=args.dry_run)
+    if args.logs_only:
+        return _bootstrap_logs_only(dry_run=args.dry_run)
     print(
         "bootstrap: nothing to do.\n"
         "  --install          full one-time setup: install the privileged helper "
         "(/Library/PrivilegedHelperTools/asiai-priv, root:wheel 0755) THEN the helper-only\n"
         "                     sudoers fragment. I0-checked, strict order, idempotent.\n"
         "  --install-sudoers  install only the sudoers fragment (granular/legacy).\n"
+        "  --logs-only        repair the daemon logging surface (log dir + Standard*Path "
+        "files) — run after every macOS system update.\n"
         "  --rollback         revert: restore the pre-bootstrap sudoers, then remove the helper.\n"
-        "  --verify           recompute the helper SHA-256 and compare to its sidecar.\n"
+        "  --verify           recompute the helper SHA-256 and compare to its sidecar; "
+        "also checks the logging surface.\n"
         "Add --dry-run to preview without touching the system."
     )
+    return 0
+
+
+def _bootstrap_logs_only(*, dry_run: bool) -> int:
+    """``aisctl bootstrap --logs-only`` — repair the daemon logging surface, nothing else.
+
+    macOS system updates can prune ``/Library/Logs/asiai`` (observed with the
+    sealed-system-volume post-update migration). launchd then cannot open the
+    daemons' ``Standard*Path`` (created with the JOB's uid, which cannot write
+    in the root-owned dir) and every respawn dies with ``EX_CONFIG`` — silently.
+    This recreates the dir if missing, then pre-creates the missing log files
+    chown'd to each daemon's run-as user. Idempotent; never touches the helper
+    or sudoers, so it needs no security review to run.
+
+    Returns 1 when some files could not be repaired (e.g. a run-as user that
+    no longer exists): those daemons still cannot respawn, and a scripted
+    caller must not read success.
+    """
+    try:
+        if not Path(bootstrap.LOG_DIR).is_dir():
+            bootstrap.ensure_log_dir(dry_run=dry_run)
+        else:
+            # I0 on the existing dir BEFORE any privileged leaf write: the
+            # chain check is the primary barrier that guarantees only root
+            # could have planted entries under LOG_DIR (ensure_log_dir does
+            # this itself on the creation path).
+            bootstrap.assert_chain_locked(bootstrap.LOG_DIR)
+        report = bootstrap.ensure_daemon_log_files(dry_run=dry_run)
+    except bootstrap.BootstrapError as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 2
+    created, skipped = report["created"], report["skipped"]
+    if dry_run:
+        if not created:
+            print("[dry-run] logging surface OK — nothing to repair.")
+        return 0
+    if created:
+        for path in created:
+            print(f"created: {path}")
+        print(
+            f"logging surface repaired ({len(created)} file(s)). launchd retries respawn "
+            "on its own; use `aisctl start <engine>` to force one immediately."
+        )
+    if skipped:
+        print(
+            f"{len(skipped)} file(s) NOT repaired (see above) — the matching daemons "
+            "still cannot respawn.",
+            file=sys.stderr,
+        )
+        return 1
+    if not created:
+        print("logging surface OK — nothing to repair.")
     return 0
 
 
@@ -878,7 +935,7 @@ def _bootstrap_full(*, dedicated_user: bool, dry_run: bool) -> int:
 
 
 def _bootstrap_verify() -> int:
-    """``aisctl bootstrap --verify`` — recompute the helper's SHA-256 and compare to its sidecar."""
+    """``aisctl bootstrap --verify`` — helper SHA-256 vs sidecar + daemon logging surface."""
     try:
         ok = bootstrap.verify_helper()
     except bootstrap.BootstrapError as e:
@@ -886,13 +943,40 @@ def _bootstrap_verify() -> int:
         return 2
     if ok:
         print(f"helper integrity OK: {sudoers.PRIVILEGED_HELPER_PATH} matches its SHA-256 sidecar")
-        return 0
-    print(
-        f"helper integrity MISMATCH: {sudoers.PRIVILEGED_HELPER_PATH} does not match "
-        f"{bootstrap.HELPER_SHA256_PATH} — the helper was modified or the sidecar is stale",
-        file=sys.stderr,
-    )
-    return 1
+    else:
+        print(
+            f"helper integrity MISMATCH: {sudoers.PRIVILEGED_HELPER_PATH} does not match "
+            f"{bootstrap.HELPER_SHA256_PATH} — the helper was modified or the sidecar is stale",
+            file=sys.stderr,
+        )
+
+    # Logging surface (read-only): a macOS system update can prune the log dir,
+    # after which installed daemons fail respawn with EX_CONFIG — silently. A
+    # missing dir only matters when daemons are actually installed: a never-
+    # bootstrapped dev machine or CI runner must not fail this check.
+    logs_ok = True
+    specs = bootstrap.installed_daemon_log_specs()
+    if not Path(bootstrap.LOG_DIR).is_dir():
+        if specs:
+            logs_ok = False
+            print(
+                f"log dir MISSING: {bootstrap.LOG_DIR} — installed daemons cannot respawn "
+                "(EX_CONFIG). Run `aisctl bootstrap --logs-only`.",
+                file=sys.stderr,
+            )
+        else:
+            print("logging surface: no installed daemons — nothing to check")
+    else:
+        missing = [(p, u) for p, u in specs if not p.exists()]
+        if missing:
+            logs_ok = False
+            for path, user in missing:
+                print(f"log file MISSING: {path} (run-as {user})", file=sys.stderr)
+            print("Run `aisctl bootstrap --logs-only` to pre-create them.", file=sys.stderr)
+        else:
+            print(f"logging surface OK: {bootstrap.LOG_DIR} + Standard*Path files present")
+
+    return 0 if (ok and logs_ok) else 1
 
 
 def _bootstrap_sudoers_only(*, dry_run: bool) -> int:

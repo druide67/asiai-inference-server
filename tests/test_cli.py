@@ -763,15 +763,97 @@ def test_bootstrap_full_install_without_dedicated_user_skips_create() -> None:
     m_user.assert_not_called()  # opt-in only
 
 
-def test_bootstrap_verify_ok(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch("ais_cli.commands.bootstrap.verify_helper", return_value=True):
+def test_bootstrap_verify_ok(tmp_path, capsys: pytest.CaptureFixture[str]) -> None:
+    log_dir = tmp_path / "asiai"
+    log_dir.mkdir()
+    out = log_dir / "com.asiai.demo.out"
+    out.touch()
+    with (
+        patch("ais_cli.commands.bootstrap.verify_helper", return_value=True),
+        patch("ais_cli.commands.bootstrap.LOG_DIR", str(log_dir)),
+        patch(
+            "ais_cli.commands.bootstrap.installed_daemon_log_specs",
+            return_value=[(out, "alice")],
+        ),
+    ):
         rc = main(["bootstrap", "--verify"])
     assert rc == 0
-    assert "integrity OK" in capsys.readouterr().out
+    captured = capsys.readouterr().out
+    assert "integrity OK" in captured
+    assert "logging surface OK" in captured
 
 
-def test_bootstrap_verify_mismatch_returns_1(capsys: pytest.CaptureFixture[str]) -> None:
-    with patch("ais_cli.commands.bootstrap.verify_helper", return_value=False):
+def test_bootstrap_verify_ok_on_never_bootstrapped_machine(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No installed daemons + no log dir (CI runner, dev laptop) must not fail."""
+    with (
+        patch("ais_cli.commands.bootstrap.verify_helper", return_value=True),
+        patch("ais_cli.commands.bootstrap.LOG_DIR", str(tmp_path / "absent")),
+        patch("ais_cli.commands.bootstrap.installed_daemon_log_specs", return_value=[]),
+    ):
+        rc = main(["bootstrap", "--verify"])
+    assert rc == 0
+    assert "no installed daemons" in capsys.readouterr().out
+
+
+def test_bootstrap_verify_fails_when_daemons_installed_but_log_dir_missing(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The post-macOS-update failure mode: daemons installed, log dir pruned."""
+    log_dir = tmp_path / "absent"
+    specs = [(log_dir / "com.asiai.demo.out", "alice")]
+    with (
+        patch("ais_cli.commands.bootstrap.verify_helper", return_value=True),
+        patch("ais_cli.commands.bootstrap.LOG_DIR", str(log_dir)),
+        patch("ais_cli.commands.bootstrap.installed_daemon_log_specs", return_value=specs),
+    ):
+        rc = main(["bootstrap", "--verify"])
+    assert rc == 1
+    assert "log dir MISSING" in capsys.readouterr().err
+
+
+def test_bootstrap_verify_fails_on_missing_log_files(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_dir = tmp_path / "asiai"
+    log_dir.mkdir()
+    specs = [(log_dir / "com.asiai.demo.out", "alice")]
+    with (
+        patch("ais_cli.commands.bootstrap.verify_helper", return_value=True),
+        patch("ais_cli.commands.bootstrap.LOG_DIR", str(log_dir)),
+        patch("ais_cli.commands.bootstrap.installed_daemon_log_specs", return_value=specs),
+    ):
+        rc = main(["bootstrap", "--verify"])
+    assert rc == 1
+    assert "log file MISSING" in capsys.readouterr().err
+
+
+def test_bootstrap_logs_only_returns_1_on_skipped_files(
+    tmp_path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file that could not be repaired must not read as success (scripted callers)."""
+    log_dir = tmp_path / "asiai"
+    log_dir.mkdir()
+    with (
+        patch("ais_cli.commands.bootstrap.LOG_DIR", str(log_dir)),
+        patch("ais_cli.commands.bootstrap.assert_chain_locked"),
+        patch(
+            "ais_cli.commands.bootstrap.ensure_daemon_log_files",
+            return_value={"created": [], "skipped": [f"{log_dir}/com.asiai.ghost.out"]},
+        ),
+    ):
+        rc = main(["bootstrap", "--logs-only"])
+    assert rc == 1
+    assert "NOT repaired" in capsys.readouterr().err
+
+
+def test_bootstrap_verify_mismatch_returns_1(tmp_path, capsys: pytest.CaptureFixture[str]) -> None:
+    with (
+        patch("ais_cli.commands.bootstrap.verify_helper", return_value=False),
+        patch("ais_cli.commands.bootstrap.LOG_DIR", str(tmp_path / "absent")),
+        patch("ais_cli.commands.bootstrap.installed_daemon_log_specs", return_value=[]),
+    ):
         rc = main(["bootstrap", "--verify"])
     assert rc == 1
     assert "MISMATCH" in capsys.readouterr().err

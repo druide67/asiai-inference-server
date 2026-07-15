@@ -11,13 +11,16 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
+import plistlib
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from ais_core import bootstrap as bootstrap_mod
+from ais_core import plist as plist_mod
 from ais_core import sudoers
 from ais_core.bootstrap import LOCKED_CHAIN, BootstrapError, assert_chain_locked
 
@@ -753,3 +756,171 @@ def test_ensure_audit_log_still_rejects_tampered_parent(monkeypatch):
     with pytest.raises(bootstrap_mod.BootstrapError, match="group/other-writable"):
         bootstrap_mod.ensure_audit_log()
     assert ran == []  # aborted before any sudo write
+
+
+# ---------------------------------------------------------------------------
+# Daemon logging surface (--logs-only): discovery + pre-creation logic.
+# The real /Library paths are root-owned; LAUNCH_DAEMONS_DIR and LOG_DIR are
+# monkeypatched to tmp_path so the LOGIC is exercised without root.
+# ---------------------------------------------------------------------------
+
+
+def _write_plist(dirpath, label, *, user="alice", out=None, err=None, **extra):
+    data = {"Label": label, **extra}
+    if user is not None:
+        data["UserName"] = user
+    if out is not None:
+        data["StandardOutPath"] = out
+    if err is not None:
+        data["StandardErrorPath"] = err
+    p = dirpath / f"{label}.plist"
+    with p.open("wb") as fh:
+        plistlib.dump(data, fh)
+    return p
+
+
+@pytest.fixture
+def log_surface(tmp_path, monkeypatch):
+    daemons = tmp_path / "LaunchDaemons"
+    logs = tmp_path / "Logs" / "asiai"
+    daemons.mkdir()
+    logs.mkdir(parents=True)
+    monkeypatch.setattr(plist_mod, "LAUNCH_DAEMONS_DIR", str(daemons))
+    monkeypatch.setattr(bootstrap_mod, "LOG_DIR", str(logs))
+    return daemons, logs
+
+
+def test_log_specs_discovers_both_std_paths(log_surface):
+    daemons, logs = log_surface
+    _write_plist(
+        daemons,
+        "com.asiai.demo",
+        out=f"{logs}/com.asiai.demo.out",
+        err=f"{logs}/com.asiai.demo.err",
+    )
+    specs = bootstrap_mod.installed_daemon_log_specs()
+    assert [(str(p), u) for p, u in specs] == [
+        (f"{logs}/com.asiai.demo.err", "alice"),
+        (f"{logs}/com.asiai.demo.out", "alice"),
+    ] or [(str(p), u) for p, u in specs] == [
+        (f"{logs}/com.asiai.demo.out", "alice"),
+        (f"{logs}/com.asiai.demo.err", "alice"),
+    ]
+
+
+def test_log_specs_ignores_paths_outside_log_dir(log_surface, tmp_path):
+    daemons, _logs = log_surface
+    _write_plist(daemons, "com.asiai.evil", out=str(tmp_path / "elsewhere" / "x.out"))
+    assert bootstrap_mod.installed_daemon_log_specs() == []
+
+
+def test_log_specs_skips_plist_without_username(log_surface):
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.asiai.nouser", user=None, out=f"{logs}/com.asiai.nouser.out")
+    assert bootstrap_mod.installed_daemon_log_specs() == []
+
+
+def test_log_specs_skips_foreign_and_malformed(log_surface, tmp_path):
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.other.thing", out=f"{logs}/x.out")  # not com.asiai.*
+    (daemons / "com.asiai.broken.plist").write_bytes(b"not a plist")
+    assert bootstrap_mod.installed_daemon_log_specs() == []
+
+
+def test_missing_daemon_log_files_only_reports_absent(log_surface):
+    daemons, logs = log_surface
+    _write_plist(
+        daemons,
+        "com.asiai.demo",
+        out=f"{logs}/com.asiai.demo.out",
+        err=f"{logs}/com.asiai.demo.err",
+    )
+    (logs / "com.asiai.demo.out").touch()
+    missing = bootstrap_mod.missing_daemon_log_files()
+    assert [str(p) for p, _ in missing] == [f"{logs}/com.asiai.demo.err"]
+
+
+def test_ensure_daemon_log_files_dry_run_touches_nothing(log_surface, capsys):
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.asiai.demo", out=f"{logs}/com.asiai.demo.out")
+    report = bootstrap_mod.ensure_daemon_log_files(dry_run=True)
+    assert report == {"created": [f"{logs}/com.asiai.demo.out"], "skipped": []}
+    assert not (logs / "com.asiai.demo.out").exists()
+    assert "[dry-run]" in capsys.readouterr().out
+
+
+def test_ensure_daemon_log_files_noop_when_all_present(log_surface):
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.asiai.demo", out=f"{logs}/com.asiai.demo.out")
+    (logs / "com.asiai.demo.out").touch()
+    # no TTY available in tests: reaching the isatty gate would raise, so a
+    # clean [] proves the no-op short-circuits BEFORE any sudo/TTY need.
+    assert bootstrap_mod.ensure_daemon_log_files(dry_run=False) == {"created": [], "skipped": []}
+
+
+def test_ensure_daemon_log_files_requires_tty_when_work_pending(log_surface, monkeypatch):
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.asiai.demo", out=f"{logs}/com.asiai.demo.out")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    with pytest.raises(BootstrapError, match="interactive terminal"):
+        bootstrap_mod.ensure_daemon_log_files(dry_run=False)
+
+
+def test_ensure_daemon_log_files_creates_via_sudo_and_chowns(log_surface, monkeypatch):
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.asiai.demo", user="alice", out=f"{logs}/com.asiai.demo.out")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    fake_pw = type("PW", (), {"pw_gid": 20})()
+    monkeypatch.setattr(bootstrap_mod.pwd, "getpwnam", lambda name: fake_pw)
+    calls = []
+
+    def fake_run(argv, check):
+        calls.append(argv)
+        if argv[1].endswith("touch"):
+            Path(argv[2]).touch()  # the guard lstat()s the leaf right after
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", fake_run)
+    report = bootstrap_mod.ensure_daemon_log_files(dry_run=False)
+    assert report == {"created": [f"{logs}/com.asiai.demo.out"], "skipped": []}
+    assert calls == [
+        ["sudo", "/usr/bin/touch", f"{logs}/com.asiai.demo.out"],
+        ["sudo", "/usr/sbin/chown", "alice:20", f"{logs}/com.asiai.demo.out"],
+        ["sudo", "/bin/chmod", "0640", f"{logs}/com.asiai.demo.out"],
+    ]
+
+
+def test_ensure_daemon_log_files_skips_unknown_user(log_surface, monkeypatch, capsys):
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.asiai.ghost", user="nosuchuser", out=f"{logs}/com.asiai.ghost.out")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+    def _raise(name):
+        raise KeyError(name)
+
+    monkeypatch.setattr(bootstrap_mod.pwd, "getpwnam", _raise)
+    report = bootstrap_mod.ensure_daemon_log_files(dry_run=False)
+    assert report == {"created": [], "skipped": [f"{logs}/com.asiai.ghost.out"]}
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_ensure_daemon_log_files_refuses_symlink_leaf(log_surface, monkeypatch):
+    """I8-style guard: a symlink planted at the leaf path must never be chown'd."""
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.asiai.demo", out=f"{logs}/com.asiai.demo.out")
+    victim = logs / "victim"
+    victim.touch()
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    fake_pw = type("PW", (), {"pw_gid": 20})()
+    monkeypatch.setattr(bootstrap_mod.pwd, "getpwnam", lambda name: fake_pw)
+
+    def fake_run(argv, check):
+        # simulate the race: the "touch" lands on a path where an attacker
+        # planted a symlink to another inode
+        if argv[1].endswith("touch"):
+            (logs / "com.asiai.demo.out").symlink_to(victim)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", fake_run)
+    with pytest.raises(BootstrapError, match="not a regular single-link file"):
+        bootstrap_mod.ensure_daemon_log_files(dry_run=False)
