@@ -378,47 +378,68 @@ def missing_daemon_log_files() -> list[tuple[Path, str]]:
     return [(p, u) for p, u in installed_daemon_log_specs() if not p.exists()]
 
 
-def ensure_daemon_log_files(*, dry_run: bool = False) -> list[str]:
+def ensure_daemon_log_files(*, dry_run: bool = False) -> dict[str, list[str]]:
     """Pre-create the ``Standard*Path`` log files of installed daemons.
 
     launchd opens ``Standard*Path`` with the JOB's uid: a daemon running as a
     regular user cannot create its own log file inside the root-owned 0755
     ``LOG_DIR`` and dies with ``EX_CONFIG`` before exec — silently, since the
     very file that would tell you is the one it could not create. The helper
-    pre-creates these leaves at install-daemon time, but a macOS system update
-    can prune ``LOG_DIR`` entirely (observed with the sealed-system-volume
-    post-update migration), leaving every installed daemon unable to respawn
-    at the post-update boot. This repairs them all in one pass.
+    pre-creates these leaves at install-daemon time (``_precreate_log_leaves``,
+    I8), but a macOS system update can prune ``LOG_DIR`` entirely (observed
+    with the sealed-system-volume post-update migration), leaving every
+    installed daemon unable to respawn at the post-update boot. This repairs
+    them all in one pass.
 
-    Files are created root-side then chown'd to the plist's run-as user and
-    its primary group, mode 0640 — matching what install-daemon produces.
+    Security posture (I0 + an I8-style leaf guard, adapted to the sudo path):
+    the caller must have I0-checked ``LOG_DIR`` (root-owned, 0755, symlink-free
+    chain) — only root can plant entries there, which is the primary barrier.
+    Belt-and-braces, each leaf is re-inspected with ``os.lstat`` AFTER the
+    ``touch`` and BEFORE the ``chown``: anything that is not a regular
+    single-link file (symlink, hardlink farm, fifo) is refused, so a planted
+    inode can never be chown'd through this path.
+
+    Returns ``{"created": [...], "skipped": [...]}`` — ``skipped`` lists files
+    whose run-as user no longer exists; callers must surface a non-zero exit
+    when it is non-empty (a skipped daemon still cannot respawn).
     """
     missing = missing_daemon_log_files()
     if dry_run:
         for p, u in missing:
             print(f"[dry-run] create {p} ({u}, 0640)")
-        return [str(p) for p, _ in missing]
+        return {"created": [str(p) for p, _ in missing], "skipped": []}
     if not missing:
-        return []
+        return {"created": [], "skipped": []}
     if not sys.stdin.isatty():
         raise BootstrapError(
             "aisctl bootstrap --logs-only requires an interactive terminal (sudo password)."
         )
     created: list[str] = []
+    skipped: list[str] = []
     for p, user in missing:
         try:
             gid = pwd.getpwnam(user).pw_gid
         except KeyError:
             print(f"skipping {p}: run-as user {user!r} does not exist", file=sys.stderr)
+            skipped.append(str(p))
             continue
         try:
             subprocess.run(["sudo", "/usr/bin/touch", str(p)], check=True)
+            # I8-style leaf guard: refuse to chown anything that is not the
+            # plain regular file the touch above just created. lstat does not
+            # follow symlinks, so a planted link shows up as S_ISLNK here.
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                raise BootstrapError(
+                    f"refusing to chown {p}: not a regular single-link file "
+                    "(symlink or hardlink planted?)"
+                )
             subprocess.run(["sudo", "/usr/sbin/chown", f"{user}:{gid}", str(p)], check=True)
             subprocess.run(["sudo", "/bin/chmod", "0640", str(p)], check=True)
         except subprocess.CalledProcessError as e:
             raise BootstrapError(f"Failed to pre-create log file {p}: {e}") from e
         created.append(str(p))
-    return created
+    return {"created": created, "skipped": skipped}
 
 
 def ensure_audit_log(*, dry_run: bool = False) -> str:

@@ -843,8 +843,8 @@ def test_missing_daemon_log_files_only_reports_absent(log_surface):
 def test_ensure_daemon_log_files_dry_run_touches_nothing(log_surface, capsys):
     daemons, logs = log_surface
     _write_plist(daemons, "com.asiai.demo", out=f"{logs}/com.asiai.demo.out")
-    created = bootstrap_mod.ensure_daemon_log_files(dry_run=True)
-    assert created == [f"{logs}/com.asiai.demo.out"]
+    report = bootstrap_mod.ensure_daemon_log_files(dry_run=True)
+    assert report == {"created": [f"{logs}/com.asiai.demo.out"], "skipped": []}
     assert not (logs / "com.asiai.demo.out").exists()
     assert "[dry-run]" in capsys.readouterr().out
 
@@ -855,7 +855,7 @@ def test_ensure_daemon_log_files_noop_when_all_present(log_surface):
     (logs / "com.asiai.demo.out").touch()
     # no TTY available in tests: reaching the isatty gate would raise, so a
     # clean [] proves the no-op short-circuits BEFORE any sudo/TTY need.
-    assert bootstrap_mod.ensure_daemon_log_files(dry_run=False) == []
+    assert bootstrap_mod.ensure_daemon_log_files(dry_run=False) == {"created": [], "skipped": []}
 
 
 def test_ensure_daemon_log_files_requires_tty_when_work_pending(log_surface, monkeypatch):
@@ -873,13 +873,16 @@ def test_ensure_daemon_log_files_creates_via_sudo_and_chowns(log_surface, monkey
     fake_pw = type("PW", (), {"pw_gid": 20})()
     monkeypatch.setattr(bootstrap_mod.pwd, "getpwnam", lambda name: fake_pw)
     calls = []
-    monkeypatch.setattr(
-        bootstrap_mod.subprocess,
-        "run",
-        lambda argv, check: calls.append(argv) or subprocess.CompletedProcess(argv, 0),
-    )
-    created = bootstrap_mod.ensure_daemon_log_files(dry_run=False)
-    assert created == [f"{logs}/com.asiai.demo.out"]
+
+    def fake_run(argv, check):
+        calls.append(argv)
+        if argv[1].endswith("touch"):
+            Path(argv[2]).touch()  # the guard lstat()s the leaf right after
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", fake_run)
+    report = bootstrap_mod.ensure_daemon_log_files(dry_run=False)
+    assert report == {"created": [f"{logs}/com.asiai.demo.out"], "skipped": []}
     assert calls == [
         ["sudo", "/usr/bin/touch", f"{logs}/com.asiai.demo.out"],
         ["sudo", "/usr/sbin/chown", "alice:20", f"{logs}/com.asiai.demo.out"],
@@ -896,5 +899,28 @@ def test_ensure_daemon_log_files_skips_unknown_user(log_surface, monkeypatch, ca
         raise KeyError(name)
 
     monkeypatch.setattr(bootstrap_mod.pwd, "getpwnam", _raise)
-    assert bootstrap_mod.ensure_daemon_log_files(dry_run=False) == []
+    report = bootstrap_mod.ensure_daemon_log_files(dry_run=False)
+    assert report == {"created": [], "skipped": [f"{logs}/com.asiai.ghost.out"]}
     assert "does not exist" in capsys.readouterr().err
+
+
+def test_ensure_daemon_log_files_refuses_symlink_leaf(log_surface, monkeypatch):
+    """I8-style guard: a symlink planted at the leaf path must never be chown'd."""
+    daemons, logs = log_surface
+    _write_plist(daemons, "com.asiai.demo", out=f"{logs}/com.asiai.demo.out")
+    victim = logs / "victim"
+    victim.touch()
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    fake_pw = type("PW", (), {"pw_gid": 20})()
+    monkeypatch.setattr(bootstrap_mod.pwd, "getpwnam", lambda name: fake_pw)
+
+    def fake_run(argv, check):
+        # simulate the race: the "touch" lands on a path where an attacker
+        # planted a symlink to another inode
+        if argv[1].endswith("touch"):
+            (logs / "com.asiai.demo.out").symlink_to(victim)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(bootstrap_mod.subprocess, "run", fake_run)
+    with pytest.raises(BootstrapError, match="not a regular single-link file"):
+        bootstrap_mod.ensure_daemon_log_files(dry_run=False)
