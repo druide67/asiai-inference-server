@@ -86,6 +86,8 @@ def test_list_human_output(capsys: pytest.CaptureFixture[str]) -> None:
     assert "llamacpp" in out
     for i in range(1, 6):
         assert f"llamacpp-aux-{i}" in out
+    assert "llamacpp-embed" in out
+    assert "llamacpp-rerank" in out
     assert "vmlx" in out
     assert "mlx-lm" in out
     assert "rapidmlx" in out
@@ -108,6 +110,8 @@ def test_list_json_output(capsys: pytest.CaptureFixture[str]) -> None:
         "llamacpp-aux-3",
         "llamacpp-aux-4",
         "llamacpp-aux-5",
+        "llamacpp-embed",
+        "llamacpp-rerank",
         "vmlx",
         "mlx-lm",
         "rapidmlx",
@@ -157,8 +161,8 @@ def test_status_all_engines_when_no_arg(capsys: pytest.CaptureFixture[str]) -> N
     assert rc == 0
     # 10 baseline engines (ollama, lmstudio, omlx, turboquant, llamacpp,
     # llamacpp-aux-1, vmlx, mlx-lm, rapidmlx, mtplx) + 4 extra aux-N
-    # siblings (aux-2/3/4/5) = 14
-    assert len(payload["engines"]) == 14
+    # siblings (aux-2/3/4/5) + 2 named instances (embed, rerank) = 16
+    assert len(payload["engines"]) == 16
 
 
 def test_status_deep_surfaces_degraded_state_and_gen_verdict(
@@ -527,6 +531,28 @@ def test_family_factory_uses_manifest_when_given() -> None:
     m = load_manifest("llamacpp-aux-1")
     driver = commands._driver_for(m)
     assert driver.manifest is m
+
+
+def test_family_pattern_dispatches_named_instances() -> None:
+    """The llamacpp family accepts any dashed suffix (embed, rerank, a
+    hypothetical user-local slot), not just aux-N — while the plain static
+    ``llamacpp`` never falls through to the family (dash required)."""
+    for name in ("llamacpp-embed", "llamacpp-rerank", "llamacpp-chat-2"):
+        assert any(p.match(name) for p, _ in commands._FAMILY_PATTERNS), name
+    assert not any(p.match("llamacpp") for p, _ in commands._FAMILY_PATTERNS)
+    # bundled named instances resolve end-to-end through the family factory
+    m = load_manifest("llamacpp-embed")
+    driver = commands._driver_for(m)
+    assert driver.manifest is m
+
+
+def test_named_instance_manifests_load_with_expected_ports() -> None:
+    embed = load_manifest("llamacpp-embed")
+    rerank = load_manifest("llamacpp-rerank")
+    assert embed.network.port == 8095
+    assert rerank.network.port == 8096
+    assert "--embeddings" in embed.binary.program_args
+    assert "--rerank" in rerank.binary.program_args
 
 
 def test_start_dry_run_does_not_touch_launchctl(capsys: pytest.CaptureFixture[str]) -> None:

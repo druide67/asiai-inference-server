@@ -72,11 +72,17 @@ _STATIC_DRIVER_FACTORIES: dict[str, Callable[[], Any]] = {
 
 # Family-pattern registrations — names matching the regex resolve to the
 # associated driver class, instantiated with the matched manifest name.
-# This lets a new instance (e.g. ``llamacpp-aux-5``) be added by dropping
-# a TOML on disk, with no Python code change. New families (e.g.
-# ``mlx-lm-aux-N``) follow the same pattern: regex + class.
+# This lets a new instance (e.g. ``llamacpp-aux-5`` or ``llamacpp-embed``)
+# be added by dropping a TOML on disk, with no Python code change. New
+# families (e.g. ``mlx-lm-aux-N``) follow the same pattern: regex + class.
+#
+# The llamacpp family accepts ANY dashed suffix, not just aux-N: a named
+# instance is a plain llama-server on its own port and model (embeddings
+# server, reranker, a second chat slot...), and the aux driver is already
+# instance-agnostic. Static names (plain ``llamacpp``) cannot match — the
+# dash is required — and static registry lookups short-circuit first anyway.
 _FAMILY_PATTERNS: list[tuple[re.Pattern[str], type]] = [
-    (re.compile(r"^llamacpp-aux-\d+$"), LlamaCppAuxDriver),
+    (re.compile(r"^llamacpp-[a-z0-9][a-z0-9-]*$"), LlamaCppAuxDriver),
 ]
 
 

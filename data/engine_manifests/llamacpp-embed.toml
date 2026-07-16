@@ -1,0 +1,94 @@
+# Engine manifest — llama.cpp embeddings server — generic baseline
+#
+# A named llama-server instance (same family dispatch as llamacpp-aux-N)
+# dedicated to serving embeddings over the OpenAI-compatible
+# ``/v1/embeddings`` endpoint. Pairs naturally with ``llamacpp-rerank``
+# (port 8096) to power a full RAG retrieval stack next to your chat
+# engines — dense retrieval here, cross-encoder rescoring there.
+#
+# Default model: BAAI/bge-m3 (XLM-RoBERTa encoder, 568M params, 100+
+# languages, 8192-token window, CLS pooling). FP16 GGUF (~1.2 GB) is
+# recommended over quantized variants: an embedder's OUTPUT is the vector
+# itself, so quantization noise directly degrades retrieval recall, and
+# the RAM saving is small at this model size.
+#   Download (e.g. from gpustack/bge-m3-GGUF on Hugging Face):
+#     mkdir -p ~/llms/gguf/bge-m3
+#     curl -L -o ~/llms/gguf/bge-m3/bge-m3-FP16.gguf \
+#       "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-FP16.gguf"
+#
+# Context sizing: llama-server splits --ctx-size across --parallel slots
+# (n_ctx_slot = ctx/parallel): 32768/4 = 8192 per slot = the model's full
+# window. Encoder inputs must fit one ubatch (non-causal) → ubatch 8192.
+#
+# Serving another embedding model: keep --pooling in sync with the model
+# card (BGE-M3 uses cls; many others use mean or last) — a wrong pooling
+# silently degrades every similarity downstream.
+#
+# Install: aisctl install llamacpp-embed
+
+name = "llamacpp-embed"
+display = "llama.cpp embeddings (BGE-M3, port 8095)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+# Named GGUF path (no symlink): discriminates this instance from the main
+# ``llamacpp`` and from every sibling instance in pgrep/pkill matching.
+process_pattern = "llms/gguf/bge-m3/bge-m3-FP16.gguf"
+model_path = "~/llms/gguf/bge-m3/bge-m3-FP16.gguf"
+program_args = [
+    "--embeddings",
+    "--pooling", "cls",
+    "--ctx-size", "32768",
+    "--parallel", "4",
+    "--batch-size", "8192",
+    "--ubatch-size", "8192",
+    "--n-gpu-layers", "999",
+    "--mlock",
+    "--metrics",
+]
+builds_from_source = false
+# Non-loopback binds should carry auth. llama-server reads its API key(s)
+# from a file so the key value never appears in the generated plist or in
+# `ps` output — only the path does. Create the file (mode 600), then
+# uncomment BOTH this field and [network].api_key_file below:
+#   mkdir -p ~/.config/asiai-inference-server
+#   umask 177 && printf '%s\n' "$(openssl rand -hex 32)" \
+#     > ~/.config/asiai-inference-server/backend-api-key
+# api_key_file = "~/.config/asiai-inference-server/backend-api-key"
+
+[plist]
+name = "com.asiai.llamacpp-embed"
+throttle_interval = 10
+timeout = 30
+
+[network]
+port = 8095
+bind = "127.0.0.1"
+health_endpoint = "/health"
+# The FP16 encoder loads in a few seconds on M-series NVMe.
+health_timeout = 30
+# Companion of [binary].api_key_file (uncomment together). Note: the
+# generation probe does not apply to an embeddings server (no chat
+# endpoint); state probing relies on /health, which stays public.
+# api_key_file = "~/.config/asiai-inference-server/backend-api-key"
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-embed"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-embed"
+stdout = "llamacpp-embed.log"
+stderr = "llamacpp-embed.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []
+
+[memory]
+weights_mb = 1160.0

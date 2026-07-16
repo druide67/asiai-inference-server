@@ -1,0 +1,83 @@
+# Engine manifest — llama.cpp reranker server — generic baseline
+#
+# A named llama-server instance (same family dispatch as llamacpp-aux-N)
+# dedicated to reranking over ``/v1/rerank`` (Jina-style API:
+# ``{model, query, documents[]}`` → ``results[{index, relevance_score}]``).
+# Companion of ``llamacpp-embed`` (port 8095): hybrid retrieval finds
+# candidates, this cross-encoder rescores the top-k.
+#
+# Default model: BAAI/bge-reranker-v2-m3 (XLM-RoBERTa cross-encoder, 568M
+# params, multilingual, same family/base as BGE-M3). FP16 GGUF (~1.2 GB):
+# scoring precision is the whole product of a reranker.
+#   Download (e.g. from gpustack/bge-reranker-v2-m3-GGUF on Hugging Face):
+#     mkdir -p ~/llms/gguf/bge-reranker-v2-m3
+#     curl -L -o ~/llms/gguf/bge-reranker-v2-m3/bge-reranker-v2-m3-FP16.gguf \
+#       "https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-FP16.gguf"
+#
+# API contract note: llama-server returns relevance_score as a RAW LOGIT
+# (e.g. +8.9 relevant, -11 irrelevant), not a 0-1 probability — apply a
+# sigmoid downstream if you need normalized scores.
+#
+# Each query+document pair must fit one slot: 16384/2 = 8192 per slot.
+# Encoder inputs must fit one ubatch (non-causal) → ubatch 8192.
+#
+# Smoke-test with semantics, not just HTTP: broken reranker setups answer
+# 200 with near-zero scores for everything. An obviously relevant document
+# must rank first with a clearly separated score.
+#
+# Install: aisctl install llamacpp-rerank
+
+name = "llamacpp-rerank"
+display = "llama.cpp reranker (bge-reranker-v2-m3, port 8096)"
+
+[binary]
+candidates = [
+    "/opt/homebrew/bin/llama-server",
+    "/usr/local/bin/llama-server",
+]
+process_pattern = "llms/gguf/bge-reranker-v2-m3/bge-reranker-v2-m3-FP16.gguf"
+model_path = "~/llms/gguf/bge-reranker-v2-m3/bge-reranker-v2-m3-FP16.gguf"
+program_args = [
+    "--rerank",
+    "--ctx-size", "16384",
+    "--parallel", "2",
+    "--batch-size", "8192",
+    "--ubatch-size", "8192",
+    "--n-gpu-layers", "999",
+    "--mlock",
+    "--metrics",
+]
+builds_from_source = false
+# Non-loopback binds should carry auth (see llamacpp-embed.toml for the
+# key-file recipe). Uncomment together with [network].api_key_file:
+# api_key_file = "~/.config/asiai-inference-server/backend-api-key"
+
+[plist]
+name = "com.asiai.llamacpp-rerank"
+throttle_interval = 10
+timeout = 30
+
+[network]
+port = 8096
+bind = "127.0.0.1"
+health_endpoint = "/health"
+health_timeout = 30
+# api_key_file = "~/.config/asiai-inference-server/backend-api-key"
+
+[firewall]
+supported = true
+anchor_name = "com.asiai.llamacpp-rerank"
+
+[logs]
+dir = "~/Library/Logs/asiai/llamacpp-rerank"
+stdout = "llamacpp-rerank.log"
+stderr = "llamacpp-rerank.err"
+
+[wrapper]
+needed = false
+
+[environment]
+vars = []
+
+[memory]
+weights_mb = 1160.0

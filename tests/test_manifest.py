@@ -27,6 +27,8 @@ EXPECTED_ENGINES = {
     "llamacpp-aux-3",
     "llamacpp-aux-4",
     "llamacpp-aux-5",
+    "llamacpp-embed",
+    "llamacpp-rerank",
     "vmlx",
     "mlx-lm",
     "rapidmlx",
