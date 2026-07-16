@@ -6,6 +6,38 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Shared-port identity in `probe_state`** (root fix of the asiai #77
+  symptom): on the shared-port slot pattern (two manifests declaring the
+  same port — one active, one standby), a health 2xx used to certify the
+  standby RUNNING even though the answer came from its neighbour's
+  process. `probe_state` now cross-checks the 2xx against `process_alive`
+  and only demotes on **positive identification** of a foreign port
+  holder: a command line carrying `--port <N>`/`--port=<N>` that does not
+  match the manifest's `process_pattern`, **confirmed as an actual
+  listener of the port by lsof** (an argv mention alone can be a monitor
+  merely talking about the port; when non-root lsof cannot see the port —
+  engine under another account — the argv evidence stands alone).
+  Hand-launched servers, desktop apps and env-port launchers keep their
+  RUNNING on a pgrep blind spot, exactly as before. A demoted engine is
+  classified by its launchd paperwork (stopped/disabled/loaded — all
+  values existing consumers already know). Deep mode no longer
+  generation-probes (and possibly blames as DEGRADED) the neighbour that
+  answered the 2xx.
+- `wait_for_health` applies the same identity rule: a `start`/`restart`
+  on a shared port is no longer declared healthy on the strength of the
+  neighbour's 2xx.
+
+### Added
+
+- Additive `port_held_by` field on `aisctl status --json` rows and
+  `/internal/v1/engines-state` entries — present only when the port's
+  2xx demonstrably came from a foreign process; names that process's
+  (bounded) command line.
+
 ## [0.13.0](https://github.com/druide67/asiai-inference-server/compare/v0.12.0...v0.13.0) — 2026-07-12
 
 ### Added

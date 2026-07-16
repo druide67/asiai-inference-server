@@ -282,13 +282,13 @@ def _collect_engines_state() -> dict[str, Any]:
             # from the port the service was generated on — probing the
             # baseline would show a serving engine as stopped.
             m = install_state.load_installed_manifest(name)
-            state, _ = lifecycle.probe_state(m)
+            probe = lifecycle.probe_state(m)
             record = install_state.read_install(m.name)
-            return {
+            row = {
                 "name": m.name,
                 "display": m.display,
                 "port": m.network.port,
-                "state": str(state),
+                "state": str(probe.state),
                 # What a provisioned engine WOULD serve (from its installed
                 # plist) — lets the dashboard label non-running cards.
                 "model": lifecycle.installed_model(m),
@@ -297,6 +297,12 @@ def _collect_engines_state() -> dict[str, Any]:
                 # the install picker preselects it.
                 "preset": record.preset if record else None,
             }
+            # Additive: present only when the port's 2xx demonstrably came
+            # from a foreign process (shared-port slot pattern). Existing
+            # consumers .get() their fields and ignore extras.
+            if probe.foreign_port_holder is not None:
+                row["port_held_by"] = probe.foreign_port_holder
+            return row
         except Exception as e:  # one broken manifest must never hide the others
             logger.warning("engines-state: probe failed for %s: %s", name, e)
             return None

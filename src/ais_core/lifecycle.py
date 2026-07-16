@@ -32,12 +32,14 @@ import enum
 import logging
 import os
 import plistlib
+import re
 import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 from ais_core import firewall, plist, privhelper
 from ais_core.manifest import EngineManifest
@@ -514,6 +516,13 @@ def wait_for_health(
     def _healthy() -> bool:
         if not probe_health(manifest):
             return False
+        # Same identity rule as probe_state: on a shared-port slot, the
+        # standby's neighbour answers /health too — a start/restart must not
+        # be declared healthy on the strength of a foreign process's 2xx.
+        # Positive identification only (see _port_squatter); keep polling
+        # until OUR process shows up or the deadline expires.
+        if not process_alive(manifest) and _port_squatter(manifest) is not None:
+            return False
         if not manifest.network.gen_check:
             return True
         # Opt-in ([network] gen_check = true): certify SERVING health, not
@@ -646,6 +655,18 @@ def gen_probe(manifest: EngineManifest, *, request_timeout: float = 45.0) -> Gen
         return GenVerdict.DOWN
 
 
+def _pgrep_matches(pattern: str) -> list[str]:
+    """Full command lines (``pgrep -fl``) matching ``pattern``, [] on no match/error."""
+    proc = subprocess.run(
+        ["pgrep", "-fl", "--", pattern],
+        check=False,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return []
+    return [ln for ln in proc.stdout.decode(errors="replace").splitlines() if ln.strip()]
+
+
 def process_alive(manifest: EngineManifest) -> bool:
     """True iff a process belonging to THIS manifest is running.
 
@@ -657,22 +678,78 @@ def process_alive(manifest: EngineManifest) -> bool:
     port disambiguates; matches without a port token (ollama-style
     launchers, wrapper scripts) keep the historical pattern-only answer.
     """
+    lines = _pgrep_matches(manifest.binary.process_pattern)
+    if not lines:
+        return False
+    # Same boundary-guarded token as _port_squatter: both argv spellings,
+    # and "--port 8080" never matches "--port 80801".
+    own = re.compile(rf"--port[ =]{manifest.network.port}(?!\d)")
+    if any(own.search(ln) for ln in lines):
+        return True
+    # False iff every match is pinned to some OTHER manifest's port;
+    # port-less matches keep the historical pattern-only answer.
+    return not all(re.search(r"--port[ =]\d", ln) for ln in lines)
+
+
+def _listening_pids(port: int) -> list[int]:
+    """PIDs actually LISTENING on TCP ``port`` (lsof), [] when unknown.
+
+    Non-root lsof only sees same-user sockets, so [] means "cannot tell",
+    never "nobody listens" — callers must treat it as absence of evidence.
+    """
     proc = subprocess.run(
-        ["pgrep", "-fl", manifest.binary.process_pattern],
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
         check=False,
         capture_output=True,
     )
     if proc.returncode != 0:
-        return False
-    lines = [ln for ln in proc.stdout.decode(errors="replace").splitlines() if ln.strip()]
-    if not lines:
-        return False
-    port_token = f"--port {manifest.network.port}"
-    if any(port_token in ln for ln in lines):
-        return True
-    # False iff every match is pinned to some OTHER manifest's port;
-    # port-less matches keep the historical pattern-only answer.
-    return not all("--port " in ln for ln in lines)
+        return []
+    return [int(tok) for tok in proc.stdout.decode(errors="replace").split() if tok.isdigit()]
+
+
+def _port_squatter(manifest: EngineManifest) -> str | None:
+    """Command line of a process POSITIVELY holding this manifest's port
+    while not matching its ``process_pattern`` — or None.
+
+    This is the identity check behind the shared-port slot pattern (two
+    manifests may legitimately declare the same port, one active and one
+    standby): a 2xx on the port proves *something* serves there, not that
+    it is this manifest's daemon. Positive identification only — pgrep
+    failures, port-less command lines (wrappers, ollama-style env ports)
+    and anything ambiguous return None, because the absence of proof must
+    never demote an engine that is actually serving (hand-launched
+    servers, desktop apps and bundle daemons carry no recognizable
+    ``--port`` argv and must stay RUNNING).
+
+    Two-step identification: a candidate must (1) carry the port in its
+    argv and not match the manifest's pattern, and (2) be confirmed as an
+    actual LISTENER of the port by lsof — an argv mention alone can be a
+    monitor/wrapper that merely talks ABOUT the port (``asiai web --port
+    N`` style). When lsof cannot see the port at all (engine under another
+    account), the argv evidence stands alone, as before the hardening.
+
+    ``process_pattern`` is compared as a LITERAL substring here (manifest
+    validation already rejects regex metacharacters in the field, so this
+    matches pgrep's ERE interpretation in :func:`process_alive`).
+    """
+    port = manifest.network.port
+    if not port:
+        return None
+    # Boundary-guarded token: "--port 8080" must not match "--port 80801".
+    # Both argv spellings are recognized (``--port 8080`` and ``--port=8080``).
+    token = re.compile(rf"--port[ =]{port}(?!\d)")
+    listeners: list[int] | None = None  # lazy: lsof only runs on a first candidate
+    for ln in _pgrep_matches(f"[-]-port[ =]{port}"):
+        if not token.search(ln) or manifest.binary.process_pattern in ln:
+            continue
+        if listeners is None:
+            listeners = _listening_pids(port)
+        if listeners:
+            first = ln.split(None, 1)[0]
+            if not first.isdigit() or int(first) not in listeners:
+                continue  # argv candidate demonstrably does NOT hold the port
+        return ln[:200]
+    return None
 
 
 def is_loaded(manifest: EngineManifest) -> bool:
@@ -700,9 +777,51 @@ def bundle_provisioned(manifest: EngineManifest) -> bool:
     return embedded.is_file()
 
 
-def probe_state(
-    manifest: EngineManifest, *, deep: bool = False
-) -> tuple[EngineState, GenVerdict | None]:
+class ProbeResult(NamedTuple):
+    """What :func:`probe_state` learned: the state, the generation verdict
+    behind it (deep mode only), and — when the health 2xx was demonstrably
+    answered by a foreign process on a shared port — that process's command
+    line (bounded), so status surfaces can say WHO holds the port."""
+
+    state: EngineState
+    gen: GenVerdict | None
+    foreign_port_holder: str | None = None
+
+
+def _provisioned_state(manifest: EngineManifest, *, alive: bool | None = None) -> EngineState:
+    """Launchd-paperwork drill-down for an engine whose own daemon is not serving.
+
+    Nothing provisioned for this label: no legacy plist, launchd has never
+    heard of it, and no installed app bundle embeds it (a DORMANT
+    bundle-managed label is unloaded — only its embedded plist remains as
+    provisioning evidence). Split by what's on disk: the software being
+    present without a provisioned service (ollama installed via brew but
+    never ``aisctl install``ed) is AVAILABLE, not "not installed" — an
+    operator reading the fleet must not be told to install something that
+    is already there.
+    """
+    if (
+        not Path(plist.plist_path(manifest)).exists()
+        and not is_loaded(manifest)
+        and not bundle_provisioned(manifest)
+    ):
+        if manifest.binary.resolve() is not None:
+            return EngineState.AVAILABLE
+        return EngineState.NOT_INSTALLED
+
+    if process_alive(manifest) if alive is None else alive:
+        return EngineState.UNHEALTHY
+
+    if is_loaded(manifest):
+        return EngineState.LOADED_NOT_RUNNING
+
+    if is_disabled(manifest):
+        return EngineState.DISABLED
+
+    return EngineState.STOPPED
+
+
+def probe_state(manifest: EngineManifest, *, deep: bool = False) -> ProbeResult:
     """Best-effort state machine answer, plus the generation verdict behind it.
 
     Order rationale: ``launchctl list`` for system daemons (in
@@ -713,6 +832,19 @@ def probe_state(
     ``launchctl list`` says. Only when the daemon is silent do we drill down
     via ``process_alive``, ``is_loaded`` and ``is_disabled`` to distinguish
     UNHEALTHY / LOADED_NOT_RUNNING / DISABLED / STOPPED.
+
+    **Identity check on the 2xx** (shared-port slot pattern): two manifests
+    may declare the same port — one active, one standby — and both answer
+    the same ``/health``. A 2xx whose port is POSITIVELY held by a process
+    that does not match this manifest's ``process_pattern`` is therefore not
+    proof of RUNNING: the manifest is classified by its launchd paperwork
+    instead (typically STOPPED/DISABLED for the standby slot), and the
+    holder's command line is returned in ``foreign_port_holder``. Without
+    positive identification the 2xx keeps winning — hand-launched servers,
+    desktop apps (LM Studio) and env-port launchers (ollama) never lose
+    their RUNNING on a pgrep blind spot. This also keeps the foreign
+    process from being generation-probed (and possibly blamed as DEGRADED)
+    in this manifest's name.
 
     With ``deep=True``, a RUNNING engine is additionally generation-probed —
     exactly once, and the verdict is returned alongside the state so callers
@@ -728,45 +860,30 @@ def probe_state(
     # servers have no plist at all — the old plist-first gate reported all
     # of them NOT_INSTALLED while they were answering requests.
     if probe_health(manifest):
-        if deep:
-            verdict = gen_probe(manifest)
-            if verdict is GenVerdict.ZOMBIE:
-                return EngineState.DEGRADED, verdict
-            return EngineState.RUNNING, verdict
-        return EngineState.RUNNING, None
+        alive = process_alive(manifest)
+        holder = None if alive else _port_squatter(manifest)
+        if holder is None:
+            if deep:
+                verdict = gen_probe(manifest)
+                if verdict is GenVerdict.ZOMBIE:
+                    return ProbeResult(EngineState.DEGRADED, verdict)
+                return ProbeResult(EngineState.RUNNING, verdict)
+            return ProbeResult(EngineState.RUNNING, None)
+        logger.debug(
+            "%s: health 2xx on port %s belongs to a foreign process (%s) — "
+            "classifying by launchd state instead",
+            manifest.name,
+            manifest.network.port,
+            holder,
+        )
+        return ProbeResult(_provisioned_state(manifest, alive=alive), None, holder)
 
-    # Nothing provisioned for this label: no legacy plist, launchd has never
-    # heard of it, and no installed app bundle embeds it (a DORMANT
-    # bundle-managed label is unloaded — only its embedded plist remains as
-    # provisioning evidence). Split by what's on disk: the software being
-    # present without a provisioned service (ollama installed via brew but
-    # never ``aisctl install``ed) is AVAILABLE, not "not installed" — an
-    # operator reading the fleet must not be told to install something that
-    # is already there.
-    if (
-        not Path(plist.plist_path(manifest)).exists()
-        and not is_loaded(manifest)
-        and not bundle_provisioned(manifest)
-    ):
-        if manifest.binary.resolve() is not None:
-            return EngineState.AVAILABLE, None
-        return EngineState.NOT_INSTALLED, None
-
-    if process_alive(manifest):
-        return EngineState.UNHEALTHY, None
-
-    if is_loaded(manifest):
-        return EngineState.LOADED_NOT_RUNNING, None
-
-    if is_disabled(manifest):
-        return EngineState.DISABLED, None
-
-    return EngineState.STOPPED, None
+    return ProbeResult(_provisioned_state(manifest), None)
 
 
 def current_state(manifest: EngineManifest, *, deep: bool = False) -> EngineState:
     """State-only convenience over :func:`probe_state` (same single probe)."""
-    return probe_state(manifest, deep=deep)[0]
+    return probe_state(manifest, deep=deep).state
 
 
 def _model_display_name(path: str) -> str | None:

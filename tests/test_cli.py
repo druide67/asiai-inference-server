@@ -133,7 +133,10 @@ def test_status_unknown_engine_exits_with_message() -> None:
 def test_status_single_engine_json(capsys: pytest.CaptureFixture[str]) -> None:
     fake_state = MagicMock()
     fake_state.value = "stopped"
-    with patch("ais_cli.commands.lifecycle.probe_state", return_value=(fake_state, None)):
+    with patch(
+        "ais_cli.commands.lifecycle.probe_state",
+        return_value=commands.lifecycle.ProbeResult(fake_state, None),
+    ):
         rc = main(["status", "ollama", "--json"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -151,10 +154,35 @@ def test_status_single_engine_json(capsys: pytest.CaptureFixture[str]) -> None:
     }
 
 
+def test_status_json_carries_port_held_by_when_foreign(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Shared-port slot: the additive diagnostic names WHO answered the 2xx.
+
+    Absent from the payload in the normal case (previous test) so existing
+    consumers see byte-identical rows."""
+    from ais_core.lifecycle import EngineState
+
+    holder = "42 mtplx.server.openai --port 11434"
+    with patch(
+        "ais_cli.commands.lifecycle.probe_state",
+        return_value=commands.lifecycle.ProbeResult(EngineState.DISABLED, None, holder),
+    ):
+        rc = main(["status", "ollama", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    row = json.loads(out)["engines"][0]
+    assert row["state"] == "disabled"
+    assert row["port_held_by"] == holder
+
+
 def test_status_all_engines_when_no_arg(capsys: pytest.CaptureFixture[str]) -> None:
     fake_state = MagicMock()
     fake_state.value = "not_installed"
-    with patch("ais_cli.commands.lifecycle.probe_state", return_value=(fake_state, None)):
+    with patch(
+        "ais_cli.commands.lifecycle.probe_state",
+        return_value=commands.lifecycle.ProbeResult(fake_state, None),
+    ):
         rc = main(["status", "--json"])
     out = capsys.readouterr().out
     payload = json.loads(out)
@@ -174,7 +202,7 @@ def test_status_deep_surfaces_degraded_state_and_gen_verdict(
 
     with patch(
         "ais_cli.commands.lifecycle.probe_state",
-        return_value=(EngineState.DEGRADED, GenVerdict.ZOMBIE),
+        return_value=commands.lifecycle.ProbeResult(EngineState.DEGRADED, GenVerdict.ZOMBIE),
     ) as mock_probe:
         rc = main(["status", "ollama", "--deep", "--json"])
     out = capsys.readouterr().out
@@ -189,7 +217,10 @@ def test_status_deep_surfaces_degraded_state_and_gen_verdict(
 def test_status_shallow_has_no_gen_key(capsys: pytest.CaptureFixture[str]) -> None:
     fake_state = MagicMock()
     fake_state.value = "running"
-    with patch("ais_cli.commands.lifecycle.probe_state", return_value=(fake_state, None)):
+    with patch(
+        "ais_cli.commands.lifecycle.probe_state",
+        return_value=commands.lifecycle.ProbeResult(fake_state, None),
+    ):
         rc = main(["status", "ollama", "--json"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -461,7 +492,7 @@ def test_status_json_shows_recorded_preset(capsys: pytest.CaptureFixture[str]) -
     capsys.readouterr()  # drop the install output
     with patch(
         "ais_cli.commands.lifecycle.probe_state",
-        return_value=(commands.lifecycle.EngineState.STOPPED, None),
+        return_value=commands.lifecycle.ProbeResult(commands.lifecycle.EngineState.STOPPED, None),
     ):
         assert main(["status", _ENGINE, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
