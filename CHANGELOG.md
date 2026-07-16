@@ -6,7 +6,7 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.16.0](https://github.com/druide67/asiai-inference-server/compare/v0.15.0...v0.16.0) — 2026-07-16
 
 ### Fixed
 
