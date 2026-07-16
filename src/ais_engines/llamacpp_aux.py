@@ -1,7 +1,9 @@
-"""llama.cpp auxiliary driver — restart-only family.
+"""llama.cpp named-instance driver — restart-only family.
 
-A single ``LlamaCppAuxDriver`` class powers the whole ``llamacpp-aux-*``
-family of engine instances. Each instance is a regular ``llama-server``
+A single ``LlamaCppAuxDriver`` class powers the whole ``llamacpp-<name>``
+family of engine instances: auxiliary chat slots (``llamacpp-aux-N``) as
+well as special-purpose servers such as ``llamacpp-embed`` (embeddings)
+and ``llamacpp-rerank`` (cross-encoder reranking). Each instance is a regular ``llama-server``
 process bound to its own port and model, discriminated from the main
 ``llamacpp`` (8080) and from sibling auxiliary instances by the model
 path declared in the manifest (``llms/gguf/auxN/active.gguf``), so
@@ -11,7 +13,7 @@ How instances are declared
 --------------------------
 Adding a new auxiliary slot is a config-only change:
 
-1. Drop a manifest TOML in ``data/engine_manifests/llamacpp-aux-N.toml``
+1. Drop a manifest TOML in ``data/engine_manifests/llamacpp-<name>.toml``
    (or, for a user-local instance never to be committed to OSS, in
    ``$XDG_CONFIG_HOME/asiai-inference-server/engine_manifests/``).
 2. Pick a free port and a distinct ``llms/gguf/auxN/`` segment in
