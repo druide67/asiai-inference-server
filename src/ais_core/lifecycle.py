@@ -137,6 +137,32 @@ def install(
     if not dry_run and manifest.binary.api_key_file:
         _preflight_api_key_file(manifest, user=user)
 
+    # Pattern-coherence check: the plist is pinned to the REAL model file
+    # (symlinks are resolved client-side — the helper refuses a symlink final
+    # component). When ``process_pattern`` no longer appears in that resolved
+    # path, pgrep-based state detection and pkill will miss the daemon we are
+    # about to install. Warn (not refuse): the install itself is sound, and
+    # patterns that intentionally match something else stay possible.
+    if manifest.binary.model_path and manifest.binary.process_pattern:
+        _resolved_model = _resolve_user_file(manifest.binary.model_path, user=user)
+        # Warn exactly when the resolution DESYNCED the pattern: it matched the
+        # declared path but no longer matches the resolved one. Patterns that
+        # never referenced the model path (binary-name patterns) stay silent.
+        if (
+            manifest.binary.process_pattern in manifest.binary.model_path
+            and manifest.binary.process_pattern not in _resolved_model
+        ):
+            logger.warning(
+                "%s: model_path %s resolves to %s, which process_pattern %r does not "
+                "match — process state detection and pkill will miss this daemon. "
+                "Point model_path at the real file (and keep process_pattern in "
+                "sync), or use a hard link instead of a symlink.",
+                manifest.name,
+                manifest.binary.model_path,
+                _resolved_model,
+                manifest.binary.process_pattern,
+            )
+
     if binary_path is None:
         resolved = manifest.binary.resolve()
         if resolved is None:
@@ -253,20 +279,29 @@ def _preflight_api_key_file(manifest: EngineManifest, *, user: str) -> None:
         logger.warning("api key file %s is readable by group/others — chmod 600 recommended", path)
 
 
-def _resolve_user_file(raw: str) -> str:
-    """Resolve symlinks in an absolute model/template/mmproj path before the helper call.
+def _resolve_user_file(raw: str, *, user: str) -> str:
+    """Resolve symlinks in a model/template/mmproj path before the helper call.
 
     Audit finding #1: the helper refuses a symlink final component on these paths
     (anti swap-TOCTOU inside a user-writable home — a deliberate hardening we keep),
     which broke the ``active.gguf``/``active.jinja`` switch convention. Resolving the
     symlink client-side pins the plist to the real target of the moment; switching
-    models = re-point the symlink + reinstall.
+    models = re-point the symlink + ``aisctl reinstall``.
 
-    Tilde paths pass through untouched: they expand against the DAEMON account's home
-    inside the helper — realpath'ing here would wrongly expand against the INVOKER's.
-    A non-existing path also passes through: the helper owns the existence refusal
-    and its message.
+    ``~/…`` paths are expanded against the DAEMON account's home (the account
+    launchd runs the engine as — expanding against the invoker here could pin the
+    wrong home) and then realpath'd like absolute ones; without this, the bundled
+    manifests' tilde paths reached the helper's symlink refusal raw, and the
+    switch convention silently only worked for absolute paths. When the daemon
+    account's home cannot be resolved, or for the ``~otheruser`` form, the raw
+    path passes through — the helper owns that refusal. A non-existing path also
+    passes through: the helper owns the existence refusal and its message.
     """
+    if raw == "~" or raw.startswith("~/"):
+        home = os.path.expanduser(f"~{user}")
+        if home == f"~{user}":
+            return raw
+        return os.path.realpath(home if raw == "~" else f"{home}/{raw[2:]}")
     if raw.startswith("~"):
         return raw
     return os.path.realpath(raw)
@@ -288,12 +323,13 @@ def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> l
     old ``plist.build_plist_dict`` (ollama has ``bind=''`` and sets its port via the
     ``OLLAMA_HOST`` env var; ``ollama serve --port N`` is a fatal unknown-flag).
 
-    Absolute model/template/mmproj paths are realpath'd HERE (audit #1): the helper refuses a
+    Model/template/mmproj paths are realpath'd HERE (audit #1): the helper refuses a
     symlink final component (anti swap-TOCTOU — its target home is user-writable), which broke
     the ``active.gguf`` switch mechanism. Resolving client-side keeps both: the plist is pinned
-    to the real target of the moment (re-switch = re-point the symlink + reinstall) and the
-    helper's hardening stays intact. Tilde paths are still passed raw — the helper expands them
-    against the DAEMON account's home (not ours) and confines them there.
+    to the real target of the moment (re-switch = re-point the symlink + ``aisctl reinstall``)
+    and the helper's hardening stays intact. ``~/…`` paths are expanded against the DAEMON
+    account's home first (see ``_resolve_user_file``); the helper still confines the result
+    to that home.
     ``binary_path`` is the manifest's resolved candidate (the STABLE
     ``/opt/homebrew/bin/<engine>`` symlink for brew engines — survives ``brew upgrade``); the
     helper re-validates it (I5: realpath under an allowlisted prefix; the symlink is accepted).
@@ -317,11 +353,15 @@ def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> l
                 f"--program-arg={_expand_api_key_file(manifest.binary.api_key_file, user=user)}"
             )
         if manifest.binary.model_path:
-            args.append(f"--model-path={_resolve_user_file(manifest.binary.model_path)}")
+            args.append(f"--model-path={_resolve_user_file(manifest.binary.model_path, user=user)}")
         if manifest.binary.template_path:
-            args.append(f"--template-path={_resolve_user_file(manifest.binary.template_path)}")
+            args.append(
+                f"--template-path={_resolve_user_file(manifest.binary.template_path, user=user)}"
+            )
         if manifest.binary.mmproj_path:
-            args.append(f"--mmproj-path={_resolve_user_file(manifest.binary.mmproj_path)}")
+            args.append(
+                f"--mmproj-path={_resolve_user_file(manifest.binary.mmproj_path, user=user)}"
+            )
         if manifest.network.bind:
             # --host/--port only when bound (parity): ollama (bind='') must NOT get --port.
             args.append("--program-arg=--host")

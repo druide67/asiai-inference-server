@@ -9,7 +9,7 @@ aisctl install <engine> --preset <preset-name>
 
 The preset replaces the engine baseline verbatim — there is no field
 merge. If you copy a preset to start from, expect to edit every field
-that matters to your hardware (model path symlink, port if you run
+that matters to your hardware (model path hard link, port if you run
 multiple instances of the same engine, KV cache type, parallel slots,
 context size).
 
@@ -33,7 +33,7 @@ chosen flags exist for that scenario, which is the part worth reusing.
 
 The `llamacpp-aux-N` presets demonstrate the multi-instance pattern:
 five `llama-server` instances running side-by-side on dedicated ports
-8090-8094 with distinct model symlinks. The first four split the
+8090-8094 with distinct model hard links. The first four split the
 general-purpose roles (multi-role, medium, small, vision); `aux-5` is
 the worked example of extending the family — a dedicated long-context
 single-flow slot (256K, compression workloads) added next to the
@@ -92,12 +92,20 @@ refuses anything else. Two practical consequences:
   would not imply "not modifiable by another local user", which reopens
   the very content-swap window the helper closes. Keep weights under
   `~/llms/` (or any home subdirectory) on the internal volume.
-- **Symlinks are resolved at install time, client-side.** The
-  `active.gguf` → real-file switch convention still works: `aisctl
-  install`/`reinstall` resolves the symlink and pins the plist to the
-  real target of the moment (the helper refuses a symlink final
-  component by design — anti swap-TOCTOU). To switch models, re-point
-  the symlink and run `aisctl reinstall <engine>`.
+- **Use a hard link (or a real path), not a symlink.** The helper
+  refuses a symlink final component by design (anti swap-TOCTOU), so
+  `aisctl install`/`reinstall` resolves symlinks client-side — tilde
+  paths included — and pins the plist to the real target of the moment.
+  The install then succeeds, **but** the daemon's command line carries
+  the real path, so a `process_pattern` written against the symlink
+  (`llms/gguf/active.gguf`) no longer matches: state detection and
+  `pkill` go blind (`aisctl install` warns about this). The switchable
+  slot convention that keeps everything coherent is a **hard link** on
+  the same APFS volume: `ln -f ~/llms/gguf/<MyModel>.gguf
+  ~/llms/gguf/active.gguf`, then `aisctl restart <engine>` to switch
+  models — the pinned path never changes and the pattern always
+  matches. (A hard link pins the inode: re-run `ln -f` after replacing
+  the source file, or the link silently keeps serving the old bytes.)
 
 ## Files in this directory
 
@@ -118,7 +126,7 @@ refuses anything else. Two practical consequences:
 | `qwen3.6-27b-mtplx-hermes-agent.toml` | `mtplx` | Example primary-agent tuning, Qwen3.6-27B Optimized-Speed served by MTPLX (native MTP D3), main slot 8080. |
 
 To use one of these, the operator must have the matching GGUF available
-and the conventional `~/llms/gguf/aux<N>/active.gguf` symlink in place
+and the conventional `~/llms/gguf/aux<N>/active.gguf` hard link in place
 (or override `model_path` in their own copy of the preset).
 
 The MTPLX preset has two extra preconditions of its own: the model must

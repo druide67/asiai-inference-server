@@ -31,12 +31,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   on a shared port is no longer declared healthy on the strength of the
   neighbour's 2xx.
 
+- `~/…` model/template/mmproj paths are now expanded against the daemon
+  account's home and symlink-resolved client-side before the privileged
+  helper call, exactly like absolute paths. Previously the tilde form —
+  which every bundled manifest uses — reached the helper raw, where its
+  anti-tamper rule refused the symlink final component with an opaque
+  `refused (failed a helper-side validation)`, so the documented
+  `active.gguf` switch convention only worked for absolute paths.
+- `aisctl install` now warns when the resolved model path no longer
+  contains the manifest's `process_pattern` (a symlinked `model_path`
+  pins the plist to the real file, silently blinding pgrep-based state
+  detection and `pkill`).
+
 ### Added
 
 - Additive `port_held_by` field on `aisctl status --json` rows and
   `/internal/v1/engines-state` entries — present only when the port's
   2xx demonstrably came from a foreign process; names that process's
   (bounded) command line.
+
+### Changed
+
+- The switchable-slot convention is now documented as a **hard link**
+  (`ln -f`), not a symlink: the pinned path never changes across model
+  switches, `process_pattern` keeps matching, and `aisctl restart` is
+  enough to load the new weights. Bundled manifests, presets README and
+  field docs updated accordingly.
+
+## [0.15.0](https://github.com/druide67/asiai-inference-server/compare/v0.14.0...v0.15.0) — 2026-07-16
+
+### Added
+
+- Named `llamacpp-*` instances: the family pattern now accepts any
+  `llamacpp-<name>` manifest (e.g. `llamacpp-embed`, `llamacpp-rerank`),
+  not just the numbered `llamacpp-aux-N` slots; statically-routed engines
+  keep precedence.
+- Bundled manifests `llamacpp-embed` (BGE-M3 embeddings server, `:8095`)
+  and `llamacpp-rerank` (bge-reranker-v2-m3 reranking server, `:8096`) —
+  loopback by default, opt-in API key, named GGUF paths.
+
+## [0.14.0](https://github.com/druide67/asiai-inference-server/compare/v0.13.0...v0.14.0) — 2026-07-16
+
+### Added
+
+- `aisctl bootstrap --logs-only`: recreate the root-owned
+  `/Library/Logs/asiai` directory and pre-touch each installed daemon's
+  `Standard*Path` leaves (chowned to the run-as user) after an OS update
+  prunes them — without a full bootstrap. Exit code 1 when some leaves
+  could not be created.
+- `aisctl bootstrap --verify` now also checks the logging surface
+  (directory, ownership, per-daemon leaves) and tolerates hosts with no
+  daemons installed.
+
 
 ## [0.13.0](https://github.com/druide67/asiai-inference-server/compare/v0.12.0...v0.13.0) — 2026-07-12
 

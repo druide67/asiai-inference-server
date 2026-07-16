@@ -5,7 +5,7 @@
 #
 # Vision slot: this instance is intended for multimodal models. The
 # associated preset must provide ``--mmproj <path>`` in its program_args.
-# The aux4/ symlink convention should include a ``mmproj.gguf`` companion
+# The aux4/ hard-link convention should include a ``mmproj.gguf`` companion
 # next to ``active.gguf``.
 #
 #   aisctl install llamacpp-aux-4 --preset <preset-name>
