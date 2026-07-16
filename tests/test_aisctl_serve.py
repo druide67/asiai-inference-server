@@ -7,6 +7,7 @@ import socket
 import threading
 import urllib.error
 import urllib.request
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -530,12 +531,56 @@ class TestEnginesState:
 
         monkeypatch.setattr(manifest_mod, "list_manifests", lambda: ["good", "broken"])
         monkeypatch.setattr(manifest_mod, "load_manifest", fake_load)
-        monkeypatch.setattr(lifecycle_mod, "probe_state", lambda m, deep=False: ("running", None))
+        monkeypatch.setattr(
+            lifecycle_mod,
+            "probe_state",
+            lambda m, deep=False: lifecycle_mod.ProbeResult(
+                lifecycle_mod.EngineState.RUNNING, None
+            ),
+        )
         monkeypatch.setattr(lifecycle_mod, "installed_model", lambda m: None)
         result = serve_mod._collect_engines_state()
         names = [e["name"] for e in result["engines"]]
         assert names == ["good"]
         assert result["engines"][0]["state"] == "running"
+        # Additive contract: no foreign holder -> no port_held_by key at all.
+        assert "port_held_by" not in result["engines"][0]
+
+    def test_engines_state_carries_port_held_by_when_foreign(self, monkeypatch):
+        """Shared-port slot: the row names the foreign process that answered
+        the 2xx, so dashboards can explain a demoted standby."""
+
+        class FakeManifest:
+            def __init__(self, name, port):
+                self.name = name
+                self.display = name
+                self.network = SimpleNamespace(port=port)
+
+        import ais_core.install_state as install_state_mod
+        import ais_core.lifecycle as lifecycle_mod
+        import ais_core.manifest as manifest_mod
+        from ais_cli import serve as serve_mod
+
+        holder = "42 mtplx.server.openai --port 8080"
+        monkeypatch.setattr(manifest_mod, "list_manifests", lambda: ["standby"])
+        monkeypatch.setattr(
+            install_state_mod,
+            "load_installed_manifest",
+            lambda name: FakeManifest(name, 8080),
+        )
+        monkeypatch.setattr(install_state_mod, "read_install", lambda name: None)
+        monkeypatch.setattr(
+            lifecycle_mod,
+            "probe_state",
+            lambda m, deep=False: lifecycle_mod.ProbeResult(
+                lifecycle_mod.EngineState.DISABLED, None, holder
+            ),
+        )
+        monkeypatch.setattr(lifecycle_mod, "installed_model", lambda m: None)
+        result = serve_mod._collect_engines_state()
+        row = result["engines"][0]
+        assert row["state"] == "disabled"
+        assert row["port_held_by"] == holder
 
 
 class TestPresetsEndpoint:

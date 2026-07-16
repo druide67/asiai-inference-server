@@ -326,19 +326,23 @@ def cmd_status(args: argparse.Namespace) -> int:
         # state to DEGRADED; BUSY/UNSUPPORTED/ERROR are surfaced as-is so the
         # operator sees why certification was inconclusive — they are normal
         # conditions, not alarms.
-        state, verdict = lifecycle.probe_state(m, deep=deep)
+        probe = lifecycle.probe_state(m, deep=deep)
         record = install_state.read_install(name)
         row = {
             "engine": name,
-            "state": state.value,
+            "state": probe.state.value,
             "port": m.network.port,
             "plist": m.plist.name,
             # Recorded at install time — what the service was generated
             # from, not a live introspection of the running process.
             "preset": record.preset if record else None,
         }
+        # Additive diagnostic: only present when the port's 2xx demonstrably
+        # came from a foreign process (shared-port slot pattern).
+        if probe.foreign_port_holder is not None:
+            row["port_held_by"] = probe.foreign_port_holder
         if deep:
-            row["gen"] = verdict.value if verdict is not None else None
+            row["gen"] = probe.gen.value if probe.gen is not None else None
         rows.append(row)
 
     if args.json:
@@ -350,6 +354,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         preset = r["preset"] or "-"
         gen = f" {r['gen'] or '-'}" if deep else ""
         print(f"{r['engine']:<12} {r['state']:<22} {r['port']:<6} {r['plist']} {preset}{gen}")
+    for r in rows:
+        if r.get("port_held_by"):
+            print(f"note: {r['engine']} port {r['port']} is held by: {r['port_held_by']}")
     return 0
 
 

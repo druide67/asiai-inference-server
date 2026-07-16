@@ -674,11 +674,12 @@ class TestDeepState:
         m = _manifest_pointing_to_port(gen_server)
         with patch("ais_core.lifecycle.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
-            state, verdict = lifecycle.probe_state(m, deep=True)
-            assert state is EngineState.DEGRADED
-            assert verdict is lifecycle.GenVerdict.ZOMBIE
+            probe = lifecycle.probe_state(m, deep=True)
+            assert probe.state is EngineState.DEGRADED
+            assert probe.gen is lifecycle.GenVerdict.ZOMBIE
             # shallow: no probe, no verdict
-            assert lifecycle.probe_state(m) == (EngineState.RUNNING, None)
+            shallow = lifecycle.probe_state(m)
+            assert (shallow.state, shallow.gen) == (EngineState.RUNNING, None)
 
 
 class TestDisableEnable:
@@ -761,7 +762,193 @@ class TestIsDisabled:
             patch("ais_core.lifecycle.is_disabled", return_value=True),
         ):
             mock_path.return_value.exists.return_value = True
-            assert lifecycle.probe_state(m) == (EngineState.DISABLED, None)
+            assert lifecycle.probe_state(m) == (EngineState.DISABLED, None, None)
+
+
+class TestSharedPortIdentity:
+    """Shared-port slot pattern: two manifests on one port, one active, one standby.
+
+    A 2xx proves something serves on the port, not that it is THIS manifest's
+    daemon. probe_state must demote the standby to its launchd truth when a
+    foreign process positively holds the port — and must NOT demote anything
+    on a mere pgrep blind spot (hand-launched servers, desktop apps)."""
+
+    def test_standby_demoted_when_foreign_process_holds_port(self) -> None:
+        """The prod bug: mtplx serving :8080 made the disabled llamacpp
+        standby (same port) report RUNNING."""
+        m = load_manifest("ollama")
+        holder = "123 mtplx.server.openai --port 11434"
+        with (
+            patch("ais_core.lifecycle.Path") as mock_path,
+            patch("ais_core.lifecycle.probe_health", return_value=True),
+            patch("ais_core.lifecycle.process_alive", return_value=False),
+            patch("ais_core.lifecycle._port_squatter", return_value=holder),
+            patch("ais_core.lifecycle.is_loaded", return_value=False),
+            patch("ais_core.lifecycle.is_disabled", return_value=True),
+        ):
+            mock_path.return_value.exists.return_value = True
+            probe = lifecycle.probe_state(m)
+        assert probe.state is EngineState.DISABLED
+        assert probe.foreign_port_holder == holder
+
+    def test_no_positive_identification_keeps_running(self) -> None:
+        """US-017 guard: a serving engine whose process pgrep cannot see
+        (LM Studio wrapper, hand-launched server, env-port launcher) stays
+        RUNNING — absence of proof never demotes."""
+        m = load_manifest("ollama")
+        with (
+            patch("ais_core.lifecycle.probe_health", return_value=True),
+            patch("ais_core.lifecycle.process_alive", return_value=False),
+            patch("ais_core.lifecycle._port_squatter", return_value=None),
+        ):
+            probe = lifecycle.probe_state(m)
+        assert probe.state is EngineState.RUNNING
+        assert probe.foreign_port_holder is None
+
+    def test_own_process_alive_skips_squatter_lookup(self) -> None:
+        """Identity confirmed by process_alive: no second pgrep, RUNNING."""
+        m = load_manifest("ollama")
+        with (
+            patch("ais_core.lifecycle.probe_health", return_value=True),
+            patch("ais_core.lifecycle.process_alive", return_value=True),
+            patch("ais_core.lifecycle._port_squatter") as mock_squat,
+        ):
+            probe = lifecycle.probe_state(m)
+        assert probe.state is EngineState.RUNNING
+        mock_squat.assert_not_called()
+
+    def test_foreign_holder_is_not_gen_probed(self) -> None:
+        """Deep mode must not generation-probe (and possibly blame as
+        DEGRADED) the neighbour that answered the 2xx."""
+        m = load_manifest("ollama")
+        with (
+            patch("ais_core.lifecycle.Path") as mock_path,
+            patch("ais_core.lifecycle.probe_health", return_value=True),
+            patch("ais_core.lifecycle.process_alive", return_value=False),
+            patch("ais_core.lifecycle._port_squatter", return_value="99 other --port 11434"),
+            patch("ais_core.lifecycle.gen_probe") as mock_gen,
+            patch("ais_core.lifecycle.is_loaded", return_value=False),
+            patch("ais_core.lifecycle.is_disabled", return_value=False),
+        ):
+            mock_path.return_value.exists.return_value = True
+            probe = lifecycle.probe_state(m, deep=True)
+        assert probe.state is EngineState.STOPPED
+        assert probe.gen is None
+        mock_gen.assert_not_called()
+
+    def test_wait_for_health_not_fooled_by_foreign_2xx(self, healthy_server: int) -> None:
+        """start/restart on a shared port: the neighbour's 2xx must not
+        certify OUR daemon healthy — keep polling until the deadline."""
+        m = _manifest_pointing_to_port(healthy_server)
+        with (
+            patch("ais_core.lifecycle.process_alive", return_value=False),
+            patch(
+                "ais_core.lifecycle._port_squatter",
+                return_value=f"77 other-server --port {m.network.port}",
+            ),
+        ):
+            assert lifecycle.wait_for_health(m, timeout=1) is False
+
+    def test_wait_for_health_still_passes_without_squatter(self, healthy_server: int) -> None:
+        m = _manifest_pointing_to_port(healthy_server)
+        with (
+            patch("ais_core.lifecycle.process_alive", return_value=False),
+            patch("ais_core.lifecycle._port_squatter", return_value=None),
+        ):
+            assert lifecycle.wait_for_health(m, timeout=5) is True
+
+
+class TestPortSquatter:
+    def _manifest(self, pattern: str = "llms/gguf/active.gguf", port: int = 8080):
+        from dataclasses import replace
+
+        m = load_manifest("llamacpp")
+        return replace(
+            m,
+            binary=replace(m.binary, process_pattern=pattern),
+            network=replace(m.network, port=port),
+        )
+
+    def test_identifies_foreign_holder(self) -> None:
+        m = self._manifest()
+        line = "42 mtplx.server.openai --port 8080 --served-model x"
+        with (
+            patch("ais_core.lifecycle._pgrep_matches", return_value=[line]),
+            patch("ais_core.lifecycle._listening_pids", return_value=[42]),
+        ):
+            assert lifecycle._port_squatter(m) == line
+
+    def test_argv_candidate_not_listening_is_ignored(self) -> None:
+        """lsof confirmation: an argv mention that does NOT hold the port
+        (monitor/wrapper talking ABOUT the port) is not a squatter."""
+        m = self._manifest()
+        line = "42 some-monitor --port 8080"
+        with (
+            patch("ais_core.lifecycle._pgrep_matches", return_value=[line]),
+            patch("ais_core.lifecycle._listening_pids", return_value=[999]),
+        ):
+            assert lifecycle._port_squatter(m) is None
+
+    def test_lsof_blind_keeps_argv_evidence(self) -> None:
+        """Engine under another account: lsof sees nothing — the argv
+        candidate stands alone, as before the hardening."""
+        m = self._manifest()
+        line = "42 mtplx.server.openai --port 8080"
+        with (
+            patch("ais_core.lifecycle._pgrep_matches", return_value=[line]),
+            patch("ais_core.lifecycle._listening_pids", return_value=[]),
+        ):
+            assert lifecycle._port_squatter(m) == line
+
+    def test_own_pattern_lines_are_not_squatters(self) -> None:
+        m = self._manifest()
+        line = "42 llama-server --model /Users/x/llms/gguf/active.gguf --port 8080"
+        with patch("ais_core.lifecycle._pgrep_matches", return_value=[line]):
+            assert lifecycle._port_squatter(m) is None
+
+    def test_port_boundary_no_prefix_match(self) -> None:
+        """--port 80801 must not be read as holding port 8080."""
+        m = self._manifest(port=8080)
+        line = "42 other-server --port 80801"
+        with patch("ais_core.lifecycle._pgrep_matches", return_value=[line]):
+            assert lifecycle._port_squatter(m) is None
+
+    def test_equals_spelling_recognized(self) -> None:
+        m = self._manifest(port=8080)
+        line = "42 other-server --port=8080"
+        with (
+            patch("ais_core.lifecycle._pgrep_matches", return_value=[line]),
+            patch("ais_core.lifecycle._listening_pids", return_value=[42]),
+        ):
+            assert lifecycle._port_squatter(m) == line
+
+    def test_no_matches_returns_none(self) -> None:
+        m = self._manifest()
+        with patch("ais_core.lifecycle._pgrep_matches", return_value=[]):
+            assert lifecycle._port_squatter(m) is None
+
+    def test_holder_line_is_bounded(self) -> None:
+        m = self._manifest()
+        line = "42 other-server --port 8080 " + "x" * 500
+        with (
+            patch("ais_core.lifecycle._pgrep_matches", return_value=[line]),
+            patch("ais_core.lifecycle._listening_pids", return_value=[42]),
+        ):
+            out = lifecycle._port_squatter(m)
+        assert out is not None and len(out) <= 200
+
+    def test_process_alive_recognizes_equals_spelling(self) -> None:
+        """m4: --port=N pins a line to its port exactly like --port N."""
+        from dataclasses import replace
+
+        m = load_manifest("llamacpp")
+        m = replace(m, network=replace(m.network, port=8080))
+        own = "10 llama-server -m /x/llms/gguf/active.gguf --port=8080"
+        other = "11 llama-server -m /x/llms/gguf/active.gguf --port=9090"
+        with patch("ais_core.lifecycle._pgrep_matches", return_value=[own]):
+            assert lifecycle.process_alive(m) is True
+        with patch("ais_core.lifecycle._pgrep_matches", return_value=[other]):
+            assert lifecycle.process_alive(m) is False
 
 
 class TestWaitForHealthGenCheck:
