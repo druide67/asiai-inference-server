@@ -35,7 +35,9 @@ candidates = [
     "/usr/local/bin/llama-server",
 ]
 # Named GGUF path (no symlink): discriminates this instance from the main
-# ``llamacpp`` and from every sibling instance in pgrep/pkill matching.
+# ``llamacpp`` and from every sibling instance in pgrep/pkill matching —
+# and the privileged helper refuses symlinked model files anyway (a symlink
+# would be resolved to its real target at install, desyncing this pattern).
 process_pattern = "llms/gguf/bge-m3/bge-m3-FP16.gguf"
 model_path = "~/llms/gguf/bge-m3/bge-m3-FP16.gguf"
 program_args = [

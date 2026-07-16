@@ -1265,12 +1265,116 @@ def test_resolve_user_file_resolves_absolute_symlink(tmp_path) -> None:
     real.write_bytes(b"gguf")
     link = tmp_path / "active.gguf"
     link.symlink_to(real)
-    assert lifecycle._resolve_user_file(str(link)) == str(real.resolve())
+    assert lifecycle._resolve_user_file(str(link), user=getpass.getuser()) == str(real.resolve())
 
 
-def test_resolve_user_file_passes_tilde_through_untouched() -> None:
-    """Tilde paths expand against the DAEMON home inside the helper, never ours."""
-    assert lifecycle._resolve_user_file("~/llms/gguf/active.gguf") == "~/llms/gguf/active.gguf"
+def test_resolve_user_file_expands_and_resolves_tilde_symlink(tmp_path) -> None:
+    """A ``~/…`` symlink (how every bundled manifest ships the active.gguf
+    convention) expands against the DAEMON account's home, then resolves like an
+    absolute path — otherwise the raw tilde reached the helper's symlink refusal."""
+    real = tmp_path / "real-model.gguf"
+    real.write_bytes(b"gguf")
+    link = tmp_path / "active.gguf"
+    link.symlink_to(real)
+    with patch("os.path.expanduser", return_value=str(tmp_path)) as m:
+        out = lifecycle._resolve_user_file("~/active.gguf", user="daemonuser")
+    m.assert_called_once_with("~daemonuser")
+    assert out == str(real.resolve())
+
+
+def test_resolve_user_file_unknown_account_passes_tilde_through() -> None:
+    """When the daemon account's home cannot be resolved (expanduser returns the
+    literal), keep the raw path: the helper owns that refusal and its audit line."""
+    raw = "~/llms/gguf/active.gguf"
+    with patch("os.path.expanduser", side_effect=lambda p: p):
+        assert lifecycle._resolve_user_file(raw, user="ghost") == raw
+
+
+def test_resolve_user_file_bare_tilde_forms(tmp_path) -> None:
+    """``~`` and ``~/`` expand to the daemon home itself (then realpath)."""
+    with patch("os.path.expanduser", return_value=str(tmp_path)):
+        assert lifecycle._resolve_user_file("~", user="d") == str(tmp_path.resolve())
+        assert lifecycle._resolve_user_file("~/", user="d") == str(tmp_path.resolve())
+
+
+def test_resolve_user_file_other_user_tilde_passes_through() -> None:
+    """The ``~otheruser/…`` form stays raw — unsupported by the daemon-home
+    expansion contract, so the helper decides."""
+    raw = "~bob/llms/active.gguf"
+    assert lifecycle._resolve_user_file(raw, user=getpass.getuser()) == raw
+
+
+def test_install_warns_when_symlink_desyncs_process_pattern(tmp_path, caplog) -> None:
+    """A symlinked model_path installs (pinned to the real target) but the
+    daemon's cmdline then carries the real path: when process_pattern matched
+    the declared path but no longer matches the resolved one, pgrep state
+    detection and pkill go blind — install must say so."""
+    import logging as _logging
+
+    model_dir = tmp_path / "llms" / "gguf"
+    model_dir.mkdir(parents=True)
+    real = model_dir / "some-model.gguf"
+    real.write_bytes(b"gguf")
+    link = model_dir / "active.gguf"
+    link.symlink_to(real)
+    m = load_manifest("llamacpp")
+    object.__setattr__(m.binary, "model_path", str(link))
+    assert m.binary.process_pattern in str(link)
+    assert m.binary.process_pattern not in str(real.resolve())
+    with (
+        patch("ais_core.manifest.BinarySpec.resolve", return_value="/opt/homebrew/bin/x"),
+        patch("ais_core.lifecycle.stop_existing"),
+        patch("ais_core.lifecycle.privhelper.run"),
+        patch("ais_core.lifecycle.wait_for_health", return_value=True),
+        caplog.at_level(_logging.WARNING, logger="ais_core.lifecycle"),
+    ):
+        lifecycle.install(m, user=getpass.getuser(), dry_run=False)
+    assert any("process_pattern" in r.message for r in caplog.records)
+
+
+def test_install_no_pattern_warning_when_pattern_never_referenced_path(tmp_path, caplog) -> None:
+    """A pattern that identifies the process by binary/module name (mtplx-style)
+    never referenced the model path: resolving a symlink cannot desync it, so
+    the install stays quiet."""
+    import logging as _logging
+
+    real = tmp_path / "some-model.gguf"
+    real.write_bytes(b"gguf")
+    link = tmp_path / "active.gguf"
+    link.symlink_to(real)
+    m = load_manifest("llamacpp")
+    object.__setattr__(m.binary, "model_path", str(link))
+    object.__setattr__(m.binary, "process_pattern", "llama-server-custom-binary")
+    with (
+        patch("ais_core.manifest.BinarySpec.resolve", return_value="/opt/homebrew/bin/x"),
+        patch("ais_core.lifecycle.stop_existing"),
+        patch("ais_core.lifecycle.privhelper.run"),
+        patch("ais_core.lifecycle.wait_for_health", return_value=True),
+        caplog.at_level(_logging.WARNING, logger="ais_core.lifecycle"),
+    ):
+        lifecycle.install(m, user=getpass.getuser(), dry_run=False)
+    assert not any("process_pattern" in r.message for r in caplog.records)
+
+
+def test_install_no_pattern_warning_for_coherent_real_path(tmp_path, caplog) -> None:
+    """A real (non-symlink) model file whose path contains the pattern stays quiet."""
+    import logging as _logging
+
+    model_dir = tmp_path / "llms" / "gguf"
+    model_dir.mkdir(parents=True)
+    real = model_dir / "active.gguf"
+    real.write_bytes(b"gguf")
+    m = load_manifest("llamacpp")
+    object.__setattr__(m.binary, "model_path", str(real))
+    with (
+        patch("ais_core.manifest.BinarySpec.resolve", return_value="/opt/homebrew/bin/x"),
+        patch("ais_core.lifecycle.stop_existing"),
+        patch("ais_core.lifecycle.privhelper.run"),
+        patch("ais_core.lifecycle.wait_for_health", return_value=True),
+        caplog.at_level(_logging.WARNING, logger="ais_core.lifecycle"),
+    ):
+        lifecycle.install(m, user=getpass.getuser(), dry_run=False)
+    assert not any("process_pattern" in r.message for r in caplog.records)
 
 
 def test_probe_state_running_via_network_even_without_plist(tmp_path) -> None:

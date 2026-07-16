@@ -4,7 +4,7 @@
 # Binary:   llama-server (installed via ``brew install llama.cpp``)
 #
 # This baseline targets a generic out-of-the-box install. The user supplies
-# their own GGUF via the symlink at ``model_path``, and llama-server's
+# their own GGUF via the hard link at ``model_path``, and llama-server's
 # embedded chat template handles prompting.
 #
 # For pre-tuned configurations targeting specific models and use cases
@@ -25,9 +25,15 @@ candidates = [
 # break the substring match in both directions — see
 # test_llamacpp_and_aux_process_patterns_are_disjoint.
 process_pattern = "llms/gguf/active.gguf"
-# User-managed symlink to the active GGUF. Convention:
-#   ln -sf ~/llms/gguf/<MyModel>.gguf ~/llms/gguf/active.gguf
-# Re-link + ``aisctl restart llamacpp`` to switch models.
+# User-managed HARD link to the active GGUF (same APFS volume). Convention:
+#   ln -f ~/llms/gguf/<MyModel>.gguf ~/llms/gguf/active.gguf
+# Re-link + ``aisctl restart llamacpp`` to switch models. A hard link pins
+# the INODE: re-run ``ln -f`` after replacing the source file (re-download,
+# rename-in-place), or active.gguf silently keeps serving the old bytes.
+# A SYMLINK here still installs (it is resolved to its real target before the
+# privileged helper, which refuses symlinked model files by design), but the
+# daemon's command line then carries the real path — process_pattern above
+# stops matching and state detection goes blind. Hard link or real path only.
 model_path = "~/llms/gguf/active.gguf"
 # Generic baseline flags. Use a preset for tuned configurations.
 # --host/--port are emitted automatically from [network] (do not duplicate).

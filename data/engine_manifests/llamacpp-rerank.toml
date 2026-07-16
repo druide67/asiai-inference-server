@@ -35,6 +35,8 @@ candidates = [
     "/opt/homebrew/bin/llama-server",
     "/usr/local/bin/llama-server",
 ]
+# Named GGUF path (no symlink) — same rationale as llamacpp-embed: disjoint
+# pgrep/pkill matching, and the privileged helper refuses symlinked model files.
 process_pattern = "llms/gguf/bge-reranker-v2-m3/bge-reranker-v2-m3-FP16.gguf"
 model_path = "~/llms/gguf/bge-reranker-v2-m3/bge-reranker-v2-m3-FP16.gguf"
 program_args = [

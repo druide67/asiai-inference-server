@@ -83,9 +83,11 @@ class BinarySpec:
     builds_from_source: bool = False
     # Optional model file path injected as ``--model <path>`` in ProgramArguments.
     # Currently used by engines that bind to a single model at launch time
-    # (e.g. llama-server: one instance = one GGUF). Tilde-expanded at plist
-    # generation time. Convention: user-managed symlink at the target so
-    # the manifest stays Mac-portable (e.g. ``~/llms/gguf/active.gguf``).
+    # (e.g. llama-server: one instance = one GGUF). Tilde-expanded against the
+    # daemon account's home, then symlink-RESOLVED, at install time (the
+    # privileged helper refuses symlinked model files). Convention: user-managed
+    # HARD link at the target so the manifest stays Mac-portable and
+    # ``process_pattern`` keeps matching (e.g. ``~/llms/gguf/active.gguf``).
     model_path: str | None = None
     # Optional chat template file path injected as ``--chat-template-file <path>``.
     # Used to override a model's embedded Jinja template (e.g. froggeric fixed

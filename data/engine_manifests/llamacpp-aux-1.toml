@@ -2,7 +2,7 @@
 #
 # Member of the llamacpp-aux-1/2/3/4 family. Same binary as the main
 # ``llamacpp`` (8080), different model bound at launch via a separate
-# symlink path (``llms/gguf/aux1/active.gguf``) so the four instances
+# hard-link path (``llms/gguf/aux1/active.gguf``) so the four instances
 # coexist on the host without process-pattern cross-match.
 #
 # Port assignment convention (Hermes Agent multi-role aux stack):
@@ -30,8 +30,8 @@ candidates = [
 # trailing digit in the ``auxN/`` segment, and disjoint from the main
 # manifest's ``llms/gguf/active.gguf``.
 process_pattern = "llms/gguf/aux1/active.gguf"
-# User-managed symlink. Convention:
-#   ln -sf ~/llms/gguf/aux1/<your-model>.gguf ~/llms/gguf/aux1/active.gguf
+# User-managed HARD link (not a symlink — see llamacpp.toml). Convention:
+#   ln -f ~/llms/gguf/aux1/<your-model>.gguf ~/llms/gguf/aux1/active.gguf
 model_path = "~/llms/gguf/aux1/active.gguf"
 # Generic baseline flags. Use a preset for tuned configurations.
 program_args = [

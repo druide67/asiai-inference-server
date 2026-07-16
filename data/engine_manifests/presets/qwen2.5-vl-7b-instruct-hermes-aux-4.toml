@@ -53,7 +53,7 @@ mmproj_path = "~/llms/gguf/aux4/mmproj.gguf"
 #   context (1-4 high-res images encoded ~4-16K vision tokens each).
 # - mmproj_path (manifest field, not program_args): required for the
 #   vision path. Tilde-expanded at plist-generation time. Resolved via
-#   the aux4/mmproj symlink set by the operator before ``aisctl install``.
+#   the aux4/mmproj hard link set by the operator before ``aisctl install``.
 # - KV q8_0 + --flash-attn on: same conservative trade-off as siblings.
 #   Vision OCR on dense pages may show quality drop with q8_0 vs f16;
 #   bench during sprint 2 validates this empirically before promoting
