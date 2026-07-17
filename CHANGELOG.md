@@ -6,6 +6,17 @@ All notable changes to asiai-inference-server (the `aisctl` CLI and the
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Hardened release gates**: the release workflow now fails closed —
+  before anything is built or published — when the tag, `pyproject.toml`
+  and `__init__.py` versions disagree, when `CHANGELOG.md` has no entry
+  for the version being tagged, or when `[Unreleased]` still carries
+  content at tag time (0.14.0 and 0.15.0 had shipped with the changelog
+  silently forgotten). The GitHub Release step is now idempotent.
+
 ## [0.16.0](https://github.com/druide67/asiai-inference-server/compare/v0.15.0...v0.16.0) — 2026-07-16
 
 ### Fixed
