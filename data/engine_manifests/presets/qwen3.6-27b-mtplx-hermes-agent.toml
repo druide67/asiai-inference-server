@@ -119,7 +119,33 @@ stderr = "mtplx-stderr.log"
 needed = false
 
 [environment]
-vars = []
+# MTPLX auto-sizes its in-RAM session bank to roughly
+# ``(min(total_ram, MTPLX_MEMORY_BUDGET) - model_weights) x 0.5``, which makes
+# this variable the ONLY effective lever on cache footprint: the
+# ``ram_session_cache_*`` keys of ``~/.mtplx/config.toml`` exist in the server's
+# schema but are never forwarded by ``quickstart`` (verified 2026-07-28 on 2.3.0
+# — keys set, resolved ceiling unchanged).
+#
+# Both extremes hurt, and both are silent:
+# - unset: the bank is sized off how much RAM happens to be FREE rather than off
+#   demand, holding several GB more than the cache benefits from;
+# - too low: the bank falls under the session working set and every turn
+#   re-prefills from cold, permanently, past a context threshold — nine
+#   consecutive turns at 0% cache and 222 -> 387 s per turn in upstream
+#   youssofal/MTPLX#230, with nothing printed to say why.
+#
+# 60GB on a 128 GB host carrying ~16 GB of weights resolves to a ~22 GB bank:
+# room for long agent sessions while leaving the rest of unified memory to other
+# workloads. Scale it to the host — the useful floor is the weights plus the
+# largest session working set you expect to serve, not a round number.
+#
+# Two traps. (1) The resolved size is NOT printed at startup: read it from
+# ``/health`` -> ``session_bank.max_bytes``. (2) Two byte parsers coexist and
+# disagree — the server's accepts ``60GB`` and crashes on ``60G``, while the
+# session-bank parser accepts ``60G`` and ignores ``60GB``. ``60GB`` is the
+# correct form: the server rewrites the value to raw bytes, which the second
+# parser reads.
+vars = ["MTPLX_MEMORY_BUDGET=60GB"]
 
 # Memory figures for the plan estimator (advisory, ±20% declared band;
 # the first healthy start records a calibration sample that beats these):

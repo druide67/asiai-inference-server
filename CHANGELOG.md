@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **MTPLX preset now declares `MTPLX_MEMORY_BUDGET`** — the bundled
+  `qwen3.6-27b-mtplx-hermes-agent` preset shipped with an empty
+  `[environment] vars`, so a daemon installed from it inherited MTPLX's
+  demand-blind default session-bank sizing. Operators who set the budget by
+  hand on the generated plist lost it at the next `aisctl reinstall`, with no
+  warning and no symptom until a long session started re-prefilling from cold.
+  The value now lives in the preset, where it is reproducible, alongside the
+  sizing formula, the two incompatible byte-format parsers, and how to read the
+  resolved bank back from `/health` (it is not printed at startup). See
+  upstream `youssofal/MTPLX#230`.
+
 ### Changed
 
 - **Hardened release gates**: the release workflow now fails closed —
