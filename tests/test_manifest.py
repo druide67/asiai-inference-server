@@ -234,6 +234,21 @@ def test_mtplx_hermes_preset() -> None:
     assert m.memory.weights_mb == 16400.0
     assert m.memory.kv_bytes_per_token == 65536.0
     assert m.memory.ctx_tokens == 262144.0
+    # Resident-footprint bound pinned, and pinned in the FORM the server accepts.
+    # MTPLX_MEMORY_BUDGET drives both the session bank and the MLX allocator
+    # cache; left unset, both are sized off free RAM rather than demand. The
+    # suffix matters as much as the number: the server's parser takes "40GB" and
+    # raises on "40G", and with KeepAlive.Crashed a raise at startup is a crash
+    # loop, so a one-character slip is an outage rather than a misconfiguration.
+    budget = [v for v in m.env_vars if v.startswith("MTPLX_MEMORY_BUDGET=")]
+    assert budget == ["MTPLX_MEMORY_BUDGET=40GB"], (
+        "the preset must declare the budget itself — setting it by hand on the "
+        "generated plist is lost at the next reinstall, silently"
+    )
+    # The value must stay sized for this preset's DECLARED hardware (64+ GB).
+    # On a 64 GB host a larger budget is counter-productive: the bank shrinks
+    # while the allocator cache (budget/8, capped at 8 GiB) grows faster.
+    assert int(budget[0].split("=")[1].removesuffix("GB")) <= 40
 
 
 def test_api_key_file_must_be_nonempty_string() -> None:

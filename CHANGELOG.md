@@ -10,16 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **MTPLX preset now declares `MTPLX_MEMORY_BUDGET`** — the bundled
+- **MTPLX preset now declares `MTPLX_MEMORY_BUDGET=40GB`** — the bundled
   `qwen3.6-27b-mtplx-hermes-agent` preset shipped with an empty
   `[environment] vars`, so a daemon installed from it inherited MTPLX's
-  demand-blind default session-bank sizing. Operators who set the budget by
-  hand on the generated plist lost it at the next `aisctl reinstall`, with no
-  warning and no symptom until a long session started re-prefilling from cold.
-  The value now lives in the preset, where it is reproducible, alongside the
-  sizing formula, the two incompatible byte-format parsers, and how to read the
-  resolved bank back from `/health` (it is not printed at startup). See
-  upstream `youssofal/MTPLX#230`.
+  demand-blind default sizing. Operators who set the budget by hand on the
+  generated plist lost it at the next `aisctl reinstall`, with no warning and no
+  symptom until a long session started re-prefilling from cold.
+
+  The value is sized for this preset's **declared** hardware (64+ GB), not for a
+  larger box, because the variable drives **two** allocations and the second one
+  inverts the intuition: the session bank is
+  `clamp((min(total_ram, budget) - weights) x 0.5, 1 GiB, 48 GiB)`, but the MLX
+  allocator cache is `clamp(budget / 8, 1 GiB, 8 GiB)` — the very cache upstream
+  attributes the 80.9 GB footprint of issue #150 to. On a 64 GB host, raising
+  the budget to 60GB shrinks the bank by ~2 GiB while growing the allocator
+  cache by ~3.5 GiB: a net *increase* of the ceiling this variable exists to
+  bound. Hosts with more memory should override per machine via
+  `$XDG_CONFIG_HOME` rather than edit the shipped file.
+
+  The preset now also documents what an operator needs to scale it safely: both
+  formulas, the GiB-versus-decimal gap between the comment and what `/health`
+  reports, the fact that the resolved size is never printed at startup, and the
+  two incompatible byte parsers — the server takes `40GB` and raises on `40G`,
+  which under `KeepAlive.Crashed` turns a one-character slip into a crash loop.
+  A test pins both the value and its suffix. See upstream
+  `youssofal/MTPLX#230`.
 
 ### Changed
 
