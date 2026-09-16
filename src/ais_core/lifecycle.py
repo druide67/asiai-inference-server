@@ -315,7 +315,7 @@ def _install_args(manifest: EngineManifest, *, user: str, binary_path: str) -> l
     **Every value is joined to its flag as ``--flag=value`` (not ``--flag value``).** This is
     load-bearing: the helper's argparse uses ``action="append"`` for ``--program-arg``/``--env``,
     which reads a *separate* token beginning with ``-`` as a new option and errors out — and
-    every llama-server program-arg is dash-prefixed (``--flash-attn``, ``--mlock``,
+    every llama-server program-arg is dash-prefixed (``--flash-attn``, ``--load-mode``,
     ``--n-gpu-layers``, ``--jinja``), as is the ``--host`` we inject. ``--flag=value`` parses the
     value verbatim regardless of a leading dash.
 

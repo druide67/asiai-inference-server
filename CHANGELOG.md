@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Bundled llama.cpp manifests and presets use `--load-mode mmap+mlock`** instead of `--mlock`, which llama.cpp 0.4.1 removed from its arg parser. Same behaviour on 0.3.0 and 0.4.0. A test refuses any bundled manifest carrying a removed flag.
+
 ### Fixed
 
 - **MTPLX preset now declares `MTPLX_MEMORY_BUDGET=40GB`** — the bundled
