@@ -118,7 +118,7 @@ def test_llamacpp_baseline_specifics() -> None:
     assert not m.binary.builds_from_source
     # Generic baseline keeps only widely-applicable flags
     pa = list(m.binary.program_args)
-    assert "--mlock" in pa
+    assert "--load-mode" in pa and "mmap+mlock" in pa
     assert "--cont-batching" in pa
     assert "--n-gpu-layers" in pa
     # Baseline uses the embedded template — no template_path override
@@ -338,7 +338,7 @@ def test_llamacpp_aux_baseline_specifics(name: str, port: int) -> None:
     assert m.binary.process_pattern == f"llms/gguf/aux{instance_suffix}/active.gguf"
     assert m.binary.model_path == f"~/llms/gguf/aux{instance_suffix}/active.gguf"
     pa = list(m.binary.program_args)
-    assert "--mlock" in pa
+    assert "--load-mode" in pa and "mmap+mlock" in pa
     assert "--cont-batching" in pa
     # No workload-specific tuning in the baseline
     assert "--cache-reuse" not in pa
@@ -594,3 +594,29 @@ def _read_minimal_dict() -> dict:
     here = Path(__file__).resolve().parent.parent
     with (here / "data" / "engine_manifests" / "ollama.toml").open("rb") as f:
         return tomllib.load(f)
+
+
+# llama.cpp 0.4.1 removed these from its arg parser (ggml-org/llama.cpp#28334);
+# a bundled manifest carrying one makes every daemon built from it fail to start.
+_REMOVED_LLAMACPP_FLAGS = (
+    "--mlock",
+    "--mmap",
+    "--no-mmap",
+    "--direct-io",
+    "--no-direct-io",
+    "-dio",
+    "-ndio",
+)
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted((Path(__file__).parents[1] / "data" / "engine_manifests").rglob("*.toml")),
+    ids=lambda p: p.name,
+)
+def test_no_bundled_manifest_uses_a_removed_llamacpp_flag(path: Path):
+    with path.open("rb") as fh:
+        doc = tomllib.load(fh)
+    args = [str(a) for a in (doc.get("binary") or {}).get("program_args") or []]
+    offending = [a for a in args if a in _REMOVED_LLAMACPP_FLAGS]
+    assert not offending, f"{path.name} carries removed llama.cpp flag(s): {offending}"

@@ -41,7 +41,7 @@ model_path = "~/llms/gguf/active.gguf"
 program_args = [
     "--cont-batching",
     "--flash-attn", "on",
-    "--mlock",
+    "--load-mode", "mmap+mlock",
     "--n-gpu-layers", "999",
     "--jinja",
 ]

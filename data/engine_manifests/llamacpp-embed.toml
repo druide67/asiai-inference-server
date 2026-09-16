@@ -48,7 +48,7 @@ program_args = [
     "--batch-size", "8192",
     "--ubatch-size", "8192",
     "--n-gpu-layers", "999",
-    "--mlock",
+    "--load-mode", "mmap+mlock",
     "--metrics",
 ]
 builds_from_source = false
