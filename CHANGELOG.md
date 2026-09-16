@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.0](https://github.com/druide67/asiai-inference-server/compare/v0.16.0...v0.17.0) — 2026-09-16
+
 ### Changed
 
 - **Bundled llama.cpp manifests and presets use `--load-mode mmap+mlock`** instead of `--mlock`, which llama.cpp 0.4.1 removed from its arg parser. Same behaviour on 0.3.0 and 0.4.0. A test refuses any bundled manifest carrying a removed flag.
