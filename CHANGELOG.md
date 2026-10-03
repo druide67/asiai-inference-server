@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Daemon logs and the helper audit log move to `/usr/local/var/log/asiai`.** macOS updates prune `/Library/Logs`, which left every installed daemon unable to respawn (`EX_CONFIG`) until a manual repair. Daemons installed earlier keep their old path until reinstalled; `bootstrap --logs-only` repairs both.
+
+### Fixed
+
+- **aux-1 and aux-5 presets pass `--mlock` again**: they prefer the TurboQuant fork, which predates `--load-mode` and refuses it.
+
 ## [0.17.0](https://github.com/druide67/asiai-inference-server/compare/v0.16.0...v0.17.0) — 2026-09-16
 
 ### Changed

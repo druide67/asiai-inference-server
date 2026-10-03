@@ -25,7 +25,10 @@ from ais_core import plist, sudoers
 from ais_core.io import secure_staging_dir
 
 # The helper's audit log + Standard*Path live here; no other ais_core module owns this path.
-LOG_DIR = "/Library/Logs/asiai"
+LOG_DIR = "/usr/local/var/log/asiai"
+# Where daemons installed before 0.18 still log until reinstalled (macOS updates prune
+# /Library/Logs); --logs-only still repairs it.
+LEGACY_LOG_DIRS: tuple[str, ...] = ("/Library/Logs/asiai",)
 
 # The helper's audit log (mirrors AUDIT_LOG in data/helpers/asiai_priv.py). Pre-created by the
 # bootstrap 0640 root:admin so an operator can READ refusals without sudo (write stays
@@ -41,7 +44,7 @@ AUDIT_LOG_PATH = f"{LOG_DIR}/asiai-priv-audit.log"
 LOCKED_CHAIN: tuple[str, ...] = (
     str(Path(sudoers.PRIVILEGED_HELPER_PATH).parent),  # /Library/PrivilegedHelperTools
     plist.LAUNCH_DAEMONS_DIR,  # /Library/LaunchDaemons
-    LOG_DIR,  # /Library/Logs/asiai
+    LOG_DIR,  # /usr/local/var/log/asiai
     sudoers.SUDOERS_DIR,  # /etc/sudoers.d (root-equivalent: the sudoers fragment IS root)
 )
 
@@ -317,8 +320,8 @@ def remove_helper(*, dry_run: bool = False) -> list[str]:
     return targets
 
 
-def ensure_log_dir(*, dry_run: bool = False) -> str:
-    """Ensure ``/Library/Logs/asiai`` exists root:wheel 0755 (audit finding #3b).
+def ensure_log_dir(*, dry_run: bool = False, path: str = LOG_DIR) -> str:
+    """Ensure ``/usr/local/var/log/asiai`` exists root:wheel 0755 (audit finding #3b).
 
     The helper deliberately does not create its own log dir (a root process
     mkdir'ing on demand would blur the bootstrap/runtime split); a host where it
@@ -326,23 +329,23 @@ def ensure_log_dir(*, dry_run: bool = False) -> str:
     I0-check the chain, ``mkdir -p`` (idempotent), pin root:wheel 0755, re-assert.
     """
     if dry_run:
-        print(f"[dry-run] ensure log dir {LOG_DIR} (root:wheel 0755)")
-        return LOG_DIR
+        print(f"[dry-run] ensure log dir {path} (root:wheel 0755)")
+        return path
     if not sys.stdin.isatty():
         raise BootstrapError(
             "aisctl bootstrap --install requires an interactive terminal (sudo password)."
         )
-    assert_chain_locked(LOG_DIR)
+    assert_chain_locked(path)
     try:
-        subprocess.run(["sudo", "/bin/mkdir", "-p", LOG_DIR], check=True)
-        subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", LOG_DIR], check=True)
-        subprocess.run(["sudo", "/bin/chmod", "0755", LOG_DIR], check=True)
+        subprocess.run(["sudo", "/bin/mkdir", "-p", path], check=True)
+        subprocess.run(["sudo", "/usr/sbin/chown", "root:wheel", path], check=True)
+        subprocess.run(["sudo", "/bin/chmod", "0755", path], check=True)
     except subprocess.CalledProcessError as e:
-        raise BootstrapError(f"Failed to create log dir {LOG_DIR}: {e}") from e
+        raise BootstrapError(f"Failed to create log dir {path}: {e}") from e
     # Re-assert AFTER the mkdir: the pre-check returns early at a missing dir, so a
     # freshly created one was never inspected (same pattern as install_helper).
-    assert_chain_locked(LOG_DIR)
-    return LOG_DIR
+    assert_chain_locked(path)
+    return path
 
 
 def installed_daemon_log_specs() -> list[tuple[Path, str]]:
@@ -354,6 +357,7 @@ def installed_daemon_log_specs() -> list[tuple[Path, str]]:
     plist pointing anywhere else is deliberately left alone.
     """
     specs: list[tuple[Path, str]] = []
+    log_dirs = {Path(LOG_DIR), *(Path(d) for d in LEGACY_LOG_DIRS)}
     daemons_dir = Path(plist.LAUNCH_DAEMONS_DIR)
     if not daemons_dir.is_dir():
         return specs
@@ -368,7 +372,7 @@ def installed_daemon_log_specs() -> list[tuple[Path, str]]:
             continue
         for key in ("StandardOutPath", "StandardErrorPath"):
             raw = data.get(key)
-            if isinstance(raw, str) and Path(raw).parent == Path(LOG_DIR):
+            if isinstance(raw, str) and Path(raw).parent in log_dirs:
                 specs.append((Path(raw), user))
     return specs
 

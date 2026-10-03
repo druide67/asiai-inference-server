@@ -45,7 +45,7 @@ import time
 # Audit log: root-owned, OUTSIDE any home directory (I6). Hardcoded on purpose: the
 # tests monkeypatch this module attribute, but production runs under ``-I`` so no
 # external override (env, sys.path) is possible — the hardcoded value is the prod value.
-AUDIT_LOG = "/Library/Logs/asiai/asiai-priv-audit.log"
+AUDIT_LOG = "/usr/local/var/log/asiai/asiai-priv-audit.log"
 
 # Stable exit-code contract.
 EXIT_OK = 0
@@ -115,7 +115,7 @@ _PLIST_KEYS: tuple[str, ...] = (
 
 # I8 / logs: root-owned, outside any home. Leaves are pre-created root then chowned to the
 # daemon account (launchd opens Standard*Path AFTER dropping to UserName — VERIF-4).
-_LOG_DIR = "/Library/Logs/asiai"
+_LOG_DIR = "/usr/local/var/log/asiai"
 
 # KeepAlive: a bool, or a dict whose subkeys are confined to this closed set (I1) — keeps
 # the only caller-supplied sub-tree bounded (no PathState/OtherJobEnabled activation tricks).
@@ -671,7 +671,7 @@ def _build_plist_dict(
     Only ``_PLIST_KEYS`` are emitted; the dangerous keys (``RootDirectory``,
     ``GroupName``, ``Sockets``, ``MachServices``, ``LaunchEvents``) are absent by
     construction. ``UserName`` is forced to the validated non-root account and root is
-    refused; ``Standard*Path`` are forced under ``/Library/Logs/asiai``; ``HOME``/``PATH``
+    refused; ``Standard*Path`` are forced under ``/usr/local/var/log/asiai``; ``HOME``/``PATH``
     are forced and ``DYLD_*``/``LD_*`` excluded even if the caller supplied them.
     """
     _validate_label(label)  # the label composes the log path — re-check, anti-poisoning

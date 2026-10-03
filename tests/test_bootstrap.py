@@ -162,7 +162,7 @@ def test_assert_chain_locked_allows_missing_leaf(monkeypatch):
     """A not-yet-existing leaf is fine — the bootstrap creates it root-owned."""
 
     def fake(p):
-        if str(p) == "/Library/Logs/asiai":
+        if str(p) == "/usr/local/var/log/asiai":
             raise FileNotFoundError(p)
         return _st(0, 0o755)
 
@@ -188,7 +188,7 @@ def test_locked_chain_covers_all_root_write_targets():
     assert set(LOCKED_CHAIN) == {
         "/Library/PrivilegedHelperTools",
         "/Library/LaunchDaemons",
-        "/Library/Logs/asiai",
+        "/usr/local/var/log/asiai",
         "/etc/sudoers.d",
     }
 
@@ -806,6 +806,33 @@ def test_log_specs_discovers_both_std_paths(log_surface):
         (f"{logs}/com.asiai.demo.out", "alice"),
         (f"{logs}/com.asiai.demo.err", "alice"),
     ]
+
+
+def test_log_specs_still_finds_daemons_logging_to_a_legacy_dir(log_surface, tmp_path, monkeypatch):
+    # Daemons installed before the move keep logging to the old dir until reinstalled;
+    # --logs-only must still repair them after a macOS update prunes it.
+    daemons, _logs = log_surface
+    legacy = tmp_path / "legacy" / "asiai"
+    legacy.mkdir(parents=True)
+    monkeypatch.setattr(bootstrap_mod, "LEGACY_LOG_DIRS", (str(legacy),))
+    _write_plist(daemons, "com.asiai.old", out=f"{legacy}/com.asiai.old.out")
+    specs = bootstrap_mod.installed_daemon_log_specs()
+    assert [(str(p), u) for p, u in specs] == [(f"{legacy}/com.asiai.old.out", "alice")]
+
+
+def test_log_dir_is_outside_library_logs():
+    # /Library/Logs is pruned by macOS updates; the helper and the bootstrap must
+    # agree on a dir that survives them.
+    import importlib.util
+
+    assert not bootstrap_mod.LOG_DIR.startswith("/Library/Logs")
+    spec = importlib.util.spec_from_file_location(
+        "asiai_priv", Path(__file__).parents[1] / "data" / "helpers" / "asiai_priv.py"
+    )
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    assert helper._LOG_DIR == bootstrap_mod.LOG_DIR
+    assert helper.AUDIT_LOG == bootstrap_mod.AUDIT_LOG_PATH
 
 
 def test_log_specs_ignores_paths_outside_log_dir(log_surface, tmp_path):

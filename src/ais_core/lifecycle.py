@@ -99,7 +99,7 @@ def install(
       1. Resolve the binary if not supplied (manifest's first existing candidate).
       2. Boot out + unlink any pre-existing daemon/process (``stop_existing``, idempotent).
       3. ``asiai-priv install-daemon``: the helper generates the plist, writes it root:wheel,
-         pre-creates the root-owned ``/Library/Logs/asiai`` leaves, and bootstraps it
+         pre-creates the root-owned ``/usr/local/var/log/asiai`` leaves, and bootstraps it
          (RunAtLoad starts it) — so there is no separate plist write, log mkdir, or start here.
       4. Optionally write the pf anchor and reload pf (firewall, password-gated).
       5. Wait for the health endpoint.
@@ -186,9 +186,10 @@ def install(
 
     # The privileged helper GENERATES the plist (generate-don't-validate), writes it
     # root:wheel into /Library/LaunchDaemons, pre-creates the root-owned log leaves under
-    # /Library/Logs/asiai, and bootstraps (RunAtLoad starts it). We therefore no longer
+    # /usr/local/var/log/asiai, and bootstraps (RunAtLoad starts it). We therefore no longer
     # write the plist or mkdir a user log dir here, and no longer call start() afterwards
-    # (bootstrap already started it). Standard*Path live at /Library/Logs/asiai/<label>.{out,err}.
+    # (bootstrap already started it). Standard*Path live at
+    # /usr/local/var/log/asiai/<label>.{out,err}.
     privhelper.run(
         "install-daemon",
         *_install_args(manifest, user=user, binary_path=binary_path),
@@ -387,7 +388,7 @@ def uninstall(
     password-gated sudo, and failing it mid-sequence leaves the engine half-removed
     (daemon gone, anchor behind — 2026-07-01 retex on a helper-only host without a TTY).
 
-    Log files under /Library/Logs/asiai are left untouched. If a future user needs log
+    Log files under /usr/local/var/log/asiai are left untouched. If a future user needs log
     purging on uninstall, surface it as a separate command rather than a flag on
     ``uninstall`` (irreversible side effects don't belong on a removal verb the operator
     may run by reflex).

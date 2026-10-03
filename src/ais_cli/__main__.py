@@ -331,7 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_boot_verb.add_argument(
         "--logs-only",
         action="store_true",
-        help="Repair the daemon logging surface only: recreate /Library/Logs/asiai "
+        help="Repair the daemon logging surface only: recreate /usr/local/var/log/asiai "
         "(root:wheel 0755) if missing and pre-create the Standard*Path files of installed "
         "daemons. Run this after every macOS system update — the post-update migration can "
         "prune the log dir, and daemons then fail respawn with EX_CONFIG. Never touches the "
