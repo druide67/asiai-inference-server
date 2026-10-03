@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/druide67/asiai-inference-server/compare/v0.17.0...v0.18.0) — 2026-10-03
+
 ### Changed
 
 - **Daemon logs and the helper audit log move to `/usr/local/var/log/asiai`.** macOS updates prune `/Library/Logs`, which left every installed daemon unable to respawn (`EX_CONFIG`) until a manual repair. Daemons installed earlier keep their old path until reinstalled; `bootstrap --logs-only` repairs both.
