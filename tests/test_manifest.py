@@ -617,6 +617,12 @@ _REMOVED_LLAMACPP_FLAGS = (
 def test_no_bundled_manifest_uses_a_removed_llamacpp_flag(path: Path):
     with path.open("rb") as fh:
         doc = tomllib.load(fh)
-    args = [str(a) for a in (doc.get("binary") or {}).get("program_args") or []]
+    binary = doc.get("binary") or {}
+    args = [str(a) for a in binary.get("program_args") or []]
+    first = (binary.get("candidates") or [""])[0]
+    if first.endswith("llama-server-turboquant"):
+        # The TurboQuant fork predates --load-mode and still takes --mlock (aux-1, aux-5).
+        assert "--load-mode" not in args, f"{path.name}: the TurboQuant fork rejects --load-mode"
+        return
     offending = [a for a in args if a in _REMOVED_LLAMACPP_FLAGS]
     assert not offending, f"{path.name} carries removed llama.cpp flag(s): {offending}"

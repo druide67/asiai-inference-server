@@ -706,11 +706,11 @@ def test_bootstrap_full_install_runs_in_strict_order(capsys: pytest.CaptureFixtu
 
     def _logdir() -> str:
         order.append("logdir")
-        return "/Library/Logs/asiai"
+        return "/usr/local/var/log/asiai"
 
     def _auditlog() -> str:
         order.append("auditlog")
-        return "/Library/Logs/asiai/asiai-priv-audit.log"
+        return "/usr/local/var/log/asiai/asiai-priv-audit.log"
 
     def _backup() -> str:
         order.append("backup")
@@ -779,11 +779,11 @@ def test_bootstrap_full_install_dedicated_user_runs_create_before_sudoers(
         ),
         patch(
             "ais_cli.commands.bootstrap.ensure_log_dir",
-            side_effect=_step("logdir", "/Library/Logs/asiai"),
+            side_effect=_step("logdir", "/usr/local/var/log/asiai"),
         ),
         patch(
             "ais_cli.commands.bootstrap.ensure_audit_log",
-            side_effect=_step("auditlog", "/Library/Logs/asiai/asiai-priv-audit.log"),
+            side_effect=_step("auditlog", "/usr/local/var/log/asiai/asiai-priv-audit.log"),
         ),
         patch(
             "ais_cli.commands.bootstrap.create_dedicated_user",
@@ -806,10 +806,10 @@ def test_bootstrap_full_install_without_dedicated_user_skips_create() -> None:
         patch("ais_cli.commands.bootstrap.assert_fleet_chain_locked"),
         patch("ais_cli.commands.bootstrap.install_helper", return_value="/h"),
         patch("ais_cli.commands.bootstrap.write_helper_signature", return_value="/h.sha256"),
-        patch("ais_cli.commands.bootstrap.ensure_log_dir", return_value="/Library/Logs/asiai"),
+        patch("ais_cli.commands.bootstrap.ensure_log_dir", return_value="/usr/local/var/log/asiai"),
         patch(
             "ais_cli.commands.bootstrap.ensure_audit_log",
-            return_value="/Library/Logs/asiai/asiai-priv-audit.log",
+            return_value="/usr/local/var/log/asiai/asiai-priv-audit.log",
         ),
         patch("ais_cli.commands.bootstrap.create_dedicated_user") as m_user,
         patch("ais_cli.commands.sudoers.backup_existing_sudoers", return_value=None),

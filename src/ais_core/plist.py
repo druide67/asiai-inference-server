@@ -8,7 +8,7 @@ helper** (``asiai-priv install-daemon``, generate-don't-validate) — there is n
 raw-``sudo`` write path in this module. ``build_plist_dict`` / ``render_plist_xml`` are kept
 as the pure, tested **reference shape** (dry-run preview) — close to, but NOT byte-for-byte,
 the helper's output: the helper omits the cosmetic ``Comment`` key and an explicit ``Nice``
-(0 is launchd's default) and puts Standard*Path under ``/Library/Logs/asiai/<label>.{out,err}``
+(0 is launchd's default) and puts Standard*Path under ``/usr/local/var/log/asiai/<label>.{out,err}``
 rather than the user home. ``plist_path`` is the canonical ``/Library/LaunchDaemons/<label>.plist``
 locator used across the package. The helper, not this module, owns ``ProgramArguments[0]``
 resolution and the live plist.

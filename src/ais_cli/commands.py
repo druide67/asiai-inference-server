@@ -851,7 +851,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 def _bootstrap_logs_only(*, dry_run: bool) -> int:
     """``aisctl bootstrap --logs-only`` — repair the daemon logging surface, nothing else.
 
-    macOS system updates can prune ``/Library/Logs/asiai`` (observed with the
+    macOS system updates can prune ``/usr/local/var/log/asiai`` (observed with the
     sealed-system-volume post-update migration). launchd then cannot open the
     daemons' ``Standard*Path`` (created with the JOB's uid, which cannot write
     in the root-owned dir) and every respawn dies with ``EX_CONFIG`` — silently.
@@ -864,14 +864,19 @@ def _bootstrap_logs_only(*, dry_run: bool) -> int:
     caller must not read success.
     """
     try:
-        if not Path(bootstrap.LOG_DIR).is_dir():
-            bootstrap.ensure_log_dir(dry_run=dry_run)
-        else:
-            # I0 on the existing dir BEFORE any privileged leaf write: the
-            # chain check is the primary barrier that guarantees only root
-            # could have planted entries under LOG_DIR (ensure_log_dir does
-            # this itself on the creation path).
-            bootstrap.assert_chain_locked(bootstrap.LOG_DIR)
+        # The current dir, plus any legacy dir an installed (not yet reinstalled) daemon
+        # still logs to.
+        dirs = {bootstrap.LOG_DIR} | {
+            str(p.parent) for p, _ in bootstrap.installed_daemon_log_specs()
+        }
+        for d in sorted(dirs):
+            if not Path(d).is_dir():
+                bootstrap.ensure_log_dir(dry_run=dry_run, path=d)
+            else:
+                # I0 on the existing dir BEFORE any privileged leaf write: the
+                # chain check is the primary barrier that guarantees only root
+                # could have planted entries under it.
+                bootstrap.assert_chain_locked(d)
         report = bootstrap.ensure_daemon_log_files(dry_run=dry_run)
     except bootstrap.BootstrapError as e:
         print(f"\n{e}", file=sys.stderr)
@@ -969,12 +974,14 @@ def _bootstrap_verify() -> int:
     # bootstrapped dev machine or CI runner must not fail this check.
     logs_ok = True
     specs = bootstrap.installed_daemon_log_specs()
-    if not Path(bootstrap.LOG_DIR).is_dir():
+    missing_dirs = sorted({str(p.parent) for p, _ in specs if not p.parent.is_dir()})
+    if missing_dirs or not Path(bootstrap.LOG_DIR).is_dir():
         if specs:
             logs_ok = False
             print(
-                f"log dir MISSING: {bootstrap.LOG_DIR} — installed daemons cannot respawn "
-                "(EX_CONFIG). Run `aisctl bootstrap --logs-only`.",
+                f"log dir MISSING: {', '.join(missing_dirs) or bootstrap.LOG_DIR} — "
+                "installed daemons cannot respawn (EX_CONFIG). "
+                "Run `aisctl bootstrap --logs-only`.",
                 file=sys.stderr,
             )
         else:

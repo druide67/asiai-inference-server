@@ -616,8 +616,8 @@ def test_plist_refuses_unknown_username(helper):
 def test_plist_forces_standard_paths_under_log_dir(helper):
     mod, _ = helper
     plist = _plist(mod, label="com.asiai.aux-1")
-    assert plist["StandardOutPath"] == "/Library/Logs/asiai/com.asiai.aux-1.out"
-    assert plist["StandardErrorPath"] == "/Library/Logs/asiai/com.asiai.aux-1.err"
+    assert plist["StandardOutPath"] == "/usr/local/var/log/asiai/com.asiai.aux-1.out"
+    assert plist["StandardErrorPath"] == "/usr/local/var/log/asiai/com.asiai.aux-1.err"
 
 
 def test_plist_forces_home_and_path(helper):

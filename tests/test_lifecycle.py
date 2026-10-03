@@ -437,7 +437,8 @@ def test_install_dry_run_does_not_require_binary_present() -> None:
 def test_install_invokes_helper_install_daemon() -> None:
     """Install routes through the helper (generate-don't-validate): it no longer writes the
     plist or mkdir's a user log dir — the helper generates the plist + creates the root-owned
-    /Library/Logs/asiai leaves + bootstraps (which starts it), so no separate start() either."""
+    /usr/local/var/log/asiai leaves + bootstraps (which starts it), so no separate start()
+    either."""
     m = load_manifest("ollama")
     with (
         patch("ais_core.manifest.BinarySpec.resolve", return_value="/opt/homebrew/bin/ollama"),
